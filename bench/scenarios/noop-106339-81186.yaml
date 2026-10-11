@@ -1,0 +1,42 @@
+id: noop-106339-81186
+title: No-op full-context turns back off then pause
+cites:
+- https://github.com/openclaw/openclaw/issues/106339
+- https://github.com/openclaw/openclaw/issues/81186
+settings: {}
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: every
+      every: 1h
+timeline:
+- t: 62000
+  event: human
+- t: 63000
+  event: human
+model_policy:
+  default:
+  - outcome: no_change
+    notify: false
+    summary: No change.
+    raw: Routine status with no useful news.
+duration: 65000
+expectations:
+  required_fires: []
+  forbidden_deliveries: []
+  noop_pause:
+  - task
+  cards: 1
+  bars:
+    task:
+      model_wakes: 6
+      deliveries: 0
+      status: paused
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.
+baseline_interval_s: 3600

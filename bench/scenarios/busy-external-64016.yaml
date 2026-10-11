@@ -1,0 +1,60 @@
+id: busy-external-64016
+title: External event and scheduled wake wait for the busy session
+cites:
+- https://github.com/openclaw/openclaw/issues/64016
+settings: {}
+arms:
+- ref: scheduled
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+- ref: external
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: subagent_done
+timeline:
+- t: 0
+  event: busy
+  'on': true
+- t: 300
+  event: external_event
+- t: 900
+  event: busy
+  'on': false
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 1700
+expectations:
+  required_fires:
+  - wake: scheduled
+    window:
+    - 900
+    - 1530
+  - wake: external
+    window:
+    - 900
+    - 1530
+  forbidden_deliveries:
+  - window:
+    - 0
+    - 899
+  bars:
+    scheduled:
+      deliveries: 1
+    external:
+      deliveries: 1
+heartbeat_checklist:
+- ref: scheduled
+  session: owner
+  note: Close the named open loop and report only useful news.
+- ref: external
+  session: owner
+  note: Close the named open loop and report only useful news.

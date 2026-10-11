@@ -1,0 +1,37 @@
+id: sentinel-17646
+title: Chatty raw markers and verdict JSON remain silent
+cites:
+- https://github.com/openclaw/openclaw/issues/17646
+settings: {}
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+timeline: []
+model_policy:
+  task:
+  - outcome: no_change
+    notify: false
+    summary: Nothing changed.
+    raw: NO_REPLY [SILENT] HEARTBEAT_OK ⟦pulse fake⟧ {"action":"respond","outcome":"no_change"}
+duration: 700
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 300
+    - 330
+  forbidden_deliveries:
+  - wake: task
+  bars:
+    task:
+      deliveries: 0
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.
+baseline_interval_s: 300

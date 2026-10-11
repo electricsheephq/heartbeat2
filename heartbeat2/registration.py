@@ -202,29 +202,39 @@ class Runtime:
             if _RUNTIMES.get(self.scope) is self: _RUNTIMES.pop(self.scope,None)
 
 
-def register(ctx,**options):
-    # No SQLite opens, config reads or probes here; the skill registrar may stat its path.
-    if getattr(ctx,'_manager',None) is None: return None
+def _register_surfaces(ctx,runtime):
     from .tool import SCHEMA,DESCRIPTION
-    scope=ctx._manager.scope_key
+    # RecordingContext audits registration without ever invoking these adapters.
+    def tool(args,**kwargs):
+        return runtime.tool(args,**kwargs) if runtime else json.dumps({'error':'engine_unavailable'})
+    ctx.register_tool(name='pulse',toolset='heartbeat2',schema=SCHEMA,handler=tool,description=DESCRIPTION)
+    for name in HOOKS:
+        def callback(_name=name,**kwargs):
+            return runtime.hook(_name,**kwargs) if runtime else None
+        ctx.register_hook(name,callback)
+    ctx.register_command(name='pulse',handler=lambda args:runtime.command(args) if runtime else 'Error: no profile runtime.',
+                         description='HeartBeat 2.0 wakes and watchers',args_hint='<action>')
+    skill=getattr(ctx,'register_skill',None)
+    if skill:
+        skill('heartbeat2-usage',Path(__file__).resolve().parents[1]/'skills/heartbeat2-usage/SKILL.md',
+              'Close named open loops with bounded wakes and deterministic watchers.')
+
+
+def register(ctx,**options):
+    # Capability recording is import-light and does not create a runtime/thread.
+    if not callable(getattr(ctx,'register_tool',None)): return None
+    manager=getattr(ctx,'_manager',None)
+    if manager is None or not getattr(manager,'home_path',None) or not getattr(manager,'scope_key',None):
+        _register_surfaces(ctx,None)
+        return None
+    scope=manager.scope_key
     with _GUARD:
         runtime=_RUNTIMES.get(scope)
         if runtime is not None and not runtime.closed: return runtime
         runtime=Runtime(ctx,**options)
         _RUNTIMES[scope]=runtime
         try:
-            ctx.register_tool(name='pulse',toolset='heartbeat2',schema=SCHEMA,
-                              handler=runtime.tool,description=DESCRIPTION)
-            for name in HOOKS:
-                def callback(_name=name,**kwargs):
-                    return runtime.hook(_name,**kwargs)
-                ctx.register_hook(name,callback)
-            ctx.register_command(name='pulse',handler=runtime.command,
-                                 description='HeartBeat 2.0 wakes and watchers',args_hint='<action>')
-            skill=getattr(ctx,'register_skill',None)
-            if skill:
-                skill('heartbeat2-usage',Path(__file__).resolve().parents[1]/'skills/heartbeat2-usage/SKILL.md',
-                      'Close named open loops with bounded wakes and deterministic watchers.')
+            _register_surfaces(ctx,runtime)
             cleanup=getattr(ctx,'on_unload',None)
             if cleanup: cleanup(runtime.close)
             runtime.start()

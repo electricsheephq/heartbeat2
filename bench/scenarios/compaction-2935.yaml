@@ -1,0 +1,54 @@
+id: compaction-2935
+title: Compaction before and inside a scheduled turn
+cites:
+- https://github.com/openclaw/openclaw/issues/2935
+settings: {}
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 10m
+- ref: obsolete
+  args:
+    note: A follow-up that the owner resets before it is due.
+    trigger:
+      kind: at
+      at: in 20m
+timeline:
+- t: 300
+  event: compact
+- t: 900
+  event: new
+model_policy:
+  task:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+    compact: true
+duration: 1200
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 600
+    - 630
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+    obsolete:
+      deliveries: 0
+      model_wakes: 0
+      status: orphaned
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.
+- ref: obsolete
+  session: owner
+  note: Follow up unless conversation reset.

@@ -37,6 +37,10 @@ def fail_open(fn):
     return call
 
 
+def pulse_command(text):
+    return isinstance(text,str) and bool(re.match(r'^/pulse(?:@[^\s]+)?(?:\s|$)',text.strip(),re.I))
+
+
 def delegated_child(platform=''):
     if platform=='subagent': return True
     try:
@@ -136,7 +140,7 @@ class Intake:
 
     @fail_open
     def pre_gateway_dispatch(self,event=None,gateway=None,**kwargs):
-        if event is None or getattr(event,'internal',False): return None
+        if event is None or getattr(event,'internal',False) or pulse_command(getattr(event,'text','')): return None
         source=getattr(event,'source',None)
         platform=getattr(getattr(source,'platform',None),'value','')
         chat_id=str(getattr(source,'chat_id','') or '')
@@ -160,14 +164,14 @@ class Intake:
     def post_gateway_admission(self,session_key='',platform='',source=None,message_id='',text='',**kwargs):
         self.engine.refresh()
         if not isinstance(source,dict): return None
-        if kwargs.get('internal'): return None
+        if kwargs.get('internal') or pulse_command(text): return None
         identity=f'{session_key}:{message_id}' if message_id else None
         self.human(session_key,platform,source,identity)
         return None
 
     @fail_open
-    def pre_command(self,surface='',session_key='',platform='',**kwargs):
-        if surface=='gateway': self.human(session_key,platform)
+    def pre_command(self,surface='',session_key='',platform='',command='',**kwargs):
+        if surface=='gateway' and str(command).lstrip('/').casefold()!='pulse': self.human(session_key,platform)
         return None
 
     @fail_open
@@ -244,7 +248,7 @@ class Intake:
             from .tool import session_env
             mid=kwargs.get('message_id') or session_env('HERMES_SESSION_MESSAGE_ID')
             dedupe=f'{key}:{mid}' if mid else f'{key}:turn:{session_id}:{turn_id}' if turn_id else None
-            if not kwargs.get('internal'):
+            if not kwargs.get('internal') and not pulse_command(user_message):
                 self.human(key,platform,dedupe=dedupe)
             lines=[]
             last_tick=s.get_meta('last_tick_at')
@@ -264,7 +268,7 @@ class Intake:
             for w in s.list_wakes(key):
                 card=s.get_meta('card:'+w.id)
                 if card:
-                    lines.append(f'{w.title or "A wake"} paused ({card}): keep / slow / stop / convert via /pulse.')
+                    lines.append(f'{w.title or "A wake"} ({w.id}) paused ({card}): keep / slow / stop via /pulse; convert with /pulse watch {w.id}.')
                     s.set_meta('card:'+w.id,'')
             limits={f.name:getattr(e.policy,f.name) for f in fields(e.policy) if f.name not in {'clock','profile_timezone'}}
             fingerprint=hashlib.sha256(json.dumps(limits,sort_keys=True).encode()).hexdigest()

@@ -354,9 +354,9 @@ def test_I17_six_silent_runs_pause_one_card(engine):
     assert intervals[:4] == [3600,3600,7200,14400]
     assert e.store.get_wake(w.id).status_reason == 'governor:noop'
     card = e.intake.pre_llm_call(session_id='sid', user_message='hello')
-    assert 'keep / slow / stop / convert' in card['context']
+    assert '/pulse watch' in card['context']
     again = e.intake.pre_llm_call(session_id='sid', user_message='again')
-    assert again is None or 'keep / slow / stop / convert' not in again.get('context','')
+    assert again is None or '/pulse watch' not in again.get('context','')
     assert len(e.ctx.calls) == 6
 
 

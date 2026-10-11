@@ -1,0 +1,34 @@
+id: uptime-59710
+title: A deadline remains armed beyond twenty hours
+cites:
+- https://github.com/openclaw/openclaw/issues/59710
+settings: {}
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 21h
+timeline: []
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 80000
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 75600
+    - 75630
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 1
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.

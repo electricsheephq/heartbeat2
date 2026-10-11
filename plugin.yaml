@@ -136,7 +136,7 @@ config_schema:
     type: int
     default: 6
     label: "Noop pause after"
-    description: "Auto-pause + one keep/slow/stop/convert card"
+    description: "Auto-pause + one keep/slow/stop/watch card"
   ignored_pause_after:
     type: int
     default: 3

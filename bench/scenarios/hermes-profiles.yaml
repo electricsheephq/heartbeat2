@@ -1,0 +1,63 @@
+id: hermes-profiles
+title: Same session key in two profile homes has isolated bounds
+cites:
+- 'Hermes: two profile managers coexist in one gateway process'
+settings: {}
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+- ref: other_task
+  session: other
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+timeline: []
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 2000
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 300
+    - 330
+  - wake: other_task
+    window:
+    - 1800
+    - 1830
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 1
+    other_task:
+      deliveries: 1
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.
+- ref: other_task
+  session: other
+  note: Close the named open loop and report only useful news.
+sessions:
+- name: owner
+  profile: a
+  chat_id: shared
+- name: other
+  profile: b
+  chat_id: shared
+profile_settings:
+  a:
+    max_model_wakes_per_day: 1
+  b:
+    quiet_hours: 12:00-12:30
+baseline_interval_s: 300

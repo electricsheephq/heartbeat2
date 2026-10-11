@@ -39,6 +39,7 @@ jobs:
     env:
       HERMES_HOME: ${{ github.workspace }}/hermes-home
       HERMES_DISABLE_LAZY_INSTALLS: '1'
+      HEARTBEAT2_REQUIRE_HERMES: '1'
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONPATH: ${{ github.workspace }}/hermes
     steps:

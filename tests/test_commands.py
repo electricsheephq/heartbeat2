@@ -74,9 +74,10 @@ def test_user_add_proposal_approval_and_governor_answers(runtime):
     w = arm(e, 'every', status='proposed')
     assert 'active' in commands.handle(f'ok {w.id}',runtime)
     assert e.store.get_wake(w.id).status == 'active'
-    commands.handle(f'pause {w.id}',runtime)
+    e.store.cas_wake(w.id,'active',status='paused',status_reason='governor:noop')
     assert 'active' in commands.handle(f'keep {w.id}',runtime)
     old = e.store.get_wake(w.id).eff_interval_s
+    e.store.cas_wake(w.id,'active',status='paused',status_reason='governor:noop')
     assert 'active' in commands.handle(f'slow {w.id}',runtime)
     assert e.store.get_wake(w.id).eff_interval_s > old
     assert 'probe' in commands.handle(f'watch {w.id}',runtime).lower()

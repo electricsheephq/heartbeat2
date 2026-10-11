@@ -1,0 +1,46 @@
+id: resend-85743
+title: Failed-send budget survives several restarts
+cites:
+- https://github.com/openclaw/openclaw/issues/85743
+settings:
+  error_pause_after: 1
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+timeline:
+- t: 0
+  event: injector
+  mode: return_false
+- t: 330
+  event: restart
+- t: 390
+  event: restart
+- t: 900
+  event: restart
+- t: 2000
+  event: injector
+  mode: ok
+model_policy:
+  default:
+  - outcome: progress
+    notify: true
+    summary: Still waiting.
+duration: 2100
+expectations:
+  required_fires: []
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 0
+      model_wakes: 0
+      status: paused
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.
+baseline_interval_s: 300

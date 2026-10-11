@@ -1,0 +1,59 @@
+id: destination-24638-25871
+title: Two chats retain the destination that armed each wake
+cites:
+- https://github.com/openclaw/openclaw/issues/24638
+- https://github.com/openclaw/openclaw/issues/25871
+settings: {}
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+- ref: other_task
+  session: other
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+timeline:
+- t: 240
+  event: human
+  session: other
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 700
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 300
+    - 330
+  - wake: other_task
+    window:
+    - 300
+    - 330
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 1
+    other_task:
+      deliveries: 1
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.
+- ref: other_task
+  session: other
+  note: Close the named open loop and report only useful news.
+sessions:
+- name: owner
+- name: other
+  platform: discord
+baseline_interval_s: 300

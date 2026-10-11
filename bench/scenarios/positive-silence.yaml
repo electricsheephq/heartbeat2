@@ -1,0 +1,37 @@
+id: positive-silence
+title: Exactly one silence check-in across five days and delayed/restarted delivery
+cites:
+- 'Positive: check-in dedupe survives five days and restart'
+settings:
+  owner_silent_checkin: true
+arms: []
+timeline:
+- t: 0
+  event: injector
+  mode: delay(120)
+- t: 86460
+  event: restart
+- t: 86475
+  event: injector
+  mode: ok
+model_policy:
+  checkin:
+  - outcome: needs_attention
+    notify: true
+    summary: One useful check-in; /pulse off stops checks.
+duration: 432000
+expectations:
+  required_fires:
+  - wake: checkin
+    window:
+    - 87000
+    - 87030
+  forbidden_deliveries: []
+  checkin: true
+  bars:
+    checkin:
+      deliveries: 1
+heartbeat_checklist:
+- ref: checkin
+  session: owner
+  note: Offer one useful check-in.

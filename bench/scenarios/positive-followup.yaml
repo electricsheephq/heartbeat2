@@ -1,0 +1,38 @@
+id: positive-followup
+title: User follow-up survives dropped acceptance and restart
+cites:
+- 'Positive: owner-created follow-up in the original DM'
+settings: {}
+arms:
+- ref: task
+  command: add in 10m Follow up on the report
+timeline:
+- t: 0
+  event: injector
+  mode: drop
+- t: 660
+  event: restart
+- t: 690
+  event: injector
+  mode: ok
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 1500
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 1200
+    - 1230
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 1
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: add in 10m Follow up on the report
+baseline_interval_s: 600

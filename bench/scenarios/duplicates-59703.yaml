@@ -1,0 +1,49 @@
+id: duplicates-59703
+title: Two pollers, never-start, delayed stale acceptance and repeated restart
+cites:
+- https://github.com/openclaw/openclaw/issues/59703
+settings: {}
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+timeline:
+- t: 0
+  event: second_poller
+- t: 0
+  event: injector
+  mode: never_start
+- t: 360
+  event: restart
+- t: 360
+  event: injector
+  mode: delay(650)
+- t: 960
+  event: restart
+- t: 1080
+  event: injector
+  mode: ok
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 1900
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 1500
+    - 1530
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 1
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.

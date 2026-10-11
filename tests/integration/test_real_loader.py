@@ -1,5 +1,7 @@
 """Real Hermes loader + fake gateway/session. No model or socket operations."""
 import json
+import importlib
+import os
 import shutil
 import socket
 import sys
@@ -11,20 +13,28 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _load_hermes():
+    try: return importlib.import_module('hermes_cli.plugins')
+    except ImportError:
+        if os.environ.get('HEARTBEAT2_REQUIRE_HERMES')=='1':
+            pytest.fail('HEARTBEAT2_REQUIRE_HERMES=1 but Hermes is not importable')
+        pytest.skip('Hermes is not importable in this venv')
+
+
 def test_real_loader_worker_registration_and_same_session_silence(tmp_path, monkeypatch, clock):
     home = tmp_path/'home'
     home.mkdir()
     monkeypatch.setenv('HERMES_HOME',str(home))
     monkeypatch.setenv('HERMES_DISABLE_LAZY_INSTALLS','1')
-    pytest.importorskip('hermes_cli.plugins', reason='Hermes is not importable in this venv')
+    _load_hermes()
     from hermes_cli.plugins import PluginManager, PluginContext
     from hermes_cli.plugins_manifest import parse_manifest_file
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     from gateway.session_context import set_session_vars, clear_session_vars
 
     plugin = home/'plugins/heartbeat2'
-    shutil.copytree(ROOT,plugin,ignore=shutil.ignore_patterns('.git','.pytest_cache','__pycache__'))
-    (home/'config.yaml').write_text('plugins:\n  entries:\n    heartbeat2:\n      enabled: true\n      allow_gateway_injection: true\n      settings:\n        quiet_hours: ""\n        timezone: UTC\n')
+    shutil.copytree(ROOT,plugin,ignore=shutil.ignore_patterns('.git','.venv','.pytest_cache','__pycache__'))
+    (home/'config.yaml').write_text('plugins:\n  entries:\n    heartbeat2:\n      enabled: true\n      settings:\n        quiet_hours: ""\n        timezone: UTC\n')
     seen = []
     register_tool = PluginContext.register_tool
     def tracked(self,*args,**kwargs):
@@ -45,7 +55,8 @@ def test_real_loader_worker_registration_and_same_session_silence(tmp_path, monk
         assert 'pulse' in loaded.tools_registered
         assert 'pulse' in loaded.commands_registered
         registration = sys.modules[loaded.module.__name__+'.heartbeat2.registration']
-        assert set(registration.HOOKS) <= set(loaded.hooks_registered)
+        assert set(registration.HOOKS) == set(loaded.hooks_registered) == set(manifest.provides_hooks)
+        assert set(manifest.provides_tools) == set(loaded.tools_registered)
         if hasattr(PluginContext,'register_skill'):
             assert any(entry['bare_name']=='heartbeat2-usage' for entry in manager._plugin_skills.values())
         runtime = registration._RUNTIMES[manager.scope_key]
@@ -64,6 +75,17 @@ def test_real_loader_worker_registration_and_same_session_silence(tmp_path, monk
         engine.paused = lambda: False
         engine.compression_tip = lambda sid: sid
         engine.jitter = lambda: 0
+        # First control-plane command in a new DM, before any admission/human hook.
+        fresh_key='agent:telegram:dm:fresh'
+        tokens=set_session_vars(platform='telegram',chat_id='fresh',chat_type='dm',session_key=fresh_key,session_id='fresh-sid')
+        try:
+            manager.invoke_hook('pre_command',surface='gateway',command='pulse',session_key=fresh_key,platform='telegram')
+            status=manager._plugin_commands['pulse']['handler']('status')
+            assert 'plugins:\n  entries:\n    heartbeat2:\n      allow_gateway_injection: true' in status
+            assert engine.store.get_session(fresh_key).last_human_at is None
+            assert 'injection_disabled' in manager._plugin_commands['pulse']['handler']('add in 1m Verify consent')
+        finally: clear_session_vars(tokens)
+        (home/'config.yaml').write_text('plugins:\n  entries:\n    heartbeat2:\n      enabled: true\n      allow_gateway_injection: true\n      settings:\n        quiet_hours: ""\n        timezone: UTC\n')
         key = 'agent:telegram:dm:fixture'
         manager.invoke_hook('post_gateway_admission',session_key=key,platform='telegram',
                             source={'chat_type':'dm','chat_id':'fixture'},session_id='sid',text='Follow up')

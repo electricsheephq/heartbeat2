@@ -51,6 +51,7 @@ class Poller:
         self.process_start=True
         self._lock_file=None
         self.refresh_policy=None
+        self._probing=False
         self.restart=lambda: None
         self.signal=lambda: None
         self.needs_restart=self._needs_restart
@@ -113,12 +114,9 @@ class Poller:
             for session in s.list_sessions() if self.process_start else []:
                 if session.busy_since is not None:
                     s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
-            for w in s.list_wakes(status='active') if self.process_start else []:
-                if w.kind in RECURRING_KINDS and w.next_due_at is not None:
-                    # An overdue interval becomes one immediate tick, then the
-                    # next schedule is anchored at now, never the old cadence.
-                    due=min(w.next_due_at,self.clock.now())
-                    s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due)
+            # Persisted future deadlines remain future. time_due() coalesces
+            # genuinely overdue intervals at the next tick without changing them
+            # during process admission.
             s.set_meta('epoch',self.epoch)
             s.set_meta('poller_pid',str(os.getpid()))
             s.set_meta('poller_started_at',str(self.clock.now()))
@@ -187,21 +185,26 @@ class Poller:
             self.refresh()
             if not self.acquire(): return
             s,now=self.store,self.clock.now()
+            self._tick_started_wall=now
             with s.atomic():
                 previous=float(s.get_meta('last_tick_at') or now)
                 s.set_meta('last_tick_at',str(now))
                 s.set_meta('last_tick_monotonic',str(self.clock.monotonic()))
                 if now-previous>15:
                     self.log.info('heartbeat2 wall gap %.1fs',now-previous)
-                    for session in s.list_sessions():
-                        self.notice(session.session_key,'Some wakes were late / scheduler was stalled.')
+                    # A clock gap alone is not proof that a wake was late.
                 if not self.policy.enabled or self.paused(): return
                 governor.settle_ignored(self)
                 self.acks()
                 from .commands import resume_timed
                 resume_timed(self)
                 self.events()
-            self.probes()
+            self._probing=True
+            try: self.probes()
+            finally:
+                self._probing=False
+                s.set_meta('last_tick_at',str(self.clock.now()))
+                s.set_meta('last_tick_monotonic',str(self.clock.monotonic()))
             with s.atomic():
                 self.times()
                 self.silence()
@@ -301,6 +304,9 @@ class Poller:
         if result.get('error'):
             governor.error(self,w)
             return
+        if w.error_streak:
+            s.cas_wake(w.id,'active',expected_version=w.version,error_streak=0)
+            w=s.get_wake(w.id)
         if result.get('fire'):
             identity=str(result.get('identity') or json.dumps(result.get('state',result.get('message','')),sort_keys=True))
             digest=hashlib.sha1(identity.encode()).hexdigest()
@@ -347,6 +353,8 @@ class Poller:
                     if not (w.kind in RECURRING_KINDS and due.state=='pending' and s.list_occurrences(w.id,state='pending')):
                         s.add_occurrence(w.id,due.dedupe_key,state=due.state)
                     s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due.next_due_at)
+                    if due.state=='pending' and getattr(self,'_tick_started_wall',now)-float(due.dedupe_key[2:])>15:
+                        self.notice(w.session_key,'Some wakes were late / scheduler was stalled.')
                     if due.state=='missed':
                         s.cas_wake(w.id,'active',status='done',status_reason='missed')
                         self.notice(w.session_key,'A wake was too late after restart and was missed.')
@@ -470,6 +478,7 @@ class Poller:
             else: s.refund(w.id,o.dedupe_key,attempt=o.attempt,error='inject_failed')
 
     def status(self):
+        if self._probing: return {'state':'alive','reason':'checking probes'}
         runtime=getattr(self,'runtime_status',None)
         if runtime:
             status=runtime()

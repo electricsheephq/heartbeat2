@@ -1,0 +1,42 @@
+id: restart-78187
+title: False injection then restart on the same database
+cites:
+- https://github.com/openclaw/openclaw/issues/78187
+settings: {}
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 10m
+timeline:
+- t: 0
+  event: injector
+  mode: return_false
+- t: 615
+  event: restart
+- t: 645
+  event: injector
+  mode: ok
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 1500
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 645
+    - 720
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 1
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.

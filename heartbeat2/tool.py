@@ -177,6 +177,8 @@ class Tool:
             raise ValueError('unknown trigger parameter')
         kind=trigger.get('kind',w.kind)
         updates.update(kind=kind,trigger_json=trigger)
+        if kind!=w.kind or any(trigger.get(k)!=w.trigger_json.get(k) for k in ('path','url','command','pattern','pid','cwd','fire_on')):
+            updates['probe_state_json']=None
         if 'after' in trigger: parse_duration(trigger['after'])
         if kind in {'every','self'}:
             every=trigger.get('every')

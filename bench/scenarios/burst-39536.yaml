@@ -1,0 +1,85 @@
+id: burst-39536
+title: Four simultaneous tasks are spaced per conversation
+cites:
+- https://github.com/openclaw/openclaw/issues/39536
+settings:
+  max_unanswered: 10
+  max_messages_per_day: 10
+arms:
+- ref: task0
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+- ref: task1
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+- ref: task2
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+- ref: task3
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 5m
+timeline: []
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 2300
+expectations:
+  required_fires:
+  - wake: task0
+    window:
+    - 300
+    - 2130
+  - wake: task1
+    window:
+    - 300
+    - 2130
+  - wake: task2
+    window:
+    - 300
+    - 2130
+  - wake: task3
+    window:
+    - 300
+    - 2130
+  forbidden_deliveries: []
+  bars:
+    task0:
+      deliveries: 1
+    task1:
+      deliveries: 1
+    task2:
+      deliveries: 1
+    task3:
+      deliveries: 1
+heartbeat_checklist:
+- ref: task0
+  session: owner
+  note: Close the named open loop and report only useful news.
+- ref: task1
+  session: owner
+  note: Close the named open loop and report only useful news.
+- ref: task2
+  session: owner
+  note: Close the named open loop and report only useful news.
+- ref: task3
+  session: owner
+  note: Close the named open loop and report only useful news.
+baseline_interval_s: 300

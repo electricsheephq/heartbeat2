@@ -1,0 +1,39 @@
+id: positive-governor
+title: Six no-ops pause with exactly one owner card and watch answer
+cites:
+- 'Positive: governor pauses and exposes the decided watch conversion answer'
+settings: {}
+arms:
+- ref: task
+  command: add every 15m Check for useful news
+timeline:
+- t: 15400
+  event: human
+- t: 15500
+  event: human
+- t: 15550
+  event: command
+  text: watch $task
+model_policy:
+  default:
+  - outcome: no_change
+    notify: false
+    summary: Nothing new.
+    raw: Chatty but useless.
+duration: 16000
+expectations:
+  required_fires: []
+  forbidden_deliveries: []
+  noop_pause:
+  - task
+  cards: 1
+  bars:
+    task:
+      model_wakes: 6
+      deliveries: 0
+      status: paused
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: add every 15m Check for useful news
+baseline_interval_s: 900

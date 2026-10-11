@@ -1,0 +1,46 @@
+id: positive-babysit
+title: Babysit observes a no-op then ends on success
+cites:
+- 'Positive: bounded babysit closes a named open loop'
+settings: {}
+arms:
+- ref: task
+  args:
+    note: Watch this active job and report success.
+    trigger:
+      kind: every
+      every: 15m
+    babysit: true
+    until:
+      expires: in 3h
+timeline: []
+model_policy:
+  task:
+  - outcome: no_change
+    notify: false
+    summary: Not done.
+  - outcome: done
+    notify: true
+    summary: The job succeeded.
+duration: 3600
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 900
+    - 930
+  - wake: task
+    window:
+    - 1800
+    - 1830
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 1
+      model_wakes: 2
+      status: done
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Watch this active job and report success.
+baseline_interval_s: 900

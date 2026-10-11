@@ -1,0 +1,54 @@
+id: positive-ci
+title: Local file CI probe fires once on appended success
+cites:
+- 'Positive: deterministic CI change probe without any network'
+settings: {}
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: file
+      path: $HOME/build.log
+      pattern: PASS
+      check_every: 1m
+timeline:
+- t: 0
+  event: file
+  text: 'pending
+
+    '
+- t: 600
+  event: file
+  text: 'still pending
+
+    '
+- t: 900
+  event: file
+  text: 'PASS build
+
+    '
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 1800
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 900
+    - 960
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.
+baseline_interval_s: 300

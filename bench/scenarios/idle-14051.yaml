@@ -1,0 +1,30 @@
+id: idle-14051
+title: Idle-owner check-in is one per silence episode
+cites:
+- https://github.com/openclaw/openclaw/issues/14051
+settings:
+  owner_silent_checkin: true
+arms: []
+timeline: []
+model_policy:
+  checkin:
+  - outcome: needs_attention
+    notify: true
+    summary: One useful check-in; /pulse off stops checks.
+duration: 432000
+expectations:
+  required_fires:
+  - wake: checkin
+    window:
+    - 86400
+    - 86430
+  forbidden_deliveries: []
+  checkin: true
+  bars:
+    checkin:
+      deliveries: 1
+      model_wakes: 1
+heartbeat_checklist:
+- ref: checkin
+  session: owner
+  note: Offer one useful check-in.

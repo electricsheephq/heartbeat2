@@ -11,12 +11,17 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
-import tempfile
+import selectors
+import signal
+import time
 import urllib.parse
 import urllib.request
 
 MAX_BODY = 256 * 1024
 MAX_STATE = 16 * 1024
+FILE_CHECK_BUDGET = 4 * 1024 * 1024
+URL_DEADLINE_S = 10.0
+COMMAND_DEADLINE_S = 30.0
 # Reject output, code/config/helper execution, browser launches and common writes.
 UNSAFE_OPTIONS = frozenset({
     '--output', '--output-file', '--output-directory', '--exec', '--exec-path',
@@ -44,7 +49,7 @@ def command_allowed(argv, allowlist):
         option=token.split('=',1)[0]
         if token in UNSAFE_VERBS or (option.startswith('--') and any(flag.startswith(option) for flag in UNSAFE_OPTIONS)):
             return False
-        if token in {'-w','-p'}: return False
+        if token in {'-w','-p'} or (argv[0]=='gh' and token.startswith('-') and not token.startswith('--') and any(c in token[1:] for c in 'wp')): return False
         if argv[:2]==['git','ls-remote'] and token.startswith('-u'):
             return False
         if token.startswith(('-o', '-c', '-P')) and not token.startswith('--'):
@@ -71,18 +76,33 @@ def validate_url(url):
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         validate_url(newurl)
+        if hasattr(self, 'deadline'):
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0: raise TimeoutError('URL probe exceeded 10 s total')
+            req.timeout = remaining
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _get_url(url):
     # No ambient proxy credentials, cookie jar, netrc or Authorization handler.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _SafeRedirect())
+    deadline = time.monotonic() + URL_DEADLINE_S
+    redirect = _SafeRedirect()
+    redirect.deadline = deadline
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), redirect)
     request = urllib.request.Request(validate_url(url), method='GET')
-    with opener.open(request, timeout=10) as response:
-        body = response.read(MAX_BODY + 1)
-    if len(body) > MAX_BODY:
-        raise ValueError('URL body exceeds 256 KB')
-    return body
+    with opener.open(request, timeout=URL_DEADLINE_S) as response:
+        body = bytearray()
+        while len(body) <= MAX_BODY:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise TimeoutError('URL probe exceeded 10 s total')
+            sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+            if sock is not None: sock.settimeout(remaining)
+            chunk = response.read1(min(65536, MAX_BODY + 1 - len(body)))
+            if not chunk: break
+            body.extend(chunk)
+            if len(body) > MAX_BODY: raise ValueError('URL body exceeds 256 KB')
+        if time.monotonic() >= deadline: raise TimeoutError('URL probe exceeded 10 s total')
+    return bytes(body)
 
 
 def _hash(value):
@@ -108,9 +128,13 @@ def _file(wake, home):
     if not path.is_absolute():
         if home is None: raise ValueError('relative file path requires profile home')
         path = Path(home) / path
-    if not stat_module.S_ISREG(path.stat().st_mode):
-        raise ValueError('file probe requires a regular file')
-    with os.fdopen(os.open(path,os.O_RDONLY | os.O_NONBLOCK),'rb') as source:
+    try:
+        if not stat_module.S_ISREG(path.stat().st_mode):
+            raise ValueError('file probe requires a regular file')
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return _result(wake, {'absent':True, 'fingerprint':_hash('absent'), 'offset':0, 'size':0}, False, '')
+    with os.fdopen(fd, 'rb') as source:
         stat = os.fstat(source.fileno())
         if not stat_module.S_ISREG(stat.st_mode):
             raise ValueError('file probe requires a regular file')
@@ -120,20 +144,41 @@ def _file(wake, home):
         if not pattern:
             return _result(wake, state, bool(old and old.get('fingerprint') != state['fingerprint']), 'file changed')
         expression = re.compile(pattern)
-        # Existing contents are the baseline, never a new append. Rotation or
-        # observed truncation begins a new stream; complete new lines may fire.
-        if not old:
-            return _result(wake, state, False, '')
+        if not old: return _result(wake, state, False, '')
         offset = int(old.get('offset', old.get('size', 0)))
+        skipping = bool(old.get('skip_to_newline'))
+        skipped = int(old.get('skipped_overlong_lines', 0))
         if old.get('inode') != stat.st_ino or old.get('device') != stat.st_dev or stat.st_size < old.get('size', 0):
-            offset = 0
+            offset, skipping = 0, False
         source.seek(offset)
-        data = source.read(MAX_BODY)
-        end = data.rfind(b'\n') + 1
-        state['offset'] = offset + end
-        lines = data[:end].decode('utf-8', errors='replace').splitlines()
-        matches = [line for line in lines if expression.search(line)]
-        return _result(wake, state, bool(matches), '\n'.join(matches)[:2000])
+        cursor, consumed, buffer, messages, matched = offset, 0, b'', [], False
+        message_size = 0
+        # Catch up within one check, with a 4 MB I/O budget and <=256 KB line buffer.
+        while consumed < FILE_CHECK_BUDGET:
+            chunk = source.read(min(65536, FILE_CHECK_BUDGET-consumed))
+            if not chunk: break
+            consumed += len(chunk); cursor += len(chunk)
+            pieces = chunk.split(b'\n')
+            for index, piece in enumerate(pieces):
+                complete = index < len(pieces)-1
+                if skipping:
+                    if complete: skipping = False
+                    continue
+                if len(buffer) + len(piece) > MAX_BODY:
+                    skipped += 1; buffer = b''; skipping = not complete
+                    continue
+                buffer += piece
+                if complete:
+                    line = buffer.decode('utf-8', errors='replace')
+                    if expression.search(line):
+                        matched = True
+                        if message_size < 2000:
+                            messages.append(line[:2000-message_size]); message_size += len(messages[-1])+1
+                    buffer = b''
+        # Partial normal lines are revisited; overlong lines always advance.
+        state.update(offset=cursor-len(buffer), skip_to_newline=skipping,
+                     skipped_overlong_lines=skipped)
+        return _result(wake, state, matched, '\n'.join(messages))
 
 
 def _process(wake):
@@ -164,6 +209,43 @@ def _url(wake):
     return _result(wake, {'fingerprint':fingerprint}, fire, 'URL matched pattern' if pattern else 'URL changed')
 
 
+def _kill_group(proc):
+    try: os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+    proc.wait()
+
+
+def _run_command(argv, cwd):
+    """Capture while reading; both the pipe and process lifetime have one deadline."""
+    deadline = time.monotonic() + COMMAND_DEADLINE_S
+    env = {**os.environ, 'GIT_OPTIONAL_LOCKS':'0', 'GIT_PAGER':'cat',
+           'GH_PAGER':'cat', 'PAGER':'cat', 'GIT_TERMINAL_PROMPT':'0',
+           'GH_PROMPT_DISABLED':'1', 'GCM_INTERACTIVE':'never'}
+    proc = subprocess.Popen(argv, shell=False, cwd=cwd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=env, start_new_session=True)
+    body = bytearray()
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline-time.monotonic()
+                if remaining <= 0: raise subprocess.TimeoutExpired(argv, COMMAND_DEADLINE_S)
+                if not selector.select(remaining): raise subprocess.TimeoutExpired(argv, COMMAND_DEADLINE_S)
+                chunk = os.read(proc.stdout.fileno(), min(65536, MAX_BODY+1-len(body)))
+                if not chunk: selector.unregister(proc.stdout); break
+                body.extend(chunk)
+                if len(body) > MAX_BODY: raise ValueError('command output exceeds 256 KB')
+        remaining = deadline-time.monotonic()
+        if remaining <= 0: raise subprocess.TimeoutExpired(argv, COMMAND_DEADLINE_S)
+        return proc.wait(timeout=remaining), bytes(body)
+    except BaseException:
+        _kill_group(proc)
+        raise
+    finally:
+        proc.stdout.close()
+
+
 def _command(wake, policy, home):
     trigger, old = wake.trigger_json, _state(wake)
     argv = trigger.get('command')
@@ -175,17 +257,11 @@ def _command(wake, policy, home):
     if home is None: raise ValueError('command probe requires profile home')
     cwd = Path(trigger.get('cwd') or home).expanduser()
     if not cwd.is_absolute(): cwd = Path(home) / cwd
-    with tempfile.TemporaryFile() as output:
-        result = subprocess.run(argv, shell=False, cwd=cwd, timeout=30,
-                                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                                env={**os.environ,'GIT_OPTIONAL_LOCKS':'0','GIT_PAGER':'cat','GH_PAGER':'cat','PAGER':'cat'})
-        output.seek(0)
-        body = output.read(MAX_BODY + 1)
-    if len(body) > MAX_BODY: raise ValueError('command output exceeds 256 KB')
-    success = result.returncode == 0
+    returncode, body = _run_command(argv, cwd)
+    success = returncode == 0
     if mode in {'change','json'} and not success:
         raise ValueError('command failed')
-    state = {'fingerprint':_hash([result.returncode, body.decode('utf-8', errors='replace')])}
+    state = {'fingerprint':_hash([returncode, body.decode('utf-8', errors='replace')])}
     message = body.decode('utf-8', errors='replace')[:2000]
     if mode == 'json':
         contract = json.loads(body)

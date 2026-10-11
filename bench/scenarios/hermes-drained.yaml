@@ -1,0 +1,39 @@
+id: hermes-drained
+title: A mid-turn drained human message is a prompted reply
+cites:
+- 'Hermes: drained human input may skip post_gateway_admission and reach only pre_llm_call'
+settings: {}
+arms:
+- ref: task
+  args:
+    note: Follow up until the owner replies.
+    trigger:
+      kind: at
+      at: in 5m
+    until:
+      owner_replies: true
+timeline: []
+model_policy:
+  task:
+  - outcome: progress
+    notify: false
+    summary: Waiting.
+    drained_human: Any update?
+    raw: Here is the update you requested.
+duration: 1200
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 300
+    - 330
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 0
+      status: cancelled
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Follow up until the owner replies.
+baseline_interval_s: 300

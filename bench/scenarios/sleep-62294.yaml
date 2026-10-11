@@ -1,0 +1,47 @@
+id: sleep-62294
+title: Sleep coalesces overdue recurring slots to one
+cites:
+- https://github.com/openclaw/openclaw/issues/62294
+settings: {}
+arms:
+- ref: task
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: every
+      every: 1h
+timeline:
+- t: 0
+  event: estop
+  'on': true
+- t: 600
+  event: suspend
+  until: 14400
+- t: 14400
+  event: estop
+  'on': false
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 15000
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 14400
+    - 14430
+  forbidden_deliveries:
+  - window:
+    - 0
+    - 14399
+  bars:
+    task:
+      deliveries: 1
+      model_wakes: 1
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Close the named open loop and report only useful news.

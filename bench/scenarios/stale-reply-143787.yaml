@@ -1,0 +1,39 @@
+id: stale-reply-143787
+title: A silent turn cannot resend the previous valuable reply
+cites:
+- https://github.com/openclaw/openclaw/issues/143787
+settings: {}
+arms:
+- ref: task
+  command: add every 15m Check CI
+timeline: []
+model_policy:
+  task:
+  - outcome: progress
+    notify: true
+    summary: CI is running.
+  - outcome: no_change
+    notify: false
+    summary: No new status.
+    raw: CI is running.
+duration: 2000
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 900
+    - 930
+  - wake: task
+    window:
+    - 1800
+    - 1830
+  forbidden_deliveries: []
+  bars:
+    task:
+      deliveries: 1
+      model_wakes: 2
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: add every 15m Check CI
+baseline_interval_s: 900

@@ -4,7 +4,8 @@ from datetime import datetime, timedelta
 import json
 import re
 
-from .model import Wake
+from .model import Wake, Session
+from . import governor
 from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS
 from .schedule import parse_duration, quiet_end, local_day
 from .tool import session_env
@@ -92,10 +93,14 @@ def _add(engine, session, text):
     if match:
         trigger, note = {'kind':'at','at':'in '+match[1]}, match[2]
     else:
-        match = re.fullmatch(r'every (\S+)(?: at (\d{2}:\d{2}))? (.+)', text, re.DOTALL)
+        match = re.fullmatch(r'every (\S+)(?: at (\d{1,2}:\d{2}))? (.+)', text, re.DOTALL)
         if match:
             trigger, note = {'kind':'every','every':match[1]}, match[3]
-            if match[2]: trigger['at'] = match[2]
+            if not match[2] and re.match(r'at \d{1,2}:\d{2}(?:\s|$)',note):
+                raise ValueError('note is required after the anchor')
+            if match[2]:
+                hour,minute=match[2].split(':')
+                trigger['at'] = f'{int(hour):02d}:{minute}'
         else:
             match = re.fullmatch(r'when silent (\S+) (.+)', text, re.DOTALL)
             if not match: raise ValueError('use add in 2h <note>, every 1d at 09:00 <note>, or when silent 24h <note>')
@@ -124,6 +129,12 @@ def handle(raw_args, runtime):
         rest = rest.strip()
         with engine.store.atomic():
             session = engine.store.get_session(key)
+            bound={name:session_env('HERMES_SESSION_'+name.upper()) for name in ('platform','chat_type','chat_id')}
+            if bound['platform'] in MESSAGING_PLATFORMS:
+                engine.store.upsert_session(Session(key,**bound,current_session_id=session_env('HERMES_SESSION_ID')))
+                session=engine.store.get_session(key)
+                engine.store.cas_session(key,{'platform':session.platform,'chat_type':session.chat_type,'chat_id':session.chat_id},**bound)
+                session=engine.store.get_session(key)
             if session is None or session.platform not in MESSAGING_PLATFORMS:
                 return 'Error: /pulse needs a known messaging-gateway session.'
             if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
@@ -193,39 +204,50 @@ def handle(raw_args, runtime):
             for wake in wakes:
                 if action == 'why':
                     return f'{_item(engine,wake)}\nWhy: {wake.reason or "the named task"}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\nFires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}'
-                if wake.status in {'done','cancelled','expired','failed','orphaned'}:
-                    if wid != 'all': raise ValueError('item is terminal')
-                    continue
-                changes, clamps = {}, {}
-                if action in {'resume','keep','slow','ok'}:
-                    if action == 'ok' and wake.status != 'proposed': raise ValueError('ok needs a proposed item')
-                    if action != 'ok' and wake.status == 'proposed': raise ValueError('approve with /pulse ok')
-                    _activation(engine,session,wake)
-                    result = _reschedule(engine,wake)
-                    candidate, clamps = result.wake, result.clamped
-                    changes = {name:getattr(candidate,name) for name in ('next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','expires_at','max_fires','trigger_json')}
-                    changes.update(status='active',status_reason='',noop_streak=0,ignored_streak=0,error_streak=0)
-                    if action == 'slow':
-                        if wake.kind not in {'every','self','cron'}: raise ValueError('slow requires a recurring wake; use watch for a probe')
-                        interval = min((wake.eff_interval_s or candidate.base_interval_s)*2,
-                                       wake.pacing_max_s or engine.policy.noop_max_backoff_hours*3600)
-                        interval = max(interval,candidate.base_interval_s,engine.policy.interval_floor(candidate))
-                        changes.update(base_interval_s=interval,eff_interval_s=interval,next_due_at=engine.clock.now()+interval)
-                        if wake.kind in {'every','self'}:
-                            changes['trigger_json']={**candidate.trigger_json,'every':interval}
-                elif action in {'cancel','stop'}: changes = {'status':'cancelled','status_reason':'command'}
-                else: changes = {'status':'paused','status_reason':'command'}
-                if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,**changes):
-                    raise ValueError('concurrent item change')
-                engine.store.set_meta('resume_after:'+wake.id,str(engine.clock.now()+seconds) if action=='pause' and seconds else '')
-                if changes['status'] in {'paused','cancelled'}: engine.cancel_occurrences(wake.id,changes['status'])
-                engine.store.set_meta('card:'+wake.id,'')
-                lines.append(_item(engine,engine.store.get_wake(wake.id))+_clamps(clamps))
-                if action == 'watch':
-                    lines.append('Paused. Choose a file/process/url/command probe or event, then use pulse update with trigger and bounds. No watcher is guessed.')
+                try:
+                    with engine.store.atomic():
+                        lines.append(_transition(engine,session,wake,action,seconds))
+                except (ValueError,TypeError,KeyError) as exc:
+                    if wid!='all': raise
+                    lines.append(f'{wake.id}: skipped ({exc})')
             engine.signal()
             return '\n'.join(lines) or 'No matching items in this chat.'
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
         return 'Error: '+str(exc)
     except Exception:
         return 'Error: HeartBeat 2.0 is unavailable.'
+
+
+def _transition(engine,session,wake,action,seconds):
+    if wake.status in {'done','cancelled','expired','failed','orphaned'}:
+        raise ValueError('item is terminal')
+    if action in {'keep','slow'}:
+        if wake.status!='paused' or not wake.status_reason.startswith('governor:'):
+            raise ValueError('keep/slow answer a governor card; use /pulse resume')
+        _activation(engine,session,wake)
+        result=governor.owner_answer(engine,wake,action)
+        if not result.get('ok'): raise ValueError(result.get('error','owner answer failed'))
+        return _item(engine,engine.store.get_wake(wake.id))
+    if wake.status=='proposed' and action not in {'ok','cancel','stop'}:
+        raise ValueError('proposed item: approve with /pulse ok or cancel')
+    if action=='pause' and wake.status!='active': raise ValueError('pause needs an active item')
+    if action=='watch' and wake.status not in {'active','paused'}: raise ValueError('watch needs an active or paused item')
+    if action=='resume' and wake.status!='paused': raise ValueError('resume needs a paused item')
+    if action=='ok' and wake.status!='proposed': raise ValueError('ok needs a proposed item')
+    clamps={}
+    if action in {'resume','ok'}:
+        _activation(engine,session,wake)
+        result=_reschedule(engine,wake)
+        candidate,clamps=result.wake,result.clamped
+        changes={name:getattr(candidate,name) for name in ('next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','expires_at','max_fires','trigger_json')}
+        changes.update(status='active',status_reason='')
+    elif action in {'cancel','stop'}: changes={'status':'cancelled','status_reason':'command'}
+    else: changes={'status':'paused','status_reason':'command'}
+    if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,**changes):
+        raise ValueError('concurrent item change')
+    engine.store.set_meta('resume_after:'+wake.id,str(engine.clock.now()+seconds) if action=='pause' and seconds else '')
+    if changes['status'] in {'paused','cancelled'}: engine.cancel_occurrences(wake.id,changes['status'])
+    engine.store.set_meta('card:'+wake.id,'')
+    output=_item(engine,engine.store.get_wake(wake.id))+_clamps(clamps)
+    if action=='watch': output+='\nPaused. Choose a file/process/url/command probe or event, then use pulse update with trigger and bounds. No watcher is guessed.'
+    return output

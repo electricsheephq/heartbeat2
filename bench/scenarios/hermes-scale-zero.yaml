@@ -1,0 +1,52 @@
+id: hermes-scale-zero
+title: Twenty-five-hour suspend coalesces recurring work and misses expired one-shot
+cites:
+- 'Hermes: scale-to-zero suspend means no poller ticks during a long wall gap'
+settings: {}
+arms:
+- ref: recurring
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: every
+      every: 1h
+- ref: too_old
+  session: owner
+  args:
+    note: Close the named open loop and report only useful news.
+    trigger:
+      kind: at
+      at: in 1h
+timeline:
+- t: 60
+  event: suspend
+  until: 90000
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 91000
+expectations:
+  required_fires:
+  - wake: recurring
+    window:
+    - 90000
+    - 90030
+  forbidden_deliveries: []
+  bars:
+    recurring:
+      deliveries: 1
+      model_wakes: 1
+    too_old:
+      deliveries: 0
+      model_wakes: 0
+      status: done
+heartbeat_checklist:
+- ref: recurring
+  session: owner
+  note: Close the named open loop and report only useful news.
+- ref: too_old
+  session: owner
+  note: Close the named open loop and report only useful news.

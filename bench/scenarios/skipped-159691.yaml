@@ -1,0 +1,33 @@
+id: skipped-159691
+title: A quiet-hour skipped recurring occurrence is not replayed
+cites:
+- https://github.com/openclaw/openclaw/issues/159691
+settings:
+  quiet_hours: 12:00-12:30
+arms:
+- ref: task
+  command: add every 15m Check the release
+timeline: []
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Task is complete.
+duration: 3000
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 1800
+    - 1830
+  forbidden_deliveries:
+  - window:
+    - 0
+    - 1799
+  bars:
+    task:
+      deliveries: 1
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: add every 15m Check the release

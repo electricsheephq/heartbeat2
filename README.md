@@ -119,7 +119,7 @@ bound the agent; the `pulse` tool cannot write them. Clamps appear in results.
 | noop_backoff_factor | int | 2 | |
 | noop_max_backoff_hours | int | 24 | |
 | suggest_gate_after | int | 4 | Wake text suggests converting to a probe watcher |
-| noop_pause_after | int | 6 | Auto-pause + one keep/slow/stop/convert card |
+| noop_pause_after | int | 6 | Auto-pause + one keep/slow/stop/watch card |
 | ignored_pause_after | int | 3 | Delivered messages with no engagement before pause |
 | error_pause_after | int | 5 | |
 | engagement_window_hours | int | 6 | A human reply within this window marks a delivered message as engaged |
@@ -172,7 +172,7 @@ The single agent tool `pulse` has actions `create`, `list`, `update`, `pause`,
 | `title`, `note`, `reason` | Name and explain the task; create requires a self-contained note and trigger.kind |
 | `trigger` | `at`, `every` (+ optional anchor `at`), `cron`, `self`, `owner_silent`; `file`, `process`, `url`, `command`; supported events |
 | Probe fields | `path`, optional `pattern`; `pid`; `url`, optional `pattern`; `command` argv array, optional `cwd`, `fire_on` change/success/failure/json; `check_every`, optional `deadline` |
-| Event fields | `event`, optional reaction `emojis`; events: kanban_completed/blocked/worker_exited, subagent_done, api_error, reaction, message_edited |
+| Event fields | selected by `trigger.kind`, optional reaction `emojis`; events: kanban_completed/blocked/worker_exited, subagent_done, api_error, reaction, message_edited |
 | `until` | `expires`, positive `max_fires`, `owner_replies` to cancel on the next human reply |
 | `pacing` | `min`, `max` bounds for recurring/self scheduling |
 | `babysit`, `urgent` | Short human-turn babysit; urgency bypasses quiet only when `quiet_hours_urgent` permits |
@@ -214,12 +214,12 @@ and ends on notify=true or three consecutive no_change results. Silence and
 gates save model calls, not the cost of a qualifying full conversation turn.
 
 Read [SECURITY.md](SECURITY.md) before configuring file, URL or command observers.
-Local/private HTTP targets are allowed; URL timeout is per socket operation,
-not a hard total deadline. Command probes use no shell and a 30-second direct
-child timeout, but trusted programs/configuration can hide side effects or spawn
-surviving children. Temporary command output can grow before the 256 KB result
-bound is checked. State is plaintext, not encrypted; model tools retain their
-ordinary permissions. Payload fences are not a prompt-injection guarantee.
+Local/private HTTP targets are allowed; URL probes use a 10 s total monotonic
+deadline and a streaming 256 KB cap. Command probes have a 30 s total deadline,
+no controlling tty, disabled Git/GH/credential-manager prompts, and bounded
+streaming capture. Timeout or output overflow kills the process group, including
+descendants that stay in that group. Trusted programs/configuration can still
+hide side effects or deliberately detach; the argv guard is not a sandbox.
 
 ## Choosing a mechanism
 
@@ -237,10 +237,11 @@ This is a workflow comparison, not a measured performance or parity claim.
 ## Known issues / proof boundary
 
 - Unreleased. CI is defined here; remote matrix results and live DM delivery are
-  separate gates. U4 benchmarks and their comparison results are not present yet.
+  separate gates. Offline U4 scenarios and the comparison runner are in
+  [bench/README.md](bench/README.md); generated results are simulation evidence.
 - File polling can miss truncate-and-regrow or replacement changes that happen
-  entirely between checks. A single incomplete line larger than 256 KB cannot
-  advance the regex offset until a bounded read finds a newline. Regex evaluation
+  entirely between checks. The reader catches up within a 4 MB per-check budget. Lines over 256 KB are
+  skipped through their newline with advancing offsets and a state counter. Regex evaluation
   is not sandboxed or separately time-limited; use simple trusted patterns.
 - Fingerprints contain hashes; payload/note/scratch/summary/JSON state can contain
   sensitive plaintext. Do not watch credentials or print them from observers.

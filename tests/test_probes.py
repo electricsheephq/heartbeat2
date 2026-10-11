@@ -72,7 +72,7 @@ def test_file_baseline_change_regex_appended_lines_rotation_truncation(tmp_path)
 
 
 def test_file_and_url_errors_are_not_changes(tmp_path, monkeypatch):
-    assert probes.check(wake('file', path=str(tmp_path/'absent'))).get('error')
+    assert not probes.check(wake('file', path=str(tmp_path/'absent'))).get('error')
     monkeypatch.setattr(probes, '_get_url', lambda url: (_ for _ in ()).throw(OSError()), raising=False)
     result = probes.check(wake('url', url='https://example.test'))
     assert result.get('error') and not result['fire'] and 'state' not in result
@@ -96,7 +96,7 @@ def test_url_hash_change_regex_and_size_bound(monkeypatch):
 def test_url_transport_get_timeout_no_proxy_cookie_or_auth(monkeypatch):
     captured = []
     class Response(io.BytesIO):
-        pass
+        def read1(self,n): return self.read(n)
     class Opener:
         def open(self, request, timeout):
             captured.append((request, timeout))
@@ -130,16 +130,15 @@ def test_process_exit_and_pid_reuse_guard(monkeypatch):
 def test_command_modes_json_state_and_cwd(tmp_path, monkeypatch):
     output = [b'one', 0]
     calls = []
-    def run(argv, **kwargs):
-        calls.append((argv, kwargs))
-        kwargs['stdout'].write(output[0])
-        return SimpleNamespace(returncode=output[1])
-    monkeypatch.setattr(subprocess, 'run', run)
+    def run(argv, cwd):
+        calls.append((argv, {'cwd':cwd}))
+        return output[1],output[0]
+    monkeypatch.setattr(probes, '_run_command', run)
     w = wake('command', command=['git','status'], fire_on='change')
     first = probes.check(w, policy=Policy(), home=tmp_path)
     assert first['fire']
     assert not probes.check(replace(w, probe_state_json=first['state']), policy=Policy(), home=tmp_path)['fire']
-    assert calls[0][1]['cwd'] == tmp_path and calls[0][1]['shell'] is False and calls[0][1]['timeout'] == 30
+    assert calls[0][1]['cwd'] == tmp_path
     for mode, code, fire in [('success',0,True),('success',1,False),('failure',1,True),('failure',0,False)]:
         output[1] = code
         assert probes.check(replace(w, trigger_json={**w.trigger_json,'fire_on':mode}), policy=Policy(), home=tmp_path)['fire'] is fire
@@ -203,7 +202,7 @@ def test_url_redirect_scheme_and_credentials_are_checked_before_follow():
 
 
 def test_command_timeout_is_error_without_state(tmp_path,monkeypatch):
-    def timeout(*a,**k): raise subprocess.TimeoutExpired(a[0],k['timeout'])
-    monkeypatch.setattr(subprocess,'run',timeout)
+    def timeout(*a,**k): raise subprocess.TimeoutExpired(a[0],30)
+    monkeypatch.setattr(probes,'_run_command',timeout)
     result=probes.check(wake('command',command=['git','status']),policy=Policy(),home=tmp_path)
     assert result=={'fire':False,'error':'TimeoutExpired'}

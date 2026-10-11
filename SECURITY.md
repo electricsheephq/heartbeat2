@@ -31,21 +31,22 @@ These same disclosure and exception paragraphs appear in README and the manifest
   with an EOF baseline and truncation/rotation handling. Avoid sensitive files.
 - Process probes lazily use psutil and compare PID create-time to avoid reuse.
 - URL probes allow only HTTP/HTTPS (including redirects), reject URL userinfo,
-  disable ambient proxies, use a 10-second socket-operation timeout, and read at
-  most 256 KB plus one overflow-detection byte. Redirects and multiple reads can
-  make total elapsed time exceed 10 seconds. No cookie/auth handler is installed.
-  Private/local addresses are permitted: configure endpoints carefully. No SSRF
-  isolation, host allowlist or DNS-pinning guarantee is claimed.
+  disable ambient proxies, use a 10 s total monotonic deadline (remaining socket
+  timeout on each read and redirect), and read at most 256 KB plus one
+  overflow-detection byte. Local/private HTTP endpoints are allowed; this is
+  not an SSRF isolation boundary.
 - Command prefixes match full argv tokens against `probe_commands`. Empty
-  allowlists disable them. No shell, no stdin, 30-second direct-child timeout;
+  allowlists disable them. No shell, no stdin or controlling tty, 30-second total deadline;
   profile home is the default cwd unless a cwd was recorded. The conservative
   guard rejects shell operators, output/code/config/helper/browser flags and
   common mutating verbs. Pager variables are set to `cat`; optional git locks
   are disabled. This cannot detect hidden effects in binaries, wrappers, Git
   helpers/hooks, executable lookup, inherited environment or remote services.
-  Configure only trusted observers. Timeout does not guarantee descendant
-  termination; subprocess output is staged in a temporary file before a 256 KB
-  result bound is checked. Do not use probes for untrusted executables.
+  Configure only trusted observers. Git/GH/credential-manager prompts are disabled.
+  Capture is bounded while reading to 256 KB plus one overflow-detection byte.
+  Timeout or overflow kills the entire process group, including descendants that
+  remain in it. Deliberately detached processes remain outside that guarantee.
+
 - Command JSON must contain exactly `fire`, `message`, `state`, with boolean
   fire, string message and serializable JSON state. Stored wrapper state is
   ≤16 KB; it commits only on a successful fire. Change/JSON nonzero exits and
