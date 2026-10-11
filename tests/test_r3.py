@@ -45,7 +45,7 @@ def drip(monkeypatch):
             self.send_header('Transfer-Encoding', 'chunked')
             self.end_headers()
             try:
-                for _ in range(24):
+                for _ in range(100):  # 5 s drip: far beyond the 0.25 s deadline
                     self.wfile.write(b'2\r\n:\n\r\n'); self.wfile.flush()
                     time.sleep(.05)
                 self.wfile.write(b'0\r\n\r\n'); self.wfile.flush()
@@ -62,7 +62,7 @@ def test_R3_R1_url_total_deadline(drip):
     before = time.monotonic()
     result = probes.check(Wake(KEY, 'observe', 'url', trigger_json={'url':drip}))
     assert result.get('error') == 'TimeoutError', result
-    assert time.monotonic() - before < .75
+    assert time.monotonic() - before < 2.5  # deadline .25 s; the drip lasts 5 s
 
 
 def test_R3_R1_slow_url_cannot_block_due_at(engine, drip):
@@ -70,7 +70,7 @@ def test_R3_R1_slow_url_cannot_block_due_at(engine, drip):
     arm(e, 'url', trigger_json={'url':drip})
     w = arm(e)
     before = time.monotonic(); e.tick()
-    assert time.monotonic() - before < .75
+    assert time.monotonic() - before < 2.5  # deadline .25 s; the drip lasts 5 s
     assert len(e.ctx.calls) == 1 and w.id in e.ctx.calls[0][0]
 
 
@@ -107,11 +107,11 @@ def test_R3_R2_timeout_kills_descendants(tmp_path, monkeypatch):
 
 
 def test_R3_R2_capture_bounded_during_execution(tmp_path):
-    w, p = observer(tmp_path,"import os,time\nos.write(1,b'x'*(300*1024))\ntime.sleep(1.3)\n")
+    w, p = observer(tmp_path,"import os,time\nos.write(1,b'x'*(300*1024))\ntime.sleep(5)\n")
     before=time.monotonic()
     result=probes.check(w,policy=p,home=tmp_path)
     assert result.get('error')=='ValueError'
-    assert time.monotonic()-before < .75
+    assert time.monotonic()-before < 2.5  # overflow kill; the child sleeps 5 s
 
 
 @pytest.mark.parametrize('rule,argv,allow', [

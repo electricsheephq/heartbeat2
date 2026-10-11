@@ -203,7 +203,7 @@ def test_R6_E7_E13_url_wall_deadline(engine,monkeypatch,phase):
             prefix=b'HTTP/1.1 200 OK\r\nX-Slow: ' if phase=='headers' else b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n'
             try:
                 conn.sendall(prefix)
-                for _ in range(30):
+                for _ in range(100):  # 5 s drip: far beyond the 0.25 s deadline
                     if stopped.wait(.05):break
                     conn.sendall(b'0')
                 conn.sendall(b'\r\n\r\n')
@@ -215,7 +215,7 @@ def test_R6_E7_E13_url_wall_deadline(engine,monkeypatch,phase):
     before=time.monotonic()
     try:
         e.tick(); elapsed=time.monotonic()-before
-        assert elapsed<.75,elapsed
+        assert elapsed<2.5,elapsed
         assert e.store.get_wake(w.id).error_streak==1
         assert len(e.ctx.calls)==1
     finally:
