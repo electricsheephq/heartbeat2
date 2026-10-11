@@ -236,6 +236,7 @@ This is a workflow comparison, not a measured performance or parity claim.
 
 ## Known issues / proof boundary
 
+- A wake is a normal model turn, billed like one at your conversation's context size; `/pulse ledger` ≈tokens per wake and `/pulse status` "Today … ≈tokens" show the running cost.
 - Unreleased. CI is defined here; remote matrix results and live DM delivery are
   separate gates. Offline U4 scenarios and the comparison runner are in
   [bench/README.md](bench/README.md); generated results are simulation evidence.

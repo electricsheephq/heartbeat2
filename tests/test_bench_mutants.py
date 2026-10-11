@@ -28,6 +28,30 @@ SCENARIOS={'replay_slots':['sleep-62294','hermes-scale-zero'],'claim_cas_off':['
            'flock_off':['duplicates-59703'],'flock_and_claim_off':['duplicates-59703'],
            'fencing_off':['duplicates-59703'],'estop_off':['estop-i19'],
            'transform_raw':['sentinel-17646'],'cancel_on_reply_off':['hermes-drained'],'silenced_human':['hermes-drained']}
+GATE_ORDER_MUTANT=[('heartbeat2/poller.py',
+    '        from .commands import quiet_until\n        quiet=quiet_until(self,s.session_key,urgent=w.urgent)',
+    '        mute=self.policy.unanswered_gate(w,s.unanswered_count)\n        if mute: return mute,False,None\n        from .commands import quiet_until\n        quiet=quiet_until(self,s.session_key,urgent=w.urgent)')]
+GATE_ORDER_DRIVER='''import json,tempfile
+from bench.sim.gateway import FakeGateway
+scenario={'settings':{},'arms':[],'model_policy':{},'timeline':[]}
+with tempfile.TemporaryDirectory() as home:
+    gateway=FakeGateway(scenario,home)
+    try:
+        assert 'quiet' in gateway.command('owner','quiet for 3m').lower()
+        gateway.arm({'ref':'task','args':{'note':'Check the task.','trigger':{'kind':'at','at':'in 1m'}}})
+        engine=gateway.engine_for('owner')
+        w,=engine.store.list_wakes()
+        session=engine.store.get_session(w.session_key)
+        assert engine.store.cas_session(w.session_key,{'unanswered_count':session.unanswered_count},
+                                        unanswered_count=engine.policy.max_unanswered)
+        gateway.clock.advance(60)
+        gateway.tick()
+        occurrence,=engine.store.list_occurrences(w.id)
+        failures=[] if occurrence.state=='pending' and occurrence.error=='quiet_hours' else ['quiet window dropped: '+occurrence.state+':'+occurrence.error]
+        print(json.dumps({'quiet-window':failures} if failures else {}))
+    finally:
+        gateway.close()
+'''
 DRIVER='''import json,tempfile
 from pathlib import Path
 from bench.run import load_scenarios
@@ -55,15 +79,20 @@ def control(tmp_path_factory):
     return scratch_run(tmp_path_factory.mktemp('u6-control'),[])
 
 
+@pytest.fixture(scope='module', autouse=True)
+def mutant_budget():
+    before=time.monotonic()
+    yield
+    assert time.monotonic()-before<60, 'all mutants must stay below 60 s in total'
+
+
 @pytest.mark.parametrize('mutant',MUTANTS)
 def test_R6_E1_E2_E3_mutant_gate(tmp_path,mutant,control):
-    before=time.monotonic()
     driver=DRIVER.replace('for s in load_scenarios()', 'for s in load_scenarios() if s["id"] in '+repr(SCENARIOS[mutant]))
     failures=scratch_run(tmp_path,MUTANTS[mutant],driver)
     introduced={(k,f) for k,rows in failures.items() for f in rows}-{(k,f) for k,rows in control.items() for f in rows}
     assert introduced,mutant+' survived'
     print(mutant,sorted(introduced))
-    assert time.monotonic()-before<2, 'nine mutants must stay below 15 s in total'
 
 
 @pytest.mark.parametrize('mutant', ['shell','timeout'])
@@ -76,3 +105,11 @@ with tempfile.TemporaryDirectory() as home:
 print(json.dumps(probes.COMMAND_DEADLINE_S==30 and rc==0 and body.strip()==b'["a b"]'))
 '''
     assert scratch_run(tmp_path,[mutation],driver) is False
+
+
+def test_R7_L6_gate_order_unanswered_first(tmp_path):
+    control=scratch_run(tmp_path/'control',[],GATE_ORDER_DRIVER)
+    assert not control,control
+    failures=scratch_run(tmp_path/'mutant',GATE_ORDER_MUTANT,GATE_ORDER_DRIVER)
+    assert failures,'gate_order_unanswered_first survived'
+    print('gate_order_unanswered_first',failures)

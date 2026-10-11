@@ -9,6 +9,11 @@ Use `pulse` only for a nameable open loop: a promised follow-up, unfinished task
 background job, pending review, or an explicitly requested silence check-in.
 Never arm a wake "to stay in touch". Never invent ongoing obligations.
 
+A wake is a normal model turn in that conversation, billed like one; its size
+is your conversation's context size. `/pulse ledger` shows ≈tokens per wake,
+and `/pulse status` shows "Today … ≈tokens" to track the running cost.
+These are reported token totals, not a monetary bill.
+
 - **Wake:** the time itself matters. Use `at` for a single follow-up; `every`,
   `cron`, or `self` for bounded recurring work. Include a self-contained note.
 - **Watcher / probe gate:** an external fact matters. Use `file`, `process`,

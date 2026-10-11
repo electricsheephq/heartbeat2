@@ -311,7 +311,8 @@ class Policy:
                          self.resolved_timezone())
 
     def unanswered_gate(self, wake: Wake, unanswered_count: int) -> str | None:
-        if unanswered_count >= self.max_unanswered and not (wake.creator == "user" and wake.urgent):
+        owner_wake = wake.creator == "user" and not wake.trigger_json.get('builtin')
+        if unanswered_count >= self.max_unanswered and not owner_wake:
             return "unanswered"
         return None
 

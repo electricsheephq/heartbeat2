@@ -60,6 +60,11 @@ These same disclosure and exception paragraphs appear in README and the manifest
 
 ## Model and delivery
 
+A wake is a normal model turn in that conversation, billed like one; its size
+is your conversation's context size. `/pulse ledger` shows ≈tokens per wake,
+and `/pulse status` shows "Today … ≈tokens" to track the running cost.
+These are reported token totals, not a monetary bill.
+
 External payloads are fenced as untrusted data and bounded; this reduces prompt
 confusion, but cannot guarantee that a full model turn follows every instruction.
 A structured `pulse respond` with notify=false yields exactly `[SILENT]`; missing

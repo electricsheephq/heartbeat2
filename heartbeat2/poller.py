@@ -365,7 +365,7 @@ class Poller:
                     if due.state=='pending' and getattr(self,'_tick_started_wall',now)-float(due.dedupe_key[2:])>15:
                         self.notice(w.session_key,'Some wakes were late / scheduler was stalled.')
                     if due.state=='missed':
-                        s.cas_wake(w.id,'active',status='failed',status_reason='missed')
+                        self.terminal_one_shot(s.get_wake(w.id))
                         self.notice(w.session_key,'A wake was too late after restart and was missed.')
             elif w.kind in PROBE_KINDS|EVENT_KINDS and w.deadline_at is not None and w.deadline_at<=now:
                 # Deadline fallback is one fire only, and only when no trigger
@@ -429,11 +429,13 @@ class Poller:
                 health.pop('trial'); self.store.set_meta('provider_health',json.dumps(health))
         if health and (health['until']>now or health.get('trial')):
             return 'provider_unavailable',True,health['until'] if health['until']>now else None
-        mute=self.policy.unanswered_gate(w,s.unanswered_count)
-        if mute: return mute,False,None
+        # Windows hold pending work before mute/caps can drop it. Re-evaluate
+        # every gate once the window ends; owner reminders only bypass mute.
         from .commands import quiet_until
         quiet=quiet_until(self,s.session_key,urgent=w.urgent)
         if quiet is not None: return 'quiet_hours',w.kind not in RECURRING_KINDS,quiet
+        mute=self.policy.unanswered_gate(w,s.unanswered_count)
+        if mute: return mute,False,None
         totals=self.daily(s.session_key)
         if totals['model_turns']>=self.policy.max_model_wakes_per_day: return 'daily_model_cap',False,None
         if totals['delivered']>=self.policy.max_messages_per_day: return 'daily_message_cap',False,None
@@ -460,6 +462,7 @@ class Poller:
                 elif until: s.set_meta('not_before:'+o.id,str(until))
             else:
                 s.cas_occurrence(w.id,o.dedupe_key,'pending','skipped',error=reason)
+                self.terminal_one_shot(s.get_wake(w.id))
                 self.ledger(w,gated_skips=1)
             return
         # Check again at the claim barrier, not just at tick entry.
@@ -509,7 +512,7 @@ class Poller:
     def terminal_one_shot(self,w):
         if w.kind!='at' or w.status not in {'active','paused'} or w.next_due_at is not None: return
         occurrences=self.store.list_occurrences(w.id)
-        if len(occurrences)==1 and occurrences[0].state in {'interrupted','dead','missed'}:
+        if len(occurrences)==1 and occurrences[0].state in {'skipped','interrupted','dead','missed'}:
             o=occurrences[0]
             self.store.cas_wake(w.id,w.status,expected_version=w.version,
                 status='failed',status_reason=o.state+(':'+o.error if o.error else ''))
