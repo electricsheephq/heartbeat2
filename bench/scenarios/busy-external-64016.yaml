@@ -58,3 +58,4 @@ heartbeat_checklist:
 - ref: external
   session: owner
   note: Close the named open loop and report only useful news.
+baseline_interval_s: 300

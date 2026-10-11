@@ -76,3 +76,5 @@ GitHub's private vulnerability reporting when available. If unavailable, request
 an alternate private channel without posting exploit details or credentials in
 public issues. Include a minimal sanitized reproduction, version and affected
 boundary. This unreleased plugin has no promised security response SLA.
+
+A wake turn that fails at the provider shows Hermes's own failure notice; HeartBeat backs off until the provider recovers. Provider-error hooks retain only a bounded class, never the request, response or error message.

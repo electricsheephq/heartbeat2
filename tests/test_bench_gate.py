@@ -9,7 +9,7 @@ from heartbeat2.intake import Intake
 def test_bench_gate(tmp_path):
     assert main(['--gate','--out',str(tmp_path)])==0
     result=json.loads(next(tmp_path.glob('*.json')).read_text())
-    assert len(result['scenarios'])==22
+    assert len(result['scenarios'])==23
     assert result['runtime_s']<30
     assert not result['failures']
 
@@ -49,4 +49,5 @@ def test_bench_drained_human_finalizes_after_its_output(tmp_path,monkeypatch):
     before=calls[:calls.index(raw)]
     assert not any(x[0]=='end' and x[1]==raw[1] and x[2] is True for x in before)
     assert any(x[0]=='end' and x[1]==raw[1] and x[2] is True for x in calls[calls.index(raw)+1:])
+    assert len(result['deliveries'])==1
     assert result['deliveries'][0]['prompted']

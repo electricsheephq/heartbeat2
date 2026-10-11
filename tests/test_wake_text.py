@@ -51,7 +51,7 @@ def test_I20_payload_fence_escaped_and_utf8_bounded(clock):
 def test_optional_fields_late_governor_and_owner(clock):
     wake, occ, session = records(clock)
     text = render_wake(replace(wake, creator="user", scratch="", max_fires=None), occ, session,
-                       clock=clock, timezone="UTC", late_by_s=10800,
+                       clock=clock, timezone="UTC", late_by_s=10800, after_restart=True,
                        governor_hint="Convert to a file watcher.", recent_outcomes=["a", "b", "c", "d"])
     assert "armed by the owner" in text and "fire 2 of ∞" in text
     assert "late by 3h after restart" in text and "Convert to a file watcher." in text

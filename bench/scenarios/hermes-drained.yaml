@@ -12,6 +12,14 @@ arms:
       at: in 5m
     until:
       owner_replies: true
+- ref: pending_reply
+  args:
+    note: Wait until later unless the owner replies.
+    trigger:
+      kind: at
+      at: in 2h
+    until:
+      owner_replies: true
 timeline: []
 model_policy:
   task:
@@ -31,6 +39,11 @@ expectations:
   bars:
     task:
       deliveries: 0
+      status: cancelled
+      prompted_deliveries: 1
+    pending_reply:
+      deliveries: 0
+      model_wakes: 0
       status: cancelled
 heartbeat_checklist:
 - ref: task

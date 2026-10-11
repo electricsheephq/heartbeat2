@@ -28,19 +28,21 @@ def escape_text(text: str) -> str:
 def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: Clock,
                 timezone="UTC", recent_outcomes=(), messages_today: int = 0,
                 max_messages: int = 6, payload=None, governor_hint: str = "",
-                late_by_s: float | None = None, trigger_summary: str = "") -> str:
+                late_by_s: float | None = None, trigger_summary: str = "", after_restart: bool = False) -> str:
     now = clock.now()
     local = datetime.fromtimestamp(now, zone(timezone))
     label = "wake" if wake.kind in TIME_KINDS else "watcher"
     owner = "you" if wake.creator == "agent" else "the owner"
     owner_age = _age(now - session.last_human_at) if session.last_human_at is not None else "unknown"
     why = wake.reason or trigger_summary or wake.kind
-    if late_by_s is not None and late_by_s > 0:
-        why += f" (late by {_age(late_by_s)} after restart)"
+    if late_by_s is not None and late_by_s >= 60:
+        why += f" (late by {_age(late_by_s)}" + (" after restart" if after_restart else "") + ")"
+    owner_clause = f" · owner last wrote {owner_age} ago" if session.last_human_at is not None else ""
+    fire_limit = 1 if wake.kind == "at" else wake.max_fires if wake.max_fires is not None else "∞"
     tz_name = getattr(local.tzinfo, "key", None) or local.tzname()
     lines = [
         f"⟦pulse o:{occurrence.id} a:{occurrence.attempt}⟧ [HeartBeat 2.0 · {label} {wake.id} · {escape_text(wake.title)} · armed by {owner} {_age(now - wake.created_at)} ago]",
-        f"Local time: {local:%a %d %b %H:%M} ({tz_name}) · owner last wrote {owner_age} ago · fire {wake.fires + 1} of {wake.max_fires if wake.max_fires is not None else '∞'}",
+        f"Local time: {local:%a %d %b %H:%M} ({tz_name}){owner_clause} · fire {wake.fires + 1} of {fire_limit}",
         f"Why: {escape_text(why)}", f"Your note: {escape_text(wake.note)}",
     ]
     if wake.scratch:

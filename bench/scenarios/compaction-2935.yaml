@@ -52,3 +52,4 @@ heartbeat_checklist:
 - ref: obsolete
   session: owner
   note: Follow up unless conversation reset.
+baseline_interval_s: 600

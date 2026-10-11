@@ -3,8 +3,8 @@
 The no-op digest idea follows Hermes hermes_cli/loops.py::_digest_response;
 all value and pause decisions here use structured occurrence fields.
 """
-from .model import RECURRING_KINDS
-from .schedule import local_day, next_cron, next_every
+from .model import RECURRING_KINDS, PROBE_KINDS
+from .schedule import local_day, next_cron, next_every, parse_duration
 
 VALUABLE = {'progress','done','needs_attention'}
 
@@ -38,6 +38,8 @@ def owner_answer(engine,wake,answer):
         if w.status!='paused' or not w.status_reason.startswith('governor:'):
             return {'error':'not_governor_paused'}
         if answer not in {'keep','slow'}: return {'error':'unknown_answer'}
+        if answer=='slow' and w.kind not in RECURRING_KINDS|PROBE_KINDS:
+            return {'error':'slow applies to recurring wakes and watchers'}
         updates={'status':'active','status_reason':''}
         interval=w.eff_interval_s or w.base_interval_s or p.interval_floor(w)
         if answer=='keep':
@@ -51,11 +53,15 @@ def owner_answer(engine,wake,answer):
             updates['eff_interval_s']=interval
             updates['next_due_at']=(next_cron(w.trigger_json['cron'],now=engine.clock.now(),timezone=p.resolved_timezone(),minimum_interval_s=interval)
                 if w.kind=='cron' else next_every(engine.clock.now(),interval,anchor=w.trigger_json.get('at') if w.kind=='every' else None,timezone=p.resolved_timezone()))
+        if answer=='slow' and w.kind in PROBE_KINDS:
+            interval=max(p.probe_floor_seconds,parse_duration(w.trigger_json.get('check_every',p.probe_floor_seconds)))
+            interval=max(p.probe_floor_seconds,min(interval*2,p.noop_max_backoff_hours*3600,w.pacing_max_s or float('inf')))
+            updates.update(trigger_json={**w.trigger_json,'check_every':interval},next_due_at=engine.clock.now()+interval)
         if not s.cas_wake(w.id,'paused',expected_version=w.version,**updates): return {'error':'concurrent_change'}
         if answer=='keep': s.set_meta('ratio_since:'+w.id,str(engine.clock.now()))
         s.set_meta('card:'+w.id,'')
         engine.signal()
-        return {'ok':True}
+        return {'ok':True,'cadence_s':interval} if answer=='slow' else {'ok':True}
 
 
 def apply(engine,wake,*,next_check=None):

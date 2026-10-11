@@ -97,6 +97,7 @@ class Runtime:
                     if not delegated_child(kwargs.get('platform','')) and (self._thread is None or not self._thread.is_alive()):
                         self.restart()
                 intake=self.get_engine().intake
+                if name=='api_request_error': return intake.api_request_error(**kwargs)
                 if name in EVENTS: return intake.event(EVENTS[name],**kwargs)
                 return getattr(intake,name)(**kwargs)
         except Exception:

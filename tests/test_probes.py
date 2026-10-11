@@ -105,7 +105,8 @@ def test_url_transport_get_timeout_no_proxy_cookie_or_auth(monkeypatch):
     result = probes.check(wake('url', url='http://127.0.0.1:1234/fixture'))
     assert not result.get('error')
     request, timeout = captured[-1]
-    assert request.get_method() == 'GET' and timeout == 10
+    assert request.get_method() == 'GET' and 0 < timeout <= 10
+    assert probes.URL_DEADLINE_S == 10
     assert not any(k.lower() in {'cookie','authorization'} for k in request.headers)
     assert captured[0][0].proxies == {}
 

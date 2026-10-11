@@ -1,0 +1,44 @@
+id: estop-i19
+title: Due work is held while estopped and fires once after release
+cites:
+- 'spec I19: estop consumes no work'
+settings: {}
+arms:
+- ref: task
+  args:
+    note: Report the task.
+    trigger:
+      kind: at
+      at: in 1h
+timeline:
+- t: 3000
+  event: estop
+  'on': true
+- t: 5000
+  event: estop
+  'on': false
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Completed.
+duration: 5100
+expectations:
+  required_fires:
+  - wake: task
+    window:
+    - 5000
+    - 5030
+  forbidden_deliveries:
+  - window:
+    - 0
+    - 4999
+  bars:
+    task:
+      deliveries: 1
+      model_wakes: 1
+heartbeat_checklist:
+- ref: task
+  session: owner
+  note: Report the task.
+baseline_interval_s: 3600

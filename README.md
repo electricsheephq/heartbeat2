@@ -271,3 +271,5 @@ Ideas credited in source: Hermes heartbeat claim/refund/coalescing, cron monitor
 fingerprinting, loop response digestion, and gateway estop/busy ordering. Loader
 fixture/action-pinning patterns follow `fish-audio-hermes`. OpenClaw issue analysis
 informed the design; it is not an OpenClaw component. Apache-2.0; see [LICENSE](LICENSE).
+
+Known issue: a wake turn that fails at the provider shows Hermes's own failure notice; HeartBeat backs off until the provider recovers.

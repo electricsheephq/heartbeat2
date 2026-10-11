@@ -24,9 +24,9 @@ timeline:
   until: 90000
 model_policy:
   default:
-  - outcome: done
+  - outcome: progress
     notify: true
-    summary: Task is complete.
+    summary: Still running.
 duration: 91000
 expectations:
   required_fires:
@@ -42,7 +42,7 @@ expectations:
     too_old:
       deliveries: 0
       model_wakes: 0
-      status: done
+      status: failed
 heartbeat_checklist:
 - ref: recurring
   session: owner

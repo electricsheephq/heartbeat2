@@ -196,6 +196,11 @@ class Intake:
         self._follow(session_id)
         previous=self.flights.get(session_id)
         if previous and turn_id and previous.turn_id and previous.turn_id!=turn_id:
+            if not kwargs.get('internal') and not marker(user_message) and not pulse_command(user_message):
+                wake=s.get_wake(previous.wake_id)
+                if wake.cancel_on_reply and wake.status in {'active','paused','proposed'}:
+                    previous.owner_replied=True
+                    s.cas_wake(wake.id,wake.status,expected_version=wake.version,status='cancelled',status_reason='owner_replied')
             self.on_session_end(session_id=session_id,turn_id=previous.turn_id,failed=True)
         key=self._key(session_id)
         if not key: return None
@@ -279,9 +284,40 @@ class Intake:
             return {'context':'\n'.join(lines)} if lines else None
 
     @fail_open
-    def post_api_request(self,session_id='',turn_id='',usage=None,**kwargs):
+    def api_request_error(self,session_id='',turn_id='',reason='',status_code=None,error=None,**kwargs):
+        # Hermes agent/api_request_hooks.py emits this per physical retry.
+        # Retain only the bounded classification, never request/error text.
         if delegated_child(kwargs.get('platform','')): return None
+        kinds={'rate_limit':'rate_limit','upstream_rate_limit':'rate_limit','quota':'quota','quota_exhausted':'quota',
+               'auth':'auth','auth_permanent':'auth','billing':'billing','server_error':'server','overloaded':'server'}
+        kind=kinds.get(reason)
+        if not kind:
+            kind='rate_limit' if status_code==429 else 'auth' if status_code in {401,403} else 'billing' if status_code==402 else 'server' if isinstance(status_code,int) and status_code>=500 else None
+        if not kind: return None
         e,s=self.engine,self.engine.store
+        self._follow(session_id)
+        f=self.flights.get(session_id)
+        if f and turn_id and f.turn_id and turn_id!=f.turn_id: return None
+        with s.atomic():
+            if f:
+                o=s.get_occurrence(f.wake_id,f.dedupe_key)
+                if o and o.state=='started' and o.attempt==f.attempt:
+                    s.set_meta('provider_error:'+o.id,kind)
+                    e.interrupt(o,'provider_error:'+kind)
+                    f.invalid=True
+            elif session_id and turn_id:
+                stamp='provider_failure:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
+                if not s.get_meta(stamp):
+                    s.set_meta(stamp,'1'); e.provider_failure(kind)
+        self.event('api_error',session_id=session_id,reason=kind)
+        return None
+
+    @fail_open
+    def post_api_request(self,session_id='',turn_id='',usage=None,**kwargs):
+        e,s=self.engine,self.engine.store
+        s.set_meta('provider_health','')
+        e.signal()
+        if delegated_child(kwargs.get('platform','')): return None
         self._follow(session_id)
         key=self.bindings.get(session_id)
         if key and (not turn_id or not self.turns.get(session_id) or self.turns[session_id]==turn_id):
@@ -345,12 +381,7 @@ class Intake:
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
             if o is None or o.state!='started' or o.attempt!=f.attempt: return None
             if failed or interrupted or completed is False:
-                s.cas_occurrence(o.wake_id,o.dedupe_key,'started','interrupted',attempt=f.attempt,error='failed' if failed else 'interrupted',force_silent=True)
-                w=s.get_wake(o.wake_id)
-                s.cas_wake(w.id,w.status,expected_version=w.version,
-                           tokens_in=w.tokens_in+o.tokens_in,tokens_out=w.tokens_out+o.tokens_out)
-                e.ledger(w,tokens_in=o.tokens_in,tokens_out=o.tokens_out)
-                if not f.owner_replied: governor.error(e,s.get_wake(o.wake_id))
+                e.interrupt(o,'failed' if failed else 'interrupted',count_error=not f.owner_replied)
                 return None
             # Recheck cancellation after the final transform: a human can reply
             # between claim/start/transform and successful finalization.

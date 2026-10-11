@@ -43,6 +43,7 @@ class FakeGateway:
         self.sessions={}; self.refs={}; self.tips={}; self.stopped=False
         self.deliveries=[]; self.turns=[]; self.humans=[]; self.cards=[]; self.command_log=[]; self.trace=[]
         self.pause_fires={}; self.counter=0
+        self.occ_seen={}; self.gate_opened={}; self.deferred=set(); self.lock_violations=[]; self.claim_violations=[]; self.stop_windows=[]
         profiles={x.get('profile','main') for x in scenario.get('sessions',[{'name':'owner'}])}
         for profile in sorted(profiles):
             self.injectors[profile]=FakeInjector(self,profile)
@@ -66,6 +67,22 @@ class FakeGateway:
         engine=Poller(ctx,store,Policy.from_settings(settings,clock=self.clock),self.clock,
                       session_key_fn=lambda:self.current_key,paused=lambda:self.stopped,jitter=lambda:0,
                       compression_tip=lambda sid:self.tips.get(sid,sid))
+        real_gate=engine.gate
+        def observed_gate(w,o,s):
+            identity=(profile,w.id,o.dedupe_key)
+            self.occ_seen.setdefault(identity,self.t)
+            reason,defer,until=real_gate(w,o,s)
+            if defer and reason in {'quiet_hours','busy','wake_spacing','provider_unavailable','session_paused','global_flood'}:
+                self.deferred.add(identity)
+                if until is not None: self.gate_opened[identity]=until-self.origin
+                elif reason=='wake_spacing': self.gate_opened[identity]=s.last_wake_turn_at-self.origin+engine.policy.wake_spacing_minutes*60
+                else: self.gate_opened[identity]=self.t
+            elif not reason and identity in self.deferred:
+                # No known exact deadline (busy/provider trial): first observed
+                # open tick, at the declared 15 s simulation resolution.
+                self.gate_opened[identity]=max(self.gate_opened.get(identity,self.t),self.t)
+            return reason,defer,until
+        engine.gate=observed_gate
         self.engines[profile]=engine
 
     @contextmanager
@@ -156,10 +173,16 @@ class FakeGateway:
             transformed=e.intake.transform_llm_output(response_text=raw,session_id=sid,turn_id=turn,platform=session['platform'])
             text=transformed if transformed is not None else raw
             flight=e.intake.flights.get(sid)
-            prompted=bool(step.get('drained_human') or flight and flight.owner_replied)
+            active_turn=e.intake.turns.get(sid)==turn
+            prompted=bool(active_turn and (flight and flight.owner_replied or not flight and not turn.startswith('wake-turn-')))
+            identity=(profile,wid,occ)
+            due=float(occ[2:])-self.origin if occ.startswith('t:') else self.occ_seen.get(identity,item['t'])
+            stop_ends=[end for begin,end in self.stop_windows if end is not None and due<end<=item['t']]
+            opened=max(due,self.gate_opened.get(identity,due),max(stop_ends,default=due))
             self.turns.append({'t':self.t,'inject_t':item['t'],'session_key':session['key'],'profile':profile,'wake_id':wid,
                               'ref':ref,'occurrence':occ,'attempt':attempt,'valid':valid,'outcome':step['outcome'] if result.get('ok') else 'unreported',
-                              'respond':result,'due_t':float(occ[2:])-self.origin if occ.startswith('t:') else item['t']})
+                              'respond':result,'due_t':due,'gates_opened_t':opened,
+                              'lateness_s':max(0,item['t']-opened),'deferred_s':max(0,opened-due)})
             if text!='[SILENT]':
                 self.deliveries.append({'t':self.t,'session_key':session['key'],'text':text,'wake_id':wid,'ref':ref,
                     'occurrence':occ,'profile':profile,'owner_profile':profile,'prompted':prompted,'unprompted':not prompted,'owner_session_key':w.session_key,'terminal_before':terminal_before})
@@ -168,10 +191,36 @@ class FakeGateway:
         w=e.store.get_wake(wid)
         if w.status_reason.startswith('governor:') and ref not in self.pause_fires:self.pause_fires[ref]=w.fires
 
+    def build_standby(self,profile):
+        e=self.engines[profile]
+        standby=Poller(self.contexts[profile],Store(e.store.path,self.clock),e.policy,self.clock,
+                       paused=lambda:self.stopped,session_key_fn=lambda:self.current_key,jitter=lambda:0)
+        # A standby does not reconcile another live owner's work.
+        standby.process_start=False
+        self.standbys[profile]=standby
+
     def tick(self):
         for profile,e in self.engines.items():
+            if profile not in self.standbys:
+                e.tick(); continue
+            e.acquire()
+            other=self.standbys[profile]
+            if other.acquire():
+                self.lock_violations.append(self.t)
+                self.trace.append({'t':self.t,'event':'dual_lock'})
+                other.release()
+            # Real generation before the pending-list read. Then freeze that
+            # list, run the owner's normal tick, and claim using the stale row.
+            if not self.stopped:
+                with e.store.atomic(): e.times()
+            pending=other.store.list_occurrences(state='pending')
             e.tick()
-            if profile in self.standbys:self.standbys[profile].tick()
+            for stale in pending:
+                current=other.store.get_occurrence(stale.wake_id,stale.dedupe_key)
+                if current.state=='pending': continue  # owner was gated
+                claimed=other.store.claim(stale.wake_id,stale.dedupe_key,epoch=other.epoch,pid=0)
+                self.trace.append({'t':self.t,'event':'stale_claim','claimed':claimed})
+                if claimed: self.claim_violations.append(self.t)
         for injector in self.injectors.values():injector.flush()
 
     def next_interest(self):
@@ -196,12 +245,14 @@ class FakeGateway:
         if kind=='human':self.human(name,event.get('text','Continue.'),drained=event.get('drained',False))
         elif kind=='injector':self.injectors[profile].configure(event['mode'],event.get('delay_s',0))
         elif kind=='restart':
+            had_standby=profile in self.standbys
             self.close_profile(profile);self.build(profile)
+            if had_standby:
+                self.build_standby(profile)
+                self.trace.append({'t':self.t,'event':'standby_rebuilt'})
             self.trace.append({'t':self.t,'event':'restart','profile':profile})
         elif kind=='second_poller':
-            store=Store(e.store.path,self.clock)
-            standby=Poller(self.contexts[profile],store,e.policy,self.clock,paused=lambda:self.stopped,session_key_fn=lambda:self.current_key,jitter=lambda:0)
-            self.standbys[profile]=standby
+            self.build_standby(profile)
         elif kind=='busy':
             e.acquire()  # This is a live admitted busy window, after crash recovery.
             s=e.store.get_session(self.sessions[name]['key']);e.store.cas_session(s.session_key,{'busy_since':s.busy_since},busy_since=self.clock.now() if event['on'] else None)
@@ -210,7 +261,10 @@ class FakeGateway:
         elif kind=='new':
             session=self.sessions[name];old=session['sid'];session['sid']=old+'-new'
             e.intake.on_session_reset(old_session_id=old,new_session_id=session['sid'])
-        elif kind=='estop':self.stopped=event['on']
+        elif kind=='estop':
+            if event['on'] and not self.stopped: self.stop_windows.append([self.t,None])
+            elif not event['on'] and self.stopped: self.stop_windows[-1][1]=self.t
+            self.stopped=event['on']
         elif kind=='arm':self.arm(event['arm'])
         elif kind=='external_event':
             with self.bound(self.sessions[name]):e.intake.event(event.get('kind','subagent_done'),session_key=self.sessions[name]['key'],task_id=event.get('task_id','task'))

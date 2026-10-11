@@ -9,7 +9,7 @@ import tempfile
 import time
 
 from .baseline.heartbeat1 import LABEL
-from .sim.metrics import percentile
+from .sim.metrics import percentile, latency_samples
 from .sim.runner import simulate
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -42,8 +42,10 @@ def totals(results,system):
     answer={k:sum(x[k] for x in metrics) for k in summed}
     for k in ('msgs_per_silence_episode','max_burst_per_min'):answer[k]=max(x[k] for x in metrics)
     answer['noop_ratio']=answer['noop_model_wakes']/answer['model_wakes'] if answer['model_wakes'] else 0
-    values=[max(0,t['inject_t']-t['due_t']) for x in rows for t in x['turns'] if t.get('valid',True)]
-    answer['fire_latency_p50_s']=percentile(values,.5);answer['fire_latency_p95_s']=percentile(values,.95)
+    lateness,deferred=latency_samples([t for x in rows for t in x['turns']])
+    answer.update(lateness_p50_s=percentile(lateness,.5),lateness_p95_s=percentile(lateness,.95),
+                  deferred_p50_s=percentile(deferred,.5),deferred_p95_s=percentile(deferred,.95),
+                  deferred_total_s=sum(deferred),latency_sample_count=len(lateness))
     answer['fires_until_pause']={r['id']:r[system]['metrics']['fires_until_pause'] for r in results if system in r and r[system]['metrics']['fires_until_pause']}
     return answer
 
@@ -59,12 +61,14 @@ def markdown(report):
     lines=['# HeartBeat 2.0 simulation benchmark', '', 'Claim class: '+CLAIM+'.', '',
            'Baseline: **'+LABEL+'**. Its numbers are never measurements of OpenClaw.', '',
            f'Source HEAD: `{report["source"]["head"]}`; dirty working copy: `{report["source"]["dirty"]}`. Engine content digest: `{report["source"]["engine_digest"]}`.', '',
+           'Latency samples cover fires that happened. Lateness excludes observed designed gate deferrals; deferred_s reports those separately. Open ticks have 15 s resolution. Missing fires have no latency sample.', '',
            f'B1 runtime: **{report["engine_runtime_s"]:.3f} s**; all requested arms including baseline: **{report["runtime_s"]:.3f} s**.', '',
            '| Scenario | HeartBeat 2.0 bars | Naive emulator bars (reported only) | Model wakes HB2 / naive | Unprompted messages HB2 / naive | Est. tokens HB2 / naive |',
            '|---|---|---|---:|---:|---:|']
     for row in report['scenarios']:
         h=row['heartbeat2'];b=row.get('baseline');bm=b['metrics'] if b else {}
         naive='PASS' if b and not b['failures'] else str(len(b['failures']))+' failed bars' if b else 'not run'
+        if b and not b['turns']: naive='never fired; see mechanism trace'
         pairs=lambda k:f'{display(h["metrics"][k])} / {display(bm.get(k))}'
         deliveries=lambda arm:sum(d['unprompted'] for d in arm['deliveries']) if arm else None
         lines.append(f'| {row["id"]} | {"PASS" if not h["failures"] else "FAIL"} | {naive} | {pairs("model_wakes")} | {deliveries(h)} / {display(deliveries(b))} | {pairs("est_tokens")} |')

@@ -35,8 +35,7 @@ Profiles use distinct homes even when session keys are identical.
 
 The common metric evaluator computes duplicate, destination, marker, missed
 window, burst, silence-episode, no-op, estimated-token and latency metrics.
-Latency uses actual injection time and the occurrence's scheduled time;
-probe latency starts at event detection. Invalid stale attempts still count
+Invalid stale attempts still count
 as model turns but cannot satisfy a required fire. Only valid structured
 respond results count as verdicts. All HB2 hard bars and declared scenario bars
 are gated; baseline bars are reported. A disabled transform is tested to fail

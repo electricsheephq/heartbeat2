@@ -259,7 +259,7 @@ def test_I12_duplicate_summary_error_ladder_and_pause(engine):
     e.store.cas_wake(w.id, 'active', status='paused')
     session(e, last_wake_turn_at=None)
     e.ctx.accept = False
-    bad = arm(e)
+    bad = arm(e, "every")  # recurring failures retain the governor pause ladder
     for delay in (30, 60, 300, 900, 3600):
         e.tick()
         count = len(e.ctx.calls)

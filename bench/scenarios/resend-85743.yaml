@@ -25,6 +25,12 @@ timeline:
 - t: 2000
   event: injector
   mode: ok
+- t: 400
+  event: human
+  text: Continue the task.
+- t: 1000
+  event: human
+  text: Continue the task.
 model_policy:
   default:
   - outcome: progress
@@ -38,7 +44,7 @@ expectations:
     task:
       deliveries: 0
       model_wakes: 0
-      status: paused
+      status: failed
 heartbeat_checklist:
 - ref: task
   session: owner

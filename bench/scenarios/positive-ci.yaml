@@ -51,4 +51,4 @@ heartbeat_checklist:
 - ref: task
   session: owner
   note: Close the named open loop and report only useful news.
-baseline_interval_s: 300
+baseline_interval_s: 900

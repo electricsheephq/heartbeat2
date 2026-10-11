@@ -3,6 +3,9 @@
 Fingerprint gating follows the idea in Hermes cron/monitor.py. The argv guard
 is deliberately conservative, but is not a sandbox for configured executables.
 """
+import http.client
+import socket
+import threading
 import hashlib
 import json
 import os
@@ -49,7 +52,7 @@ def command_allowed(argv, allowlist):
         option=token.split('=',1)[0]
         if token in UNSAFE_VERBS or (option.startswith('--') and any(flag.startswith(option) for flag in UNSAFE_OPTIONS)):
             return False
-        if token in {'-w','-p'} or (argv[0]=='gh' and token.startswith('-') and not token.startswith('--') and any(c in token[1:] for c in 'wp')): return False
+        if token in {'-w','-p'} or (os.path.basename(argv[0])=='gh' and token.startswith('-') and not token.startswith('--') and any(c in token[1:] for c in 'wp')): return False
         if argv[:2]==['git','ls-remote'] and token.startswith('-u'):
             return False
         if token.startswith(('-o', '-c', '-P')) and not token.startswith('--'):
@@ -84,25 +87,71 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _get_url(url):
-    # No ambient proxy credentials, cookie jar, netrc or Authorization handler.
-    deadline = time.monotonic() + URL_DEADLINE_S
-    redirect = _SafeRedirect()
-    redirect.deadline = deadline
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), redirect)
-    request = urllib.request.Request(validate_url(url), method='GET')
-    with opener.open(request, timeout=URL_DEADLINE_S) as response:
-        body = bytearray()
-        while len(body) <= MAX_BODY:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0: raise TimeoutError('URL probe exceeded 10 s total')
-            sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
-            if sock is not None: sock.settimeout(remaining)
-            chunk = response.read1(min(65536, MAX_BODY + 1 - len(body)))
-            if not chunk: break
-            body.extend(chunk)
-            if len(body) > MAX_BODY: raise ValueError('URL body exceeds 256 KB')
-        if time.monotonic() >= deadline: raise TimeoutError('URL probe exceeded 10 s total')
-    return bytes(body)
+    """One wall deadline, including DNS, TLS, headers and chunk framing.
+
+    urllib's per-read timeout cannot bound a peer that keeps dripping bytes.
+    The daemon owns all I/O; the caller joins only until the total deadline and
+    shuts down connected sockets. A delayed DNS result cannot keep tick waiting.
+    """
+    validate_url(url)
+    deadline=time.monotonic()+URL_DEADLINE_S
+    expired=threading.Event(); sockets=[]; guard=threading.Lock(); result=[]
+
+    def shutdown(sock):
+        try: sock.shutdown(socket.SHUT_RDWR)
+        except OSError: pass
+        try: sock.close()
+        except OSError: pass
+
+    def connection(base):
+        class Connection(base):
+            def connect(self):
+                if expired.is_set(): raise TimeoutError('URL deadline')
+                super().connect()
+                with guard:
+                    if expired.is_set():
+                        shutdown(self.sock); raise TimeoutError('URL deadline')
+                    sockets.append(self.sock)
+        return Connection
+
+    class HTTP(urllib.request.HTTPHandler):
+        def http_open(self,req): return self.do_open(connection(http.client.HTTPConnection),req)
+    class HTTPS(urllib.request.HTTPSHandler):
+        def https_open(self,req): return self.do_open(connection(http.client.HTTPSConnection),req,context=self._context)
+
+    def request():
+        try:
+            redirect=_SafeRedirect(); redirect.deadline=deadline
+            opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),redirect,HTTP(),HTTPS())
+            req=urllib.request.Request(url,method='GET')
+            with opener.open(req,timeout=max(.001,deadline-time.monotonic())) as response:
+                body=bytearray()
+                while len(body)<=MAX_BODY:
+                    remaining=deadline-time.monotonic()
+                    if expired.is_set() or remaining<=0: raise TimeoutError('URL deadline')
+                    sock=getattr(getattr(getattr(response,'fp',None),'raw',None),'_sock',None)
+                    if sock is not None: sock.settimeout(remaining)
+                    chunk=response.read1(min(65536,MAX_BODY+1-len(body)))
+                    if not chunk: break
+                    body.extend(chunk)
+                    if len(body)>MAX_BODY: raise ValueError('URL body exceeds 256 KB')
+                result.append((True,bytes(body)))
+        except Exception as exc:
+            result.append((False,exc))
+        finally:
+            with guard:
+                for sock in sockets: shutdown(sock)
+
+    worker=threading.Thread(target=request,name='pulse-url',daemon=True)
+    worker.start(); worker.join(max(0,deadline-time.monotonic()))
+    if worker.is_alive() or time.monotonic()>=deadline:
+        expired.set()
+        with guard:
+            for sock in sockets: shutdown(sock)
+        raise TimeoutError('URL probe exceeded 10 s total')
+    ok,value=result[0]
+    if not ok: raise value
+    return value
 
 
 def _hash(value):

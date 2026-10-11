@@ -12,20 +12,14 @@ arms:
       kind: every
       every: 1h
 timeline:
-- t: 0
-  event: estop
-  'on': true
 - t: 600
   event: suspend
   until: 14400
-- t: 14400
-  event: estop
-  'on': false
 model_policy:
   default:
-  - outcome: done
+  - outcome: progress
     notify: true
-    summary: Task is complete.
+    summary: Still running.
 duration: 15000
 expectations:
   required_fires:
@@ -45,3 +39,4 @@ heartbeat_checklist:
 - ref: task
   session: owner
   note: Close the named open loop and report only useful news.
+baseline_interval_s: 3600

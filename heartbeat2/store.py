@@ -23,7 +23,7 @@ from .schedule import local_day
 
 SCHEMA_VERSION = 1
 LEDGER_FIELDS = frozenset({"fires", "gated_skips", "governor_skips", "model_turns",
-    "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors"})
+    "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals"})
 _JSON_FIELDS = {"trigger_json", "probe_state_json", "payload_json"}
 _BOOL_FIELDS = {"babysit", "urgent", "cancel_on_reply", "notify", "force_silent",
                 "enabled", "first_notice_sent"}
@@ -168,6 +168,9 @@ class Store:
                 for statement in _SCHEMA.split(";"):
                     if statement.strip():
                         self.connection.execute(statement)
+                columns={row[1] for row in self.connection.execute("PRAGMA table_info(ledger)")}
+                if "provider_deferrals" not in columns:
+                    self.connection.execute("ALTER TABLE ledger ADD COLUMN provider_deferrals INTEGER NOT NULL DEFAULT 0")
                 self.set_meta("schema_version", str(SCHEMA_VERSION))
         except BaseException:
             self.connection.close()

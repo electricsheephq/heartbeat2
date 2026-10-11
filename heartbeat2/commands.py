@@ -67,12 +67,12 @@ def _time(engine, epoch):
 
 
 def _item(engine, wake):
-    return f'{wake.id} {wake.status} · {wake.title or wake.note[:60]} · {wake.kind} · next {_time(engine,wake.next_due_at or wake.deadline_at)}'
+    return f'{wake.id} {wake.status} · {wake.title or wake.note[:60]} · {wake.kind} · next {_time(engine,wake.next_due_at or wake.deadline_at)}' + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _ledger(engine, key, days):
     today = datetime.fromisoformat(local_day(engine.clock.now(), engine.policy.resolved_timezone())).date()
-    lines = [f'Ledger {days}d: fires · checks · model wakes · messages · engaged · ≈tokens · verdict']
+    lines = [f'Ledger {days}d: fires · checks · model wakes · messages · engaged · ≈tokens · provider deferrals · verdict']
     for wake in engine.store.list_wakes(key):
         counts = {}
         for n in range(days):
@@ -84,7 +84,7 @@ def _ledger(engine, key, days):
         verdict = 'useful' if valuable else 'no value yet' if turns else 'waiting'
         lines.append(f'{wake.id} {wake.title or wake.note[:40]}: {fires} · {fires+skips} · {turns} · '
                      f'{counts.get("delivered",0)} · {counts.get("engaged",0)} · '
-                     f'{counts.get("tokens_in",0)+counts.get("tokens_out",0)} · {verdict}')
+                     f'{counts.get("tokens_in",0)+counts.get("tokens_out",0)} · {counts.get("provider_deferrals",0)} · {verdict}')
     return '\n'.join(lines)
 
 
@@ -93,14 +93,19 @@ def _add(engine, session, text):
     if match:
         trigger, note = {'kind':'at','at':'in '+match[1]}, match[2]
     else:
-        match = re.fullmatch(r'every (\S+)(?: at (\d{1,2}:\d{2}))? (.+)', text, re.DOTALL)
+        match = re.fullmatch(r'every (\S+)\s+(.+)', text, re.DOTALL)
         if match:
-            trigger, note = {'kind':'every','every':match[1]}, match[3]
-            if not match[2] and re.match(r'at \d{1,2}:\d{2}(?:\s|$)',note):
-                raise ValueError('note is required after the anchor')
-            if match[2]:
-                hour,minute=match[2].split(':')
-                trigger['at'] = f'{int(hour):02d}:{minute}'
+            trigger, note = {'kind':'every','every':match[1]}, match[2]
+            if re.match(r'at\s+\d',note):
+                anchor=re.fullmatch(r'at\s+(\d{1,2})(?::(\d{2}))?(am|pm)?\s+(.+)',note,re.I|re.DOTALL)
+                if not anchor or anchor[2] is None and anchor[3] is None:
+                    raise ValueError('use at H:MM, 9am or 9:00pm followed by a note')
+                hour,minute=int(anchor[1]),int(anchor[2] or 0)
+                if minute>59 or (not anchor[3] and hour>23) or (anchor[3] and not 1<=hour<=12):
+                    raise ValueError('invalid clock anchor')
+                if anchor[3]: hour=hour%12+(12 if anchor[3].lower()=='pm' else 0)
+                trigger['at']=f'{hour:02d}:{minute:02d}'
+                note=anchor[4]
         else:
             match = re.fullmatch(r'when silent (\S+) (.+)', text, re.DOTALL)
             if not match: raise ValueError('use add in 2h <note>, every 1d at 09:00 <note>, or when silent 24h <note>')
@@ -155,6 +160,9 @@ def handle(raw_args, runtime):
                          f'Local time: {_time(engine,engine.clock.now())} · quiet: {"until "+_time(engine,q) if q else "off now"}',
                          f'Today: fires {counts.get("fires",0)} · checks {counts.get("fires",0)+counts.get("gated_skips",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {daily["delivered"]}/{engine.policy.max_messages_per_day} · engaged {counts.get("engaged",0)} · ≈tokens {counts.get("tokens_in",0)+counts.get("tokens_out",0)}',
                          f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
+                health=json.loads(engine.store.get_meta('provider_health') or '{}')
+                if health:
+                    lines.append(f'Provider gate: provider_unavailable ({health["class"]}) · next recovery attempt: {_time(engine,health["until"])}; any successful model call clears it.')
                 if status.get('state')=='stalled': lines.append('Stalled since '+_time(engine,status.get('since')))
                 if not engine.injection_allowed(): lines.append(INJECTION_CONFIG)
                 lines.extend(_item(engine,w) for w in active)
@@ -227,7 +235,7 @@ def _transition(engine,session,wake,action,seconds):
         _activation(engine,session,wake)
         result=governor.owner_answer(engine,wake,action)
         if not result.get('ok'): raise ValueError(result.get('error','owner answer failed'))
-        return _item(engine,engine.store.get_wake(wake.id))
+        return _item(engine,engine.store.get_wake(wake.id)) + (f'\nNew cadence: {result["cadence_s"]:g} seconds.' if action=='slow' else '')
     if wake.status=='proposed' and action not in {'ok','cancel','stop'}:
         raise ValueError('proposed item: approve with /pulse ok or cancel')
     if action=='pause' and wake.status!='active': raise ValueError('pause needs an active item')
