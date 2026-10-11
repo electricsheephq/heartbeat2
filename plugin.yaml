@@ -1,6 +1,18 @@
 name: heartbeat2
 version: 0.1.0
-description: "HeartBeat 2.0: bounded wakes and watchers in the conversation that armed them."
+description: >-
+  HeartBeat 2.0: bounded wakes and watchers in the conversation that armed them. Disclosure — wakes and watchers run full turns on the conversation's own model,
+  billed like any message; command probes run allowlisted read-only commands without
+  an approval prompt; url probes make GET requests you configured; state stays in the
+  profile's plugin-data; no telemetry.
+
+  The argv guard is not a sandbox: allowlisted programs and local configuration
+  must be trusted and read-only. Model wake turns retain the conversation's tools
+  and permissions. GET requests include the configured URL, including its query;
+  URL userinfo, cookies, Authorization headers and ambient proxies are refused or
+  unused by the probe. Existing git/gh credentials and remote configuration can be
+  used by command probes. The plugin adds no telemetry; Hermes, model providers
+  and configured endpoints retain their own data handling.
 author: Electric Sheep
 manifest_version: 2
 api_version: 1

@@ -1,3 +1,231 @@
-"""U3 seam: slash-command bodies are intentionally deferred."""
+"""Compact /pulse controls; gateway-bound session is the only authority."""
+from dataclasses import replace
+from datetime import datetime, timedelta
+import json
+import re
+
+from .model import Wake
+from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS
+from .schedule import parse_duration, quiet_end, local_day
+from .tool import session_env
+
+HELP = ('/pulse status | list | ledger [7d] | why <id> | add in 2h <note> | '
+        'add every 1d at 09:00 <note> | add when silent 24h <note> | '
+        'pause|resume|cancel <id|all> [for 3d] | off|on | '
+        'quiet <22:00-07:30|off|for 3h> | ok|keep|slow|stop|watch <id>')
+
+
+def quiet_until(engine, session_key, *, urgent=False):
+    if urgent and engine.policy.quiet_hours_urgent: return None
+    override = json.loads(engine.store.get_meta('quiet:'+session_key) or '{}')
+    if override.get('until', 0) > engine.clock.now(): return override['until']
+    if 'range' in override:
+        return quiet_end(engine.clock.now(), override['range'], engine.policy.resolved_timezone())
+    return engine.policy.quiet_until(urgent=urgent)
+
+
+def _activation(engine, session, wake):
+    if not session.enabled: raise ValueError('this chat is off; use /pulse on')
+    gate = engine.policy.creation_gate(session_key=session.session_key, platform=session.platform,
+        chat_type=session.chat_type, allow_gateway_injection=engine.injection_allowed(),
+        creator='user', kind=wake.kind,
+        active_count=sum(w.status in {'active','proposed'} and w.id != wake.id for w in engine.store.list_wakes(session.session_key)),
+        global_active_count=sum(w.status in {'active','proposed'} and w.id != wake.id for w in engine.store.list_wakes()))
+    if not gate.allowed: raise ValueError(gate.reason + ('\n'+gate.detail if gate.detail else ''))
+
+
+def _reschedule(engine,wake):
+    result=engine.tool.prepare(wake,{},reschedule=wake.kind!='at')
+    if wake.kind=='at':
+        due=max(wake.next_due_at or engine.clock.now(),engine.clock.now())
+        while engine.store.get_occurrence(wake.id,f't:{due:.17g}') is not None:
+            due+=.001
+        result=replace(result,wake=replace(result.wake,next_due_at=due))
+    return result
+
+
+def resume_timed(engine):
+    """Only command-paused items with an explicit timer may auto-resume."""
+    for wake in engine.store.list_wakes(status='paused'):
+        until = float(engine.store.get_meta('resume_after:'+wake.id) or 0)
+        if not until or until > engine.clock.now() or wake.status_reason != 'command': continue
+        session = engine.store.get_session(wake.session_key)
+        if session is None: continue
+        try:
+            _activation(engine, session, wake)
+            candidate = _reschedule(engine,wake).wake
+        except (ValueError, TypeError, KeyError):
+            continue
+        if engine.store.cas_wake(wake.id, 'paused', expected_version=wake.version,
+            status='active', status_reason='', next_due_at=candidate.next_due_at):
+            engine.store.set_meta('resume_after:'+wake.id, '')
+
+
+def _time(engine, epoch):
+    return datetime.fromtimestamp(epoch, engine.policy.resolved_timezone()).strftime('%Y-%m-%d %H:%M %Z') if epoch is not None else 'none'
+
+
+def _item(engine, wake):
+    return f'{wake.id} {wake.status} · {wake.title or wake.note[:60]} · {wake.kind} · next {_time(engine,wake.next_due_at or wake.deadline_at)}'
+
+
+def _ledger(engine, key, days):
+    today = datetime.fromisoformat(local_day(engine.clock.now(), engine.policy.resolved_timezone())).date()
+    lines = [f'Ledger {days}d: fires · checks · model wakes · messages · engaged · ≈tokens · verdict']
+    for wake in engine.store.list_wakes(key):
+        counts = {}
+        for n in range(days):
+            row = engine.store.get_ledger((today-timedelta(days=n)).isoformat(), wake.id) or {}
+            for name, value in row.items():
+                if isinstance(value, int): counts[name] = counts.get(name, 0)+value
+        fires, skips = counts.get('fires',0), counts.get('gated_skips',0)
+        valuable, turns = counts.get('valuable',0), counts.get('model_turns',0)
+        verdict = 'useful' if valuable else 'no value yet' if turns else 'waiting'
+        lines.append(f'{wake.id} {wake.title or wake.note[:40]}: {fires} · {fires+skips} · {turns} · '
+                     f'{counts.get("delivered",0)} · {counts.get("engaged",0)} · '
+                     f'{counts.get("tokens_in",0)+counts.get("tokens_out",0)} · {verdict}')
+    return '\n'.join(lines)
+
+
+def _add(engine, session, text):
+    match = re.fullmatch(r'in (\S+) (.+)', text, re.DOTALL)
+    if match:
+        trigger, note = {'kind':'at','at':'in '+match[1]}, match[2]
+    else:
+        match = re.fullmatch(r'every (\S+)(?: at (\d{2}:\d{2}))? (.+)', text, re.DOTALL)
+        if match:
+            trigger, note = {'kind':'every','every':match[1]}, match[3]
+            if match[2]: trigger['at'] = match[2]
+        else:
+            match = re.fullmatch(r'when silent (\S+) (.+)', text, re.DOTALL)
+            if not match: raise ValueError('use add in 2h <note>, every 1d at 09:00 <note>, or when silent 24h <note>')
+            parse_duration(match[1])
+            trigger, note = {'kind':'owner_silent','after':match[1]}, match[2]
+    wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command',
+        platform=session.platform, chat_type=session.chat_type, chat_id=session.chat_id,
+        armed_session_id=session.current_session_id, title=note[:80])
+    _activation(engine,session,wake)
+    result = engine.tool.prepare(wake, {'trigger':trigger})
+    created = engine.store.create_wake(result.wake)
+    return _item(engine, created)+_clamps(result.clamped)
+
+
+def _clamps(clamped):
+    return ''.join(f'\nClamped {key}: {value}' for key,value in clamped.items())
+
+
 def handle(raw_args, runtime):
-    return 'HeartBeat 2.0 commands are available after the U3 surface unit.'
+    key = session_env('HERMES_SESSION_KEY')
+    if not key or key == 'default': return 'Error: /pulse needs the invoking gateway session.'
+    try:
+        engine = runtime.get_engine()
+        engine.refresh()
+        action, _, rest = (raw_args or 'status').strip().partition(' ')
+        rest = rest.strip()
+        with engine.store.atomic():
+            session = engine.store.get_session(key)
+            if session is None or session.platform not in MESSAGING_PLATFORMS:
+                return 'Error: /pulse needs a known messaging-gateway session.'
+            if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
+            if action == 'status' and not rest:
+                status = engine.status()
+                q = quiet_until(engine,key)
+                daily = engine.daily(key)
+                counts={}
+                for wake in engine.store.list_wakes(key):
+                    row=engine.store.get_ledger(local_day(engine.clock.now(),engine.policy.resolved_timezone()),wake.id) or {}
+                    for name,value in row.items():
+                        if isinstance(value,int): counts[name]=counts.get(name,0)+value
+                active = [w for w in engine.store.list_wakes(key) if w.status in {'active','proposed','paused'}]
+                next_due = min((x for w in active if w.status=='active' for x in (w.next_due_at,w.deadline_at) if x is not None),default=None)
+                lines = [f'HeartBeat 2.0: {"on" if session.enabled and engine.policy.enabled else "off"} · poller {status["state"]}'
+                         + (f' ({status["reason"]})' if status.get('reason') else ''),
+                         f'allow_gateway_injection: {str(engine.injection_allowed()).lower()}',
+                         f'Local time: {_time(engine,engine.clock.now())} · quiet: {"until "+_time(engine,q) if q else "off now"}',
+                         f'Today: fires {counts.get("fires",0)} · checks {counts.get("fires",0)+counts.get("gated_skips",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {daily["delivered"]}/{engine.policy.max_messages_per_day} · engaged {counts.get("engaged",0)} · ≈tokens {counts.get("tokens_in",0)+counts.get("tokens_out",0)}',
+                         f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
+                if status.get('state')=='stalled': lines.append('Stalled since '+_time(engine,status.get('since')))
+                if not engine.injection_allowed(): lines.append(INJECTION_CONFIG)
+                lines.extend(_item(engine,w) for w in active)
+                lines.extend(f'{w.id}: keep / slow / stop / watch' for w in active if w.status_reason.startswith('governor:'))
+                return '\n'.join(lines)
+            if action == 'list' and not rest:
+                return '\n'.join(_item(engine,w) for w in engine.store.list_wakes(key)) or 'No wakes or watchers in this chat.'
+            if action == 'ledger':
+                if not re.fullmatch(r'\d+d',rest or '7d'): raise ValueError('ledger expects 7d')
+                days = int((rest or '7d')[:-1])
+                if not 1 <= days <= engine.policy.ledger_days: raise ValueError('ledger range exceeds retained days')
+                return _ledger(engine,key,days)
+            if action == 'add': return _add(engine,session,rest)
+            if action in {'off','on'} and not rest:
+                if not engine.store.cas_session(key, {'enabled':session.enabled}, enabled=action=='on'):
+                    raise ValueError('concurrent session change')
+                engine.signal()
+                return f'HeartBeat 2.0 {action} for this chat.'
+            if action == 'quiet':
+                if rest.startswith('for '):
+                    override = {'until':engine.clock.now()+parse_duration(rest[4:])}
+                elif rest == 'off': override = {'range':''}
+                else:
+                    quiet_end(engine.clock.now(),rest,engine.policy.resolved_timezone())
+                    if not rest: raise ValueError('quiet expects a range, off, or for 3h')
+                    override = {'range':rest}
+                engine.store.set_meta('quiet:'+key,json.dumps(override))
+                for occurrence in engine.store.list_occurrences(session_key=key,state='pending'):
+                    if occurrence.error=='quiet_hours':
+                        engine.store.set_meta('not_before:'+occurrence.id,'')
+                engine.signal()
+                return f'Quiet for this chat: {rest}.'
+            if action not in {'why','pause','resume','cancel','ok','keep','slow','stop','watch'}:
+                raise ValueError(HELP)
+            match = re.fullmatch(r'(\S+)(?: for (\S+))?',rest)
+            if not match: raise ValueError('expected an item id or all')
+            wid, duration = match.groups()
+            if duration and action != 'pause': raise ValueError('for is supported only with pause')
+            seconds = parse_duration(duration) if duration else None
+            if wid == 'all' and action in {'pause','resume','cancel'}:
+                wakes = engine.store.list_wakes(key)
+            else:
+                wake = engine.store.get_wake(wid)
+                if wake is None or wake.session_key != key: return 'Error: unknown item in this chat.'
+                wakes = [wake]
+            lines = []
+            for wake in wakes:
+                if action == 'why':
+                    return f'{_item(engine,wake)}\nWhy: {wake.reason or "the named task"}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\nFires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}'
+                if wake.status in {'done','cancelled','expired','failed','orphaned'}:
+                    if wid != 'all': raise ValueError('item is terminal')
+                    continue
+                changes, clamps = {}, {}
+                if action in {'resume','keep','slow','ok'}:
+                    if action == 'ok' and wake.status != 'proposed': raise ValueError('ok needs a proposed item')
+                    if action != 'ok' and wake.status == 'proposed': raise ValueError('approve with /pulse ok')
+                    _activation(engine,session,wake)
+                    result = _reschedule(engine,wake)
+                    candidate, clamps = result.wake, result.clamped
+                    changes = {name:getattr(candidate,name) for name in ('next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','expires_at','max_fires','trigger_json')}
+                    changes.update(status='active',status_reason='',noop_streak=0,ignored_streak=0,error_streak=0)
+                    if action == 'slow':
+                        if wake.kind not in {'every','self','cron'}: raise ValueError('slow requires a recurring wake; use watch for a probe')
+                        interval = min((wake.eff_interval_s or candidate.base_interval_s)*2,
+                                       wake.pacing_max_s or engine.policy.noop_max_backoff_hours*3600)
+                        interval = max(interval,candidate.base_interval_s,engine.policy.interval_floor(candidate))
+                        changes.update(base_interval_s=interval,eff_interval_s=interval,next_due_at=engine.clock.now()+interval)
+                        if wake.kind in {'every','self'}:
+                            changes['trigger_json']={**candidate.trigger_json,'every':interval}
+                elif action in {'cancel','stop'}: changes = {'status':'cancelled','status_reason':'command'}
+                else: changes = {'status':'paused','status_reason':'command'}
+                if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,**changes):
+                    raise ValueError('concurrent item change')
+                engine.store.set_meta('resume_after:'+wake.id,str(engine.clock.now()+seconds) if action=='pause' and seconds else '')
+                if changes['status'] in {'paused','cancelled'}: engine.cancel_occurrences(wake.id,changes['status'])
+                engine.store.set_meta('card:'+wake.id,'')
+                lines.append(_item(engine,engine.store.get_wake(wake.id))+_clamps(clamps))
+                if action == 'watch':
+                    lines.append('Paused. Choose a file/process/url/command probe or event, then use pulse update with trigger and bounds. No watcher is guessed.')
+            engine.signal()
+            return '\n'.join(lines) or 'No matching items in this chat.'
+    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        return 'Error: '+str(exc)
+    except Exception:
+        return 'Error: HeartBeat 2.0 is unavailable.'

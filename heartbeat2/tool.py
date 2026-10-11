@@ -16,7 +16,7 @@ BOOL = {'type': 'boolean'}
 SCHEMA = obj({
     'action': {'type': 'string', 'enum': ['create', 'list', 'update', 'pause', 'resume', 'cancel', 'respond', 'off']},
     'id': STR, 'title': STR, 'note': STR, 'reason': STR,
-    'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','fire_on','event','check_every','deadline')},
+    'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','fire_on','event','check_every','deadline','cwd')},
                     'pid': {'type':'integer'}, 'command': {'type':'array','items':STR},
                     'emojis': {'type':'array','items':STR}}),
     'until': obj({'expires':STR, 'max_fires':{'type':'integer'}, 'owner_replies':BOOL}),
@@ -199,11 +199,23 @@ class Tool:
             argv=trigger.get('command')
             if not isinstance(argv,list) or not all(isinstance(x,str) for x in argv) or not e.policy.command_allowed(argv):
                 raise ValueError('command probe is not allowlisted')
+        if kind=='url':
+            from .probes import validate_url
+            validate_url(trigger.get('url'))
         if kind=='process':
             try:
                 import psutil  # Hermes-provided, only this kind needs it.
             except Exception as exc:
                 raise ValueError('process wakes require Hermes-provided psutil') from exc
+            pid=trigger.get('pid')
+            if isinstance(pid,bool) or not isinstance(pid,int) or pid<=0:
+                raise ValueError('process requires a positive pid')
+            if w.kind!='process' or w.trigger_json.get('pid')!=pid or not w.probe_state_json:
+                try:
+                    created=psutil.Process(pid).create_time()
+                except (psutil.NoSuchProcess,psutil.ZombieProcess):
+                    created=None
+                updates['probe_state_json']={'create_time':created}
         if not updates.get('note',w.note): raise ValueError('note is required')
         result=e.policy.clamp(replace(w,**updates))
         w=result.wake

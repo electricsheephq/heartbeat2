@@ -124,10 +124,9 @@ class Poller:
         except Exception:
             return None
 
-    @staticmethod
-    def _probe(wake):
+    def _probe(self,wake):
         from .probes import check
-        return check(wake)
+        return check(wake,policy=self.policy,home=self.ctx._manager.home_path)
 
     @staticmethod
     def child_key(flight):
@@ -176,6 +175,8 @@ class Poller:
                 if not self.policy.enabled or self.paused(): return
                 governor.settle_ignored(self)
                 self.acks()
+                from .commands import resume_timed
+                resume_timed(self)
                 self.events()
             self.probes()
             with s.atomic():
@@ -330,7 +331,8 @@ class Poller:
         if s.platform not in MESSAGING_PLATFORMS: return 'non_gateway',False,None
         mute=self.policy.unanswered_gate(w,s.unanswered_count)
         if mute: return mute,False,None
-        quiet=self.policy.quiet_until(urgent=w.urgent)
+        from .commands import quiet_until
+        quiet=quiet_until(self,s.session_key,urgent=w.urgent)
         if quiet is not None: return 'quiet_hours',w.kind not in RECURRING_KINDS,quiet
         totals=self.daily(s.session_key)
         if totals['model_turns']>=self.policy.max_model_wakes_per_day: return 'daily_model_cap',False,None

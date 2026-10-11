@@ -169,7 +169,7 @@ class Runtime:
 
 
 def register(ctx,**options):
-    # No file reads, SQLite opens, profile/config reads or work on this path.
+    # No SQLite opens, config reads or probes here; the skill registrar may stat its path.
     if getattr(ctx,'_manager',None) is None: return None
     from .tool import SCHEMA,DESCRIPTION
     scope=ctx._manager.scope_key
@@ -187,6 +187,10 @@ def register(ctx,**options):
                 ctx.register_hook(name,callback)
             ctx.register_command(name='pulse',handler=runtime.command,
                                  description='HeartBeat 2.0 wakes and watchers',args_hint='<action>')
+            skill=getattr(ctx,'register_skill',None)
+            if skill:
+                skill('heartbeat2-usage',Path(__file__).resolve().parents[1]/'skills/heartbeat2-usage/SKILL.md',
+                      'Close named open loops with bounded wakes and deterministic watchers.')
             cleanup=getattr(ctx,'on_unload',None)
             if cleanup: cleanup(runtime.close)
             runtime.start()

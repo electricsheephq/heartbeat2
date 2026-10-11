@@ -1,0 +1,72 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: Unit (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.11', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install pytest pyyaml croniter psutil
+      - run: python -m pytest -q
+  integration:
+    name: Real Hermes loader (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: v0.21.6
+            sha: 818c13be1dc4fd28987e1e881a9408224afd4535
+          - target: pinned-main
+            sha: 04eb00cef7d9ac2730ed5fd9039a6f3287eb49ca
+    env:
+      HERMES_HOME: ${{ runner.temp }}/heartbeat2-hermes-home
+      HERMES_DISABLE_LAZY_INSTALLS: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: ${{ github.workspace }}/hermes
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          path: plugin
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.sha }}
+          path: hermes
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc # v6
+      - name: Install pinned Hermes in its venv
+        working-directory: hermes
+        run: |
+          uv sync --frozen --no-dev --python 3.11
+          uv pip install --python .venv/bin/python pytest pyyaml croniter psutil
+      - name: Copy into throwaway profile
+        run: |
+          mkdir -p "$HERMES_HOME/plugins/heartbeat2"
+          cp -R plugin/heartbeat2 plugin/skills plugin/__init__.py plugin/plugin.yaml "$HERMES_HOME/plugins/heartbeat2/"
+      - name: Validate through pinned Hermes CLI
+        run: hermes/.venv/bin/python -m hermes_cli.main plugins validate "$HERMES_HOME/plugins/heartbeat2"
+      - name: Real loader and fake gateway acceptance
+        working-directory: plugin
+        run: ../hermes/.venv/bin/python -m pytest tests/integration -q

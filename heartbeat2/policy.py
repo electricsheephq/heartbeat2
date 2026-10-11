@@ -308,7 +308,5 @@ class Policy:
         return None
 
     def command_allowed(self, argv: list[str]) -> bool:
-        if not self.source_command or not argv or not self.probe_commands:
-            return False
-        return any(argv[:len(prefix)] == prefix for token in self.probe_commands.split(",")
-                   if (prefix := shlex.split(token.strip())))
+        from .probes import command_allowed
+        return self.source_command and command_allowed(argv, self.probe_commands)
