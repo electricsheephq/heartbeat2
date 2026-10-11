@@ -1,6 +1,7 @@
 """Owner-decided U2 review regressions, using offline gateway fixtures."""
 from dataclasses import asdict, replace
 import json
+import os
 import sys
 from types import SimpleNamespace as NS
 
@@ -47,7 +48,7 @@ def test_R2_G1_registered_contract_and_results(engine, monkeypatch):
 
 def test_R2_G1_real_Hermes_registry(engine, tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME',str(tmp_path/'hermes'))
-    monkeypatch.syspath_prepend('/Users/m1/.hermes/hermes-agent')
+    monkeypatch.syspath_prepend(os.environ.get('HERMES_SRC') or os.path.expanduser('~/.hermes/hermes-agent'))
     registry_module=pytest.importorskip('tools.registry')
     monkeypatch.setattr(Runtime,'start',lambda self: None)
     r=register(engine.ctx,clock=engine.clock)

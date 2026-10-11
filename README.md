@@ -112,7 +112,7 @@ bound the agent; the `pulse` tool cannot write them. Clamps appear in results.
 | probe_floor_seconds | int | 60 | Fastest probe check |
 | max_active | int | 10 | Active items per session (global cap 50) |
 | max_lifetime_days | int | 14 | Hard expiry; agent recurring items default 7 days unless renewed |
-| owner_silent_checkin | bool | false | Built-in check-in after silence (evaOS profiles turn it on) |
+| owner_silent_checkin | bool | false | Built-in check-in after silence (managed profiles may turn it on) |
 | checkin_after_hours | int | 24 | Threshold for the built-in check-in; doubles for the next episode if ignored |
 | max_rearm_chain | int | 2 | Depth limit for wakes armed inside wake turns (reset by a human message); max 1 child per wake turn |
 | noop_slowdown_after | int | 3 | Empty fires before interval doubling |
