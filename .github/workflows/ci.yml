@@ -37,7 +37,7 @@ jobs:
           - target: pinned-main
             sha: 04eb00cef7d9ac2730ed5fd9039a6f3287eb49ca
     env:
-      HERMES_HOME: ${{ runner.temp }}/heartbeat2-hermes-home
+      HERMES_HOME: ${{ github.workspace }}/hermes-home
       HERMES_DISABLE_LAZY_INSTALLS: '1'
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONPATH: ${{ github.workspace }}/hermes
