@@ -233,14 +233,14 @@ class Poller:
         s=self.store
         try: timeout=float(os.environ.get('HERMES_AGENT_TIMEOUT','1800'))
         except (TypeError,ValueError): timeout=1800
-        if not math.isfinite(timeout): timeout=1800
-        ttl=max(timeout*10,7200)
+        provider_limit=timeout if math.isfinite(timeout) and timeout>0 else None
+        ttl=max((provider_limit or 0)*10,7200)
         now=self.clock.now()
         for o in s.list_occurrences(state='started'):
             w=s.get_wake(o.wake_id)
             session=s.get_session(w.session_key)
             activity=max(o.started_at if o.started_at is not None else now,session.last_activity_at or 0 if session else 0)
-            limit=timeout if s.get_meta('provider_error:'+o.id) else ttl
+            limit=provider_limit if provider_limit is not None and s.get_meta('provider_error:'+o.id) else ttl
             if now-activity<limit: continue
             self.interrupt(o,'no_session_end')
         for session in s.list_sessions():
@@ -269,6 +269,7 @@ class Poller:
 
     def _event(self,w,event):
         s=self.store
+        if self.end_max_fires(w): return
         if not self.family_enabled(w): return
         if event['session_key'] and event['session_key']!=w.session_key: return
         if event['chat_id'] and event['chat_id']!=w.chat_id: return
@@ -291,6 +292,9 @@ class Poller:
         with s.atomic():
             for w in s.list_wakes(status='active'):
                 if w.kind not in PROBE_KINDS or not self.family_enabled(w): continue
+                session=s.get_session(w.session_key)
+                if session is None or not session.enabled or session.paused_until is not None and session.paused_until>now: continue
+                if self.end_max_fires(w): continue
                 if w.expires_at is not None and w.expires_at<=now: continue
                 if w.next_due_at is not None and w.next_due_at<=now:
                     def prepare_probe(w=w):
@@ -314,6 +318,8 @@ class Poller:
         s=self.store
         w=s.get_wake(original.id)
         if w.status!='active' or result.get('unavailable'): return
+        session=s.get_session(w.session_key)
+        if session is None or not session.enabled or session.paused_until is not None and session.paused_until>self.clock.now(): return
         # The prepared wake version is the probe generation. Any concurrent
         # mutation discards the result, including A -> B -> A retargets.
         if w.version!=original.version or w.kind!=original.kind or w.trigger_json!=original.trigger_json: return
@@ -326,12 +332,15 @@ class Poller:
         if result.get('fire'):
             identity=str(result.get('identity') or json.dumps(result.get('state',result.get('message','')),sort_keys=True))
             digest=hashlib.sha1(identity.encode()).hexdigest()
-            if s.add_occurrence(w.id,'e:'+digest,payload=[{'message':result.get('message','')}]) and 'state' in result:
+            payload=[{'message':result.get('message','')}]
+            pending=s.list_occurrences(w.id,state='pending')
+            coalesced=bool(pending and s.coalesce(w.id,pending[-1].dedupe_key,payload))
+            if (coalesced or s.add_occurrence(w.id,'e:'+digest,payload=payload)) and 'state' in result:
                 s.cas_wake(w.id,'active',expected_version=w.version,probe_state_json=result['state'])
         else:
             updates={'gated_skips':w.gated_skips+1}
-            # Command probe state is committed only on successful fire.
-            if 'state' in result and w.kind!='command': updates['probe_state_json']=result['state']
+            # Change-mode commands also commit their first successful baseline.
+            if 'state' in result and (w.kind!='command' or result.get('baseline') and not w.probe_state_json): updates['probe_state_json']=result['state']
             s.cas_wake(w.id,'active',expected_version=w.version,**updates)
             self.ledger(w,gated_skips=1)
 
@@ -345,6 +354,7 @@ class Poller:
 
     def _time(self,w):
         s,now=self.store,self.clock.now()
+        if self.end_max_fires(w): return
         # Retain the existing schedule decisions, isolated per wake/savepoint.
         if w.status=='active':
             if w.expires_at is not None and w.expires_at<=now:
@@ -408,6 +418,7 @@ class Poller:
 
     def _silence(self,w):
         s,now=self.store,self.clock.now()
+        if self.end_max_fires(w): return
         session=s.get_session(w.session_key)
         if session is None or session.last_human_at is None or not session.episode_id: return
         builtin=bool(w.trigger_json.get('builtin'))
@@ -419,6 +430,8 @@ class Poller:
 
     def gate(self,w,o,s):
         now=self.clock.now()
+        if w.kind=='owner_silent' and o.dedupe_key.startswith('s:') and (s is None or o.dedupe_key!='s:'+(s.episode_id or '')):
+            return 'episode_ended',False,None
         if w.trigger_json.get('builtin'):
             if not self.policy.owner_silent_checkin: return 'setting_off',True,None
             after=self.policy.checkin_after_hours*3600*(2 if w.ignored_streak else 1)
@@ -549,10 +562,19 @@ class Poller:
             self.ledger(w,tokens_in=o.tokens_in,tokens_out=o.tokens_out)
             self.terminal_one_shot(s.get_wake(w.id))
             if count_error or provider: governor.error(self,s.get_wake(w.id))
+            self.end_max_fires(s.get_wake(w.id))
             if provider and not s.get_meta('provider_health'): self.provider_failure(provider)
             session=s.get_session(w.session_key)
             if session: s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
             return True
+
+    def end_max_fires(self,w):
+        """Retire a spent cap once the last running turn has settled."""
+        if w.max_fires is None or w.fires<w.max_fires: return False
+        if w.status in {'active','paused'} and not any(o.state in {'claimed','started'} for o in self.store.list_occurrences(w.id)):
+            if self.store.cas_wake(w.id,w.status,expected_version=w.version,status='done',status_reason='max_fires'):
+                self.cancel_occurrences(w.id,'max_fires')
+        return True
 
     def provider_failure(self,kind):
         health=json.loads(self.store.get_meta('provider_health') or '{}')

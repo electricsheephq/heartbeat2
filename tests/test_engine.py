@@ -144,9 +144,11 @@ def test_I5_stalled_self_heal_one_late_note(engine):
     e.store.set_meta('last_tick_monotonic', str(e.clock.monotonic()-200))
     restarts = []
     e.restart = lambda: restarts.append(True)
+    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h1')
     ctx = e.intake.pre_llm_call(session_id='sid', user_message='hello', platform='telegram')
     assert restarts == [True]
     assert 'stalled' in ctx['context']
+    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h2')
     ctx = e.intake.pre_llm_call(session_id='sid', user_message='hello again', platform='telegram')
     assert ctx is None or 'stalled' not in ctx.get('context', '')
 
@@ -353,8 +355,10 @@ def test_I17_six_silent_runs_pause_one_card(engine):
         e.clock.advance(intervals[-1])
     assert intervals[:4] == [3600,3600,7200,14400]
     assert e.store.get_wake(w.id).status_reason == 'governor:noop'
+    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h1')
     card = e.intake.pre_llm_call(session_id='sid', user_message='hello')
     assert '/pulse watch' in card['context']
+    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h2')
     again = e.intake.pre_llm_call(session_id='sid', user_message='again')
     assert again is None or '/pulse watch' not in again.get('context','')
     assert len(e.ctx.calls) == 6

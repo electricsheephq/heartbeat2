@@ -98,14 +98,15 @@ class FakeGateway:
         self.counter+=1; mid=f'human-{self.counter}'; turn=f'human-turn-{self.counter}'
         self.humans.append({'t':self.t,'session_key':session['key'],'profile':session['profile'],'text':text,'drained':drained})
         with self.bound(session):
+            # Running-lane/drained input still reaches dispatch, but may skip
+            # post_gateway_admission. Model-call kwargs never prove humanity.
+            source=SimpleNamespace(platform=SimpleNamespace(value=session['platform']),chat_type=session['chat_type'],chat_id=session['chat_id'],is_bot=False)
+            e.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False,source=source,message_id=mid,text=text))
             if not drained:
-                source=SimpleNamespace(platform=SimpleNamespace(value=session['platform']),chat_type=session['chat_type'],chat_id=session['chat_id'],is_bot=False)
-                e.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False,source=source,message_id=mid,text=text))
                 e.intake.post_gateway_admission(session_key=session['key'],platform=session['platform'],
                     source={'chat_type':session['chat_type'],'chat_id':session['chat_id']},message_id=mid,text=text)
-            # A drained message arrives only through the later main-agent pre-LLM hook.
             if not mid_turn:
-                context=e.intake.pre_llm_call(session_id=session['sid'],turn_id=turn,platform=session['platform'],user_message=text,message_id=mid)
+                context=e.intake.pre_llm_call(session_id=session['sid'],turn_id=turn,platform=session['platform'],user_message=text)
                 if context:
                     for line in context.get('context','').splitlines():
                         if '/pulse watch' in line:self.cards.append({'t':self.t,'session_key':session['key'],'text':line})
@@ -158,9 +159,9 @@ class FakeGateway:
         valid=not terminal_before and o.attempt==attempt and o.state in {'claimed','started'}
         ref=self.ref_for(profile,wid);step=self.model.verdict(ref,valid)
         with self.bound(session):
-            e.intake.pre_llm_call(session_id=sid,turn_id=turn,platform=session['platform'],user_message=item['text'],internal=True)
+            e.intake.pre_llm_call(session_id=sid,turn_id=turn,platform=session['platform'],user_message=item['text'])
             if step.get('drained_human'):
-                # Mid-turn drain: no gateway observers, next pre-LLM call sees just the human.
+                # Mid-turn drain: dispatch, no admission, then the human model call.
                 turn=self.human(session['name'],step['drained_human'],drained=True,finish=False)
             if step.get('compact'):
                 new=sid+'-compact';self.tips[sid]=new;session['sid']=new;sid=new

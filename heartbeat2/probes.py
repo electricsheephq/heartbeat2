@@ -11,11 +11,11 @@ import json
 import os
 import stat as stat_module
 from pathlib import Path
-import re
 import shlex
 import subprocess
 import selectors
 import signal
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -25,6 +25,12 @@ MAX_STATE = 16 * 1024
 FILE_CHECK_BUDGET = 4 * 1024 * 1024
 URL_DEADLINE_S = 10.0
 COMMAND_DEADLINE_S = 30.0
+REGEX_DEADLINE_S = 5.0
+_MATCHER = '''import json,re,sys
+pattern,texts=json.load(sys.stdin)
+expression=re.compile(pattern)
+json.dump([i for i,text in enumerate(texts) if expression.search(text)],sys.stdout)
+'''
 # Reject output, code/config/helper execution, browser launches and common writes.
 UNSAFE_OPTIONS = frozenset({
     '--output', '--output-file', '--output-directory', '--exec', '--exec-path',
@@ -171,6 +177,28 @@ def _result(wake, state, fire, message):
             'identity':_hash([wake.id, state])}
 
 
+def _bounded_search(pattern, texts):
+    """One batch, one isolated interpreter, one deadline outside the gateway GIL."""
+    deadline=time.monotonic()+REGEX_DEADLINE_S
+    proc=subprocess.Popen([sys.executable,'-I','-c',_MATCHER],stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
+    try:
+        body=json.dumps([pattern,texts],ensure_ascii=False).encode('utf-8')
+        stdout,_=proc.communicate(body,timeout=max(.001,deadline-time.monotonic()))
+        if proc.returncode: raise ValueError('pattern matching failed')
+        return json.loads(stdout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        proc.communicate()
+        raise TimeoutError('pattern matching exceeded deadline') from None
+    except BaseException:
+        _kill_group(proc)
+        raise
+    finally:
+        for stream in (proc.stdin,proc.stdout):
+            if stream: stream.close()
+
+
 def _file(wake, home):
     trigger, old = wake.trigger_json, _state(wake)
     path = Path(trigger['path']).expanduser()
@@ -192,7 +220,6 @@ def _file(wake, home):
         pattern = trigger.get('pattern')
         if not pattern:
             return _result(wake, state, bool(old and old.get('fingerprint') != state['fingerprint']), 'file changed')
-        expression = re.compile(pattern)
         if not old: return _result(wake, state, False, '')
         offset = int(old.get('offset', old.get('size', 0)))
         skipping = bool(old.get('skip_to_newline'))
@@ -200,8 +227,7 @@ def _file(wake, home):
         if old.get('inode') != stat.st_ino or old.get('device') != stat.st_dev or stat.st_size < old.get('size', 0):
             offset, skipping = 0, False
         source.seek(offset)
-        cursor, consumed, buffer, messages, matched = offset, 0, b'', [], False
-        message_size = 0
+        cursor, consumed, buffer, lines = offset, 0, b'', []
         # Catch up within one check, with a 4 MB I/O budget and <=256 KB line buffer.
         while consumed < FILE_CHECK_BUDGET:
             chunk = source.read(min(65536, FILE_CHECK_BUDGET-consumed))
@@ -219,15 +245,17 @@ def _file(wake, home):
                 buffer += piece
                 if complete:
                     line = buffer.decode('utf-8', errors='replace')
-                    if expression.search(line):
-                        matched = True
-                        if message_size < 2000:
-                            messages.append(line[:2000-message_size]); message_size += len(messages[-1])+1
+                    lines.append(line)
                     buffer = b''
         # Partial normal lines are revisited; overlong lines always advance.
         state.update(offset=cursor-len(buffer), skip_to_newline=skipping,
                      skipped_overlong_lines=skipped)
-        return _result(wake, state, matched, '\n'.join(messages))
+        matches=_bounded_search(pattern,lines) if lines else []
+        messages=[]; message_size=0
+        for index in matches:
+            if message_size>=2000: break
+            messages.append(lines[index][:2000-message_size]); message_size+=len(messages[-1])+1
+        return _result(wake, state, bool(matches), '\n'.join(messages))
 
 
 def _process(wake):
@@ -254,7 +282,7 @@ def _url(wake):
     old, fingerprint = _state(wake), _hash(body)
     pattern = wake.trigger_json.get('pattern')
     changed = old.get('fingerprint') != fingerprint
-    fire = changed and (bool(re.search(pattern, body.decode('utf-8', errors='replace'))) if pattern else bool(old))
+    fire = changed and (bool(_bounded_search(pattern,[body.decode('utf-8',errors='replace')])) if pattern else bool(old))
     return _result(wake, {'fingerprint':fingerprint}, fire, 'URL matched pattern' if pattern else 'URL changed')
 
 
@@ -319,12 +347,14 @@ def _command(wake, policy, home):
         state['value'] = contract['state']
         fire, message = contract['fire'], contract['message']
     else:
-        fire = (state['fingerprint'] != old.get('fingerprint') if mode == 'change' else
+        fire = (bool(old) and state['fingerprint'] != old.get('fingerprint') if mode == 'change' else
                 success if mode == 'success' else not success)
     response = _result(wake, state, fire, message)
     if len(json.dumps(response['state'], allow_nan=False).encode()) > MAX_STATE:
         raise ValueError('command state exceeds 16 KB')
-    if not fire: response.pop('state')  # successful fire is the only commit
+    if mode=='change' and not old:
+        response['baseline']=True  # first successful check is a silent baseline
+    elif not fire: response.pop('state')  # JSON/non-change state commits only on fire
     return response
 
 

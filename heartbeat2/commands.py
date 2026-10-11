@@ -12,7 +12,7 @@ from .tool import session_env
 HELP = ('/pulse status | list | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
         'pause|resume|cancel <id|all> [for 3d] | off|on | '
-        'quiet <22:00-07:30|off|for 3h> | ok|keep|slow|stop|watch <id>')
+        'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
 
 
 def quiet_until(engine, session_key, *, urgent=False):
@@ -60,7 +60,8 @@ def _time(engine, epoch):
 
 
 def _item(engine, wake):
-    return f'{wake.id} {wake.status} · {wake.title or wake.note[:60]} · {wake.kind} · next {_time(engine,wake.next_due_at or wake.deadline_at)}' + (f' · {wake.status_reason}' if wake.status_reason else '')
+    due='paused · resumes on keep/resume' if wake.status=='paused' else 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
+    return f'{wake.id} {wake.status} · {wake.title or wake.note[:60]} · {wake.kind} · {due}' + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _ledger(engine, key, days):
@@ -139,6 +140,11 @@ def handle(raw_args, runtime):
             if action == 'status' and not rest:
                 status = engine.status()
                 q = quiet_until(engine,key)
+                override=json.loads(engine.store.get_meta('quiet:'+key) or '{}')
+                quiet_label='until '+_time(engine,q) if q else 'off now'
+                if 'range' in override:
+                    quiet_label=(override['range']+' (chat override)' if override['range'] else 'off for this chat (override)')
+                elif override.get('until',0)>engine.clock.now(): quiet_label+=' (chat override)'
                 daily = engine.daily(key)
                 counts={}
                 for wake in engine.store.list_wakes(key):
@@ -150,7 +156,7 @@ def handle(raw_args, runtime):
                 lines = [f'HeartBeat 2.0: {"on" if session.enabled and engine.policy.enabled else "off"} · poller {status["state"]}'
                          + (f' ({status["reason"]})' if status.get('reason') else ''),
                          f'allow_gateway_injection: {str(engine.injection_allowed()).lower()}',
-                         f'Local time: {_time(engine,engine.clock.now())} · quiet: {"until "+_time(engine,q) if q else "off now"}',
+                         f'Local time: {_time(engine,engine.clock.now())} · quiet: {quiet_label}',
                          f'Today: fires {counts.get("fires",0)} · checks {counts.get("fires",0)+counts.get("gated_skips",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {daily["delivered"]}/{engine.policy.max_messages_per_day} · engaged {counts.get("engaged",0)} · ≈tokens {counts.get("tokens_in",0)+counts.get("tokens_out",0)}',
                          f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
                 health=json.loads(engine.store.get_meta('provider_health') or '{}')
@@ -175,18 +181,22 @@ def handle(raw_args, runtime):
                 engine.signal()
                 return f'HeartBeat 2.0 {action} for this chat.'
             if action == 'quiet':
-                if rest.startswith('for '):
+                if rest=='default':
+                    engine.store.connection.execute('DELETE FROM meta WHERE key=?',('quiet:'+key,))
+                    override=None
+                elif rest.startswith('for '):
                     override = {'until':engine.clock.now()+parse_duration(rest[4:])}
                 elif rest == 'off': override = {'range':''}
                 else:
                     quiet_end(engine.clock.now(),rest,engine.policy.resolved_timezone())
-                    if not rest: raise ValueError('quiet expects a range, off, or for 3h')
+                    if not rest: raise ValueError('quiet expects a range, off, default, or for 3h')
                     override = {'range':rest}
-                engine.store.set_meta('quiet:'+key,json.dumps(override))
+                if override is not None: engine.store.set_meta('quiet:'+key,json.dumps(override))
                 for occurrence in engine.store.list_occurrences(session_key=key,state='pending'):
                     if occurrence.error=='quiet_hours':
                         engine.store.set_meta('not_before:'+occurrence.id,'')
                 engine.signal()
+                if rest=='default': return 'Quiet hours follow your settings again: '+(engine.policy.quiet_hours or 'none')
                 return f'Quiet for this chat: {rest}.'
             if action not in {'why','pause','resume','cancel','ok','keep','slow','stop','watch'}:
                 raise ValueError(HELP)
@@ -204,7 +214,8 @@ def handle(raw_args, runtime):
             lines = []
             for wake in wakes:
                 if action == 'why':
-                    return f'{_item(engine,wake)}\nWhy: {wake.reason or "the named task"}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\nFires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}'
+                    reason=wake.reason or ('you asked (via /pulse add)' if wake.creator=='user' else 'the named task')
+                    return f'{_item(engine,wake)}\nWhy: {reason}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\nFires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}'
                 try:
                     with engine.store.atomic():
                         lines.append(_transition(engine,session,wake,action,seconds))
@@ -250,5 +261,5 @@ def _transition(engine,session,wake,action,seconds):
     if changes['status'] in {'paused','cancelled'}: engine.cancel_occurrences(wake.id,changes['status'])
     engine.store.set_meta('card:'+wake.id,'')
     output=_item(engine,engine.store.get_wake(wake.id))+_clamps(clamps)
-    if action=='watch': output+='\nPaused. Choose a file/process/url/command probe or event, then use pulse update with trigger and bounds. No watcher is guessed.'
+    if action=='watch': output+='\nPaused. Ask your agent to turn it into a watcher (pulse update with a file, process, url or command trigger).'
     return output

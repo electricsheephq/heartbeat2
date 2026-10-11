@@ -180,7 +180,8 @@ The single agent tool `pulse` has actions `create`, `list`, `update`, `pause`,
 
 Examples are in the registered [`heartbeat2-usage` skill](skills/heartbeat2-usage/SKILL.md).
 Every wake turn should call respond. Last respond wins; notify=false suppresses
-chatty output and missing respond defaults to silence. Scratch/next_check commit
+your final reply and missing respond defaults to final-reply silence. Write no text
+alongside tool calls on a wake turn; some platforms show tool progress. Scratch/next_check commit
 only after a successful turn. Do not type sentinels. Agent-created proposals need
 owner `/pulse ok`; the agent can switch itself off, but only the owner can turn
 it back on. Reacting to an external payload does not authorize protected work.
@@ -189,8 +190,8 @@ File probes establish an EOF baseline and match only appended complete lines;
 mtime/size/inode changes are stat-polled. Truncation/rotation starts a fresh
 stream. URL probes compare body hashes or a regex match on a changed body;
 initial non-regex GET establishes a baseline. Process probes capture create-time
-at arming and fire on exit/PID reuse. Command change mode fires on its first
-successful result; unchanged successful results do not call the model. For
+at arming and fire on exit/PID reuse. Command change mode stores its first
+successful result as a silent baseline; only later changed results call the model. For
 success/failure modes, each qualifying check can fire. JSON observers print
 exactly `{"fire":bool,"message":str,"state":JSON}`; stored wrapper state ≤16 KB
 commits only on successful fire. Change/JSON nonzero exit and probe I/O errors

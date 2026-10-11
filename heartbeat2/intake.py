@@ -50,6 +50,27 @@ def delegated_child(platform=''):
         return False
 
 
+def bounded_payload(payload):
+    """Keep hook text within the inbox budget before Store.add_event.
+
+    Bound decoded UTF-8, including JSON escaping. Identifiers are retained;
+    free text shares the remaining 4 KiB budget rather than losing the event.
+    """
+    free_text={'summary','child_summary','reason','text'}
+    result=dict(payload)
+    for key in free_text & result.keys():
+        if isinstance(result[key],str):
+            result[key]=result[key].encode('utf-8')[:1500].decode('utf-8',errors='ignore')
+    def size(): return len(json.dumps(result,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode())
+    while size()>4096:
+        candidates=[k for k in free_text & result.keys() if isinstance(result[k],str) and result[k]]
+        if not candidates: break  # malformed/oversized identifiers remain refused by Store
+        key=max(candidates,key=lambda k:len(result[k].encode('utf-8')))
+        value=result[key].encode('utf-8')
+        result[key]=value[:len(value)//2].decode('utf-8',errors='ignore')
+    return result
+
+
 @dataclass
 class Flight:
     session_key: str
@@ -107,7 +128,7 @@ class Intake:
         if current and current!='default': return current
         return self.bindings.get(sid,'')
 
-    def human(self,key,platform='',source=None,dedupe=None):
+    def human(self,key,platform='',source=None,dedupe=None,*,folded=True):
         e,s=self.engine,self.engine.store
         if not key or key=='default': return
         source=source or {}
@@ -123,8 +144,9 @@ class Intake:
             if 'chat_id' in source: updates['chat_id']=str(source['chat_id'] or '')
             s.cas_session(key,{f.name:getattr(old,f.name) for f in fields(Session) if f.name!='session_key'},**updates)
             if dedupe: s.set_meta('human:'+dedupe,'1')
+            s.set_meta('human_context:'+key,'1')
             for f in self.flights.values():
-                if f.session_key==key and not f.invalid:
+                if folded and f.session_key==key and not f.invalid:
                     f.owner_replied=True
             for o in s.list_occurrences(session_key=key,state='done'):
                 if o.delivered and o.ended_at is not None and 0<=now-o.ended_at<=e.policy.engagement_window_hours*3600:
@@ -138,6 +160,45 @@ class Intake:
             s.add_event('human_message',dedupe or uuid.uuid4().hex,{},session_key=key)
         e.signal()
 
+    def _owner_queued(self,gateway,key,source):
+        """Only positive Hermes queue evidence changes the fold-in default.
+
+        The hook is synchronous: never call the async compression helper. Read
+        its guarded DB seam instead. Unknown state preserves the prior behavior.
+        """
+        try:
+            resolver=getattr(gateway,'_effective_busy_input_mode',None)
+            mode=resolver(source) if callable(resolver) else getattr(gateway,'_busy_input_mode',None)
+            if mode=='queue': return True
+            if mode!='interrupt': return False
+            running=getattr(gateway,'_running_agents',None)
+            agent=running.get(key) if isinstance(running,dict) else None
+            children=getattr(agent,'_active_children',None)
+            if isinstance(children,(list,tuple,set)) and children: return True
+            db=getattr(gateway,'_session_db',None)
+            db=getattr(db,'_db',db)
+            holder_fn=getattr(db,'get_compression_lock_holder',None)
+            current=self.engine.store.get_session(key)
+            if callable(holder_fn) and current and current.current_session_id:
+                holder=holder_fn(current.current_session_id)
+                return isinstance(holder,str) and bool(holder)
+        except Exception:
+            pass
+        return False
+
+    def _session_switch(self,w,session_id):
+        """A known non-lineage switch has the same ownership boundary as /new."""
+        e,s=self.engine,self.engine.store
+        if w.trigger_json.get('builtin'):
+            s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
+            return False
+        if w.status not in {'active','paused','proposed'}: return False
+        if not s.cas_wake(w.id,w.status,expected_version=w.version,status='orphaned',status_reason='session_switched'): return False
+        e.cancel_occurrences(w.id,'session_switched')
+        count=int(s.get_meta('switched_notice:'+w.session_key) or 0)+1
+        s.set_meta('switched_notice:'+w.session_key,str(count))
+        return True
+
     @fail_open
     def pre_gateway_dispatch(self,event=None,gateway=None,**kwargs):
         if event is None or getattr(event,'internal',False) or pulse_command(getattr(event,'text','')): return None
@@ -149,24 +210,37 @@ class Intake:
         key=matches[0].session_key
         mid=getattr(event,'message_id','')
         identity=f'{key}:{mid}' if mid else None
+        if getattr(event,'_heartbeat_session_id',None):
+            self.engine.store.set_meta('machine_admission:'+key,'1')
+            return None
         # SessionSource.to_dict() drops is_bot; preserve the real event verdict
         # for the later admission/human branch, never inspect an absent dict key.
         if getattr(source,'is_bot',False):
             if identity: self.engine.store.set_meta('nonhuman:'+identity,'1')
+            else: self.engine.store.set_meta('machine_admission:'+key,'1')
             return None
         authorized=getattr(gateway,'_is_user_authorized_for_source',None)
         if authorized and not authorized(source): return None
         self.engine.refresh()
-        self.human(key,platform,{'chat_type':getattr(source,'chat_type',''),'chat_id':chat_id},identity)
+        queued=self._owner_queued(gateway,key,source)
+        if queued: self.engine.store.set_meta('queued_admission:'+(identity or key),'1')
+        self.human(key,platform,{'chat_type':getattr(source,'chat_type',''),'chat_id':chat_id},identity,folded=not queued)
         return None
 
     @fail_open
     def post_gateway_admission(self,session_key='',platform='',source=None,message_id='',text='',**kwargs):
         self.engine.refresh()
         if not isinstance(source,dict): return None
+        stamp='machine_admission:'+session_key
+        if self.engine.store.get_meta(stamp):
+            self.engine.store.set_meta(stamp,'')
+            return None
         if kwargs.get('internal') or pulse_command(text): return None
         identity=f'{session_key}:{message_id}' if message_id else None
-        self.human(session_key,platform,source,identity)
+        stamp='queued_admission:'+(identity or session_key)
+        queued=bool(self.engine.store.get_meta(stamp))
+        if queued: self.engine.store.set_meta(stamp,'')
+        self.human(session_key,platform,source,identity,folded=not queued)
         return None
 
     @fail_open
@@ -183,6 +257,7 @@ class Intake:
         if len(matches)!=1: return None
         key=matches[0].session_key
         self.human(key,platform)
+        payload=bounded_payload(payload)
         digest=hashlib.sha1(json.dumps(payload,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         s.add_event(event_type,f'{platform}:{event_type}:{digest}',payload,session_key=key,chat_id=matches[0].chat_id)
         self.engine.signal()
@@ -196,11 +271,8 @@ class Intake:
         self._follow(session_id)
         previous=self.flights.get(session_id)
         if previous and turn_id and previous.turn_id and previous.turn_id!=turn_id:
-            if not kwargs.get('internal') and not marker(user_message) and not pulse_command(user_message):
-                wake=s.get_wake(previous.wake_id)
-                if wake.cancel_on_reply and wake.status in {'active','paused','proposed'}:
-                    previous.owner_replied=True
-                    s.cas_wake(wake.id,wake.status,expected_version=wake.version,status='cancelled',status_reason='owner_replied')
+            # Cancellation/owner activity is decided at real gateway admission,
+            # never by the shape of a replacement model turn.
             self.on_session_end(session_id=session_id,turn_id=previous.turn_id,failed=True)
         key=self._key(session_id)
         if not key: return None
@@ -225,7 +297,11 @@ class Intake:
                     if tip==session_id:
                         s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
                         w=s.get_wake(wid)
-                    else: invalid=True
+                    else:
+                        invalid=True
+                        if tip is not None:
+                            self._session_switch(w,session_id)
+                            w=s.get_wake(wid)
                 if w.status!='active': invalid=True
                 if w.cancel_on_reply and session.last_human_at is not None and o.claimed_at is not None and session.last_human_at>o.claimed_at:
                     invalid=True
@@ -246,16 +322,22 @@ class Intake:
             # human turn has visited the new tip before /new arrives.
             for w in s.list_wakes(key):
                 if w.status in {'active','paused','proposed'} and w.armed_session_id and w.armed_session_id!=session_id:
-                    if e.compression_tip(w.armed_session_id)==session_id:
+                    tip=e.compression_tip(w.armed_session_id)
+                    if tip==session_id:
                         s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
+                    elif tip is not None:
+                        self._session_switch(w,session_id)
             # Human turn context never turns a model call into a wake.
             self.flights.pop(session_id,None)
-            from .tool import session_env
-            mid=kwargs.get('message_id') or session_env('HERMES_SESSION_MESSAGE_ID')
-            dedupe=f'{key}:{mid}' if mid else f'{key}:turn:{session_id}:{turn_id}' if turn_id else None
-            if not kwargs.get('internal') and not pulse_command(user_message):
-                self.human(key,platform,dedupe=dedupe)
+            # Hermes supplies no internal flag here. Only a real admission (or
+            # running-lane dispatch) authorizes human-only notices and cards.
+            if not s.get_meta('human_context:'+key): return None
+            s.set_meta('human_context:'+key,'')
             lines=[]
+            count=int(s.get_meta('switched_notice:'+key) or 0)
+            if count:
+                lines.append(f'{count} wakes armed in your previous conversation were stopped; /pulse list')
+                s.set_meta('switched_notice:'+key,'')
             last_tick=s.get_meta('last_tick_at')
             if e.needs_restart():
                 stamp='stall_notice:'+key
@@ -286,6 +368,7 @@ class Intake:
     @fail_open
     def api_request_error(self,session_id='',turn_id='',reason='',status_code=None,error=None,**kwargs):
         self.event('api_error',session_id=session_id,
+            dedupe_extra=turn_id,
             reason=reason or ('http_%s'%status_code if status_code else 'unknown'),
             **{k:kwargs[k] for k in ('task_id',) if k in kwargs})
         # Hermes agent/api_request_hooks.py emits this per physical retry.
@@ -439,7 +522,7 @@ class Intake:
         return None
 
     @fail_open
-    def event(self,kind,session_id='',parent_session_id='',**kwargs):
+    def event(self,kind,session_id='',parent_session_id='',dedupe_extra='',**kwargs):
         key=self._key()
         # Board events can be profile-wide; API/subagent events must resolve to
         # their actual parent session rather than a foreign ambient turn.
@@ -452,8 +535,8 @@ class Intake:
             if not key: return None
         allowed=('task_id','board','assignee','run_id','profile_name','summary','reason',
                  'worker_pid','exit_kind','exit_code','outcome','child_session_id','child_status','child_summary')
-        payload={k:kwargs[k] for k in allowed if k in kwargs}
-        digest=hashlib.sha1(json.dumps([kind,key,payload],sort_keys=True,default=str).encode()).hexdigest()
+        payload=bounded_payload({k:kwargs[k] for k in allowed if k in kwargs})
+        digest=hashlib.sha1(json.dumps([kind,key,payload,dedupe_extra],sort_keys=True,default=str).encode()).hexdigest()
         self.engine.store.add_event(kind,'hook:'+digest,payload,session_key=key or None)
         self.engine.signal()
         return None

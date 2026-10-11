@@ -183,9 +183,14 @@ class Tool:
         e=self.engine
         updates={k:args[k] for k in ('title','note','reason','babysit','urgent') if k in args}
         trigger=dict(args.get('trigger',w.trigger_json))
-        if set(trigger) - set(PARAMETERS['properties']['trigger']['properties']):
+        if 'trigger' in args and set(trigger) - set(PARAMETERS['properties']['trigger']['properties']):
             raise ValueError('unknown trigger parameter')
         kind=trigger.get('kind',w.kind)
+        if kind in {'file','url'} and 'pattern' in trigger:
+            pattern=trigger['pattern']
+            if not isinstance(pattern,str) or len(pattern)>512: raise ValueError('pattern exceeds 512 characters')
+            try: re.compile(pattern)
+            except re.error: raise ValueError('invalid pattern') from None
         updates.update(kind=kind,trigger_json=trigger)
         if kind!=w.kind or any(trigger.get(k)!=w.trigger_json.get(k) for k in ('path','url','command','pattern','pid','cwd','fire_on')):
             updates['probe_state_json']=None
@@ -274,12 +279,14 @@ class Tool:
             scratch=scratch[:4000]
         if 'next_check' in args:
             w=e.store.get_wake(o.wake_id)
-            if w.kind not in RECURRING_KINDS: raise ValueError('next_check requires a paced or recurring wake')
-            requested=parse_duration(args['next_check'])
-            bounded=max(requested,w.pacing_min_s or e.policy.interval_floor(w))
-            if w.pacing_max_s is not None: bounded=min(bounded,w.pacing_max_s)
-            changes['next_check_s']=bounded
-            if requested!=bounded: clamps['next_check']=f'{requested} → {bounded} (pacing)'
+            if w.kind not in RECURRING_KINDS:
+                clamps['next_check']='next_check ignored: not recurring'
+            else:
+                requested=parse_duration(args['next_check'])
+                bounded=max(requested,w.pacing_min_s or e.policy.interval_floor(w))
+                if w.pacing_max_s is not None: bounded=min(bounded,w.pacing_max_s)
+                changes['next_check_s']=bounded
+                if requested!=bounded: clamps['next_check']=f'{requested} → {bounded} (pacing)'
         if not e.store.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=o.attempt,**changes):
             return {'error':'not_in_flight'}
         if scratch is not None: flight.scratch=scratch

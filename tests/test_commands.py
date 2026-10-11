@@ -80,7 +80,7 @@ def test_user_add_proposal_approval_and_governor_answers(runtime):
     e.store.cas_wake(w.id,'active',status='paused',status_reason='governor:noop')
     assert 'active' in commands.handle(f'slow {w.id}',runtime)
     assert e.store.get_wake(w.id).eff_interval_s > old
-    assert 'probe' in commands.handle(f'watch {w.id}',runtime).lower()
+    assert 'Ask your agent to turn it into a watcher' in commands.handle(f'watch {w.id}',runtime)
     assert e.store.get_wake(w.id).status == 'paused'
     commands.handle(f'stop {w.id}',runtime)
     assert e.store.get_wake(w.id).status == 'cancelled'

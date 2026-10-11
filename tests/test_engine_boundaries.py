@@ -50,7 +50,7 @@ def test_invalid_respond_does_not_stage_scratch(engine):
     e=engine
     w=arm(e)
     e.tick();start(e)
-    result=e.tool.handle({'action':'respond','notify':False,'outcome':'no_change','scratch':'must not persist','next_check':'1m'},session_id='sid')
+    result=e.tool.handle({'action':'respond','notify':False,'outcome':'no_change','summary':'x'*281,'scratch':'must not persist','next_check':'1m'},session_id='sid')
     assert result['error']=='invalid_request'
     end(e)
     assert e.store.get_wake(w.id).scratch==''

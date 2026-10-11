@@ -90,6 +90,7 @@ def test_R2_G2_child_never_touches_parent(engine, monkeypatch, child_signal):
 
 def test_R2_G2_parent_id_alone_is_main_turn(engine):
     engine.clock.advance(1)
+    engine.intake.pre_gateway_dispatch(event=inbound())
     engine.intake.pre_llm_call(session_id='branch',turn_id='main',user_message='hello',
                              platform='telegram',parent_session_id='sid')
     assert engine.store.get_session(KEY).current_session_id=='branch'
@@ -168,6 +169,7 @@ def test_R2_G3_queued_without_admission_and_owner_interrupt(engine, monkeypatch)
     e.intake.on_session_end(session_id='sid',turn_id='turn',interrupted=True)
     assert e.store.get_wake(w.id).error_streak==0
     session(e,unanswered_count=2)
+    e.intake.pre_gateway_dispatch(event=inbound('queued'))
     monkeypatch.setattr('heartbeat2.tool.session_env',lambda name: 'queued' if name=='HERMES_SESSION_MESSAGE_ID' else '')
     e.intake.pre_llm_call(session_id='sid',turn_id='q1',user_message='queued reply',platform='telegram')
     assert e.store.get_session(KEY).unanswered_count==0

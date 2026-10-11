@@ -1,7 +1,7 @@
 id: hermes-drained
 title: A mid-turn drained human message is a prompted reply
 cites:
-- 'Hermes: drained human input may skip post_gateway_admission and reach only pre_llm_call'
+- 'Hermes: drained human input reaches pre_gateway_dispatch but may skip post_gateway_admission'
 settings: {}
 arms:
 - ref: task

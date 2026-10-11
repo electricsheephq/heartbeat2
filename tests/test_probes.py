@@ -137,7 +137,7 @@ def test_command_modes_json_state_and_cwd(tmp_path, monkeypatch):
     monkeypatch.setattr(probes, '_run_command', run)
     w = wake('command', command=['git','status'], fire_on='change')
     first = probes.check(w, policy=Policy(), home=tmp_path)
-    assert first['fire']
+    assert not first['fire'] and first['baseline']
     assert not probes.check(replace(w, probe_state_json=first['state']), policy=Policy(), home=tmp_path)['fire']
     assert calls[0][1]['cwd'] == tmp_path
     for mode, code, fire in [('success',0,True),('success',1,False),('failure',1,True),('failure',0,False)]:

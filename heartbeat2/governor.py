@@ -129,13 +129,14 @@ def finish(engine,wake,occurrence):
         engine.ledger(w,noops=1-useful,valuable=useful,delivered=int(occurrence.delivered),
                       tokens_in=occurrence.tokens_in,tokens_out=occurrence.tokens_out)
         w=s.get_wake(w.id)
+        if engine.end_max_fires(w): return
         apply(engine,w,next_check=occurrence.next_check_s)
         history=[o for o in s.list_occurrences(w.id) if o.state=='done']
         babysit_done=w.babysit and (occurrence.notify or
             len(history)>=3 and all(o.outcome=='no_change' for o in history[-3:]))
         if babysit_done or w.kind=='at' or occurrence.outcome=='done':
             w=s.get_wake(w.id)
-            if w.status=='active': s.cas_wake(w.id,'active',status='done',status_reason='completed')
+            if w.status in {'active','paused'}: s.cas_wake(w.id,w.status,status='done',status_reason='completed')
 
 
 def error(engine,wake):
