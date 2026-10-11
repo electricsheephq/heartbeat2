@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import uuid
@@ -47,10 +48,16 @@ class Poller:
         self.epoch=uuid.uuid4().hex
         self.log=LOG
         self.closed=False
+        self.process_start=True
         self._lock_file=None
         self.refresh_policy=None
         self.restart=lambda: None
         self.signal=lambda: None
+        self.needs_restart=self._needs_restart
+
+    def _needs_restart(self):
+        last=self.store.get_meta('last_tick_monotonic')
+        return bool(last and self.clock.monotonic()-float(last)>180)
 
     def refresh(self):
         if self.refresh_policy:
@@ -99,14 +106,14 @@ class Poller:
     def reconcile(self):
         s=self.store
         with s.atomic():
-            for o in s.list_occurrences():
+            for o in s.list_occurrences() if self.process_start else []:
                 if o.state=='claimed': s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error='restart_refund')
                 elif o.state=='started':
                     s.cas_occurrence(o.wake_id,o.dedupe_key,'started','interrupted',attempt=o.attempt,error='restart')
-            for session in s.list_sessions():
+            for session in s.list_sessions() if self.process_start else []:
                 if session.busy_since is not None:
                     s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
-            for w in s.list_wakes(status='active'):
+            for w in s.list_wakes(status='active') if self.process_start else []:
                 if w.kind in RECURRING_KINDS and w.next_due_at is not None:
                     # An overdue interval becomes one immediate tick, then the
                     # next schedule is anchored at now, never the old cadence.
@@ -115,6 +122,7 @@ class Poller:
             s.set_meta('epoch',self.epoch)
             s.set_meta('poller_pid',str(os.getpid()))
             s.set_meta('poller_started_at',str(self.clock.now()))
+            self.process_start=False
 
     def _compression_tip(self,sid):
         try:
@@ -153,11 +161,25 @@ class Poller:
                 totals['delivered']+=1
         return totals
 
-    def cancel_occurrences(self,wid,reason):
+    def cancel_occurrences(self,wid,reason,*,preserve_started=False):
         for o in self.store.list_occurrences(wid):
+            if o.state=='started' and (preserve_started or reason=='owner_replied'): continue
             if o.state in {'pending','claimed','started'}:
                 self.store.cas_occurrence(wid,o.dedupe_key,o.state,'superseded',
                     attempt=o.attempt if o.state!='pending' else None,force_silent=True,error=reason)
+
+    def evaluate(self,w,fn):
+        """One wake's invalid stored data cannot roll back healthy siblings."""
+        s=self.store
+        if self.clock.now()<float(s.get_meta('eval_not_before:'+w.id) or 0): return
+        try:
+            with s.atomic(): return fn()
+        except Exception as exc:
+            self.log.warning('heartbeat2 wake evaluation failed (%s)',type(exc).__name__)
+            governor.error(self,s.get_wake(w.id))
+            current=s.get_wake(w.id)
+            s.set_meta('wake_error:'+w.id,type(exc).__name__)
+            s.set_meta('eval_not_before:'+w.id,str(self.clock.now()+RETRY_DELAYS[min(max(0,current.error_streak-1),4)]))
 
     def tick(self):
         if self.closed or not self.eligible(): return
@@ -168,6 +190,7 @@ class Poller:
             with s.atomic():
                 previous=float(s.get_meta('last_tick_at') or now)
                 s.set_meta('last_tick_at',str(now))
+                s.set_meta('last_tick_monotonic',str(self.clock.monotonic()))
                 if now-previous>15:
                     self.log.info('heartbeat2 wall gap %.1fs',now-previous)
                     for session in s.list_sessions():
@@ -183,7 +206,7 @@ class Poller:
                 self.times()
                 self.silence()
                 for o in s.list_occurrences(state='pending'):
-                    self.dispatch(o)
+                    self.evaluate(s.get_wake(o.wake_id),lambda o=o:self.dispatch(o))
                 if now-float(s.get_meta('last_gc_at') or 0)>=3600:
                     s.gc(ledger_days=self.policy.ledger_days,timezone=self.policy.resolved_timezone())
                 s.set_meta('last_error','')
@@ -194,6 +217,23 @@ class Poller:
 
     def acks(self):
         s=self.store
+        try: timeout=float(os.environ.get('HERMES_AGENT_TIMEOUT','1800'))
+        except (TypeError,ValueError): timeout=1800
+        if not math.isfinite(timeout): timeout=1800
+        ttl=max(timeout*10,7200)
+        now=self.clock.now()
+        for o in s.list_occurrences(state='started'):
+            w=s.get_wake(o.wake_id)
+            session=s.get_session(w.session_key)
+            activity=max(o.started_at if o.started_at is not None else now,session.last_activity_at or 0 if session else 0)
+            if now-activity<ttl: continue
+            if s.cas_occurrence(o.wake_id,o.dedupe_key,'started','interrupted',attempt=o.attempt,error='no_session_end',force_silent=True):
+                s.cas_wake(w.id,w.status,expected_version=w.version,tokens_in=w.tokens_in+o.tokens_in,tokens_out=w.tokens_out+o.tokens_out)
+                self.ledger(w,tokens_in=o.tokens_in,tokens_out=o.tokens_out)
+                governor.error(self,s.get_wake(w.id))
+        for session in s.list_sessions():
+            if session.busy_since is not None and now-max(session.busy_since,session.last_activity_at or 0)>=ttl:
+                s.cas_session(session.session_key,{'busy_since':session.busy_since,'last_activity_at':session.last_activity_at},busy_since=None)
         for o in s.list_occurrences(state='claimed'):
             if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
@@ -210,22 +250,27 @@ class Poller:
         s=self.store
         for event in s.pending_events():
             for w in s.list_wakes(status='active'):
-                if w.kind!=event['kind'] or not self.family_enabled(w): continue
-                if event['session_key'] and event['session_key']!=w.session_key: continue
-                if event['chat_id'] and event['chat_id']!=w.chat_id: continue
-                payload=event['payload_json']
-                filters=w.trigger_json
-                if w.kind=='reaction' and filters.get('emojis') and not set(filters['emojis']) & set(payload.get('emojis',[])): continue
-                if any(filters.get(k) is not None and payload.get(k)!=filters[k] for k in ('event','task_id','board')): continue
-                if w.kind=='api_error':
-                    last=float(s.get_meta('api_cooldown:'+w.id) or 0)
-                    if last and self.clock.now()-last<1800: continue
-                pending=s.list_occurrences(w.id,state='pending')
-                if pending and s.coalesce(w.id,pending[-1].dedupe_key,[payload]): continue
-                identity=hashlib.sha1(event['dedupe_key'].encode()).hexdigest()
-                s.add_occurrence(w.id,'e:'+identity,payload=[payload])
-                if w.kind=='api_error': s.set_meta('api_cooldown:'+w.id,str(self.clock.now()))
+                if w.kind==event['kind']:
+                    self.evaluate(w,lambda w=w,event=event:self._event(w,event))
             s.consume_event(event['seq'])
+
+    def _event(self,w,event):
+        s=self.store
+        if not self.family_enabled(w): return
+        if event['session_key'] and event['session_key']!=w.session_key: return
+        if event['chat_id'] and event['chat_id']!=w.chat_id: return
+        payload=event['payload_json']
+        filters=w.trigger_json
+        if w.kind=='reaction' and filters.get('emojis') and not set(filters['emojis']) & set(payload.get('emojis',[])): return
+        if any(filters.get(k) is not None and payload.get(k)!=filters[k] for k in ('event','task_id','board')): return
+        if w.kind=='api_error':
+            last=float(s.get_meta('api_cooldown:'+w.id) or 0)
+            if last and self.clock.now()-last<1800: return
+        pending=s.list_occurrences(w.id,state='pending')
+        if pending and s.coalesce(w.id,pending[-1].dedupe_key,[payload]): return
+        identity=hashlib.sha1(event['dedupe_key'].encode()).hexdigest()
+        s.add_occurrence(w.id,'e:'+identity,payload=[payload])
+        if w.kind=='api_error': s.set_meta('api_cooldown:'+w.id,str(self.clock.now()))
 
     def probes(self):
         s,now=self.store,self.clock.now()
@@ -235,9 +280,11 @@ class Poller:
                 if w.kind not in PROBE_KINDS or not self.family_enabled(w): continue
                 if w.expires_at is not None and w.expires_at<=now: continue
                 if w.next_due_at is not None and w.next_due_at<=now:
-                    due.append(w)
-                    s.cas_wake(w.id,'active',expected_version=w.version,
-                               next_due_at=now+max(self.policy.probe_floor_seconds,parse_duration(w.trigger_json.get('check_every',self.policy.probe_floor_seconds))))
+                    def prepare_probe(w=w):
+                        interval=max(self.policy.probe_floor_seconds,parse_duration(w.trigger_json.get('check_every',self.policy.probe_floor_seconds)))
+                        s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=now+interval)
+                        due.append(w)
+                    self.evaluate(w,prepare_probe)
         # U3 implements per-kind timeouts. Fixed four-worker pool never exceeds
         # four probe jobs; it does not hold SQLite across probe I/O.
         if due:
@@ -245,34 +292,48 @@ class Poller:
                 results=list(pool.map(self._safe_probe,due))
             with s.atomic():
                 for original,result in zip(due,results):
-                    w=s.get_wake(original.id)
-                    if w.status!='active': continue
-                    if result.get('unavailable'): continue
-                    if result.get('error'):
-                        governor.error(self,w)
-                        continue
-                    if result.get('fire'):
-                        identity=str(result.get('identity') or json.dumps(result.get('state',result.get('message','')),sort_keys=True))
-                        digest=hashlib.sha1(identity.encode()).hexdigest()
-                        if s.add_occurrence(w.id,'e:'+digest,payload=[{'message':result.get('message','')}]) and 'state' in result:
-                            s.cas_wake(w.id,'active',expected_version=w.version,probe_state_json=result['state'])
-                    else:
-                        updates={'gated_skips':w.gated_skips+1}
-                        # Command probe state is committed only on successful fire.
-                        if 'state' in result and w.kind!='command': updates['probe_state_json']=result['state']
-                        s.cas_wake(w.id,'active',expected_version=w.version,**updates)
-                        self.ledger(w,gated_skips=1)
+                    self.evaluate(original,lambda original=original,result=result:self._probe_result(original,result))
+
+    def _probe_result(self,original,result):
+        s=self.store
+        w=s.get_wake(original.id)
+        if w.status!='active' or result.get('unavailable'): return
+        if result.get('error'):
+            governor.error(self,w)
+            return
+        if result.get('fire'):
+            identity=str(result.get('identity') or json.dumps(result.get('state',result.get('message','')),sort_keys=True))
+            digest=hashlib.sha1(identity.encode()).hexdigest()
+            if s.add_occurrence(w.id,'e:'+digest,payload=[{'message':result.get('message','')}]) and 'state' in result:
+                s.cas_wake(w.id,'active',expected_version=w.version,probe_state_json=result['state'])
+        else:
+            updates={'gated_skips':w.gated_skips+1}
+            # Command probe state is committed only on successful fire.
+            if 'state' in result and w.kind!='command': updates['probe_state_json']=result['state']
+            s.cas_wake(w.id,'active',expected_version=w.version,**updates)
+            self.ledger(w,gated_skips=1)
 
     def _safe_probe(self,w):
         try: return self.probe_runner(w)
         except Exception: return {'error':'probe_failed'}
 
     def times(self):
+        for w in self.store.list_wakes(status='active'):
+            self.evaluate(w,lambda w=w:self._time(w))
+
+    def _time(self,w):
         s,now=self.store,self.clock.now()
-        for w in s.list_wakes(status='active'):
+        # Retain the existing schedule decisions, isolated per wake/savepoint.
+        if w.status=='active':
             if w.expires_at is not None and w.expires_at<=now:
                 s.cas_wake(w.id,'active',status='expired',status_reason='expired')
-                continue
+                self.cancel_occurrences(w.id,'expired')
+                return
+            hard_end=w.created_at+min(self.policy.max_lifetime_days*86400,14400 if w.babysit else float('inf'))
+            if not w.trigger_json.get('builtin') and hard_end<=now:
+                s.cas_wake(w.id,'active',status='expired',status_reason='max_lifetime_changed')
+                self.cancel_occurrences(w.id,'max_lifetime_changed')
+                return
             if w.kind in RECURRING_KINDS:
                 clamped=self.policy.clamp(w).wake
                 changes={k:getattr(clamped,k) for k in ('base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','expires_at','max_fires') if getattr(clamped,k)!=getattr(w,k)}
@@ -283,7 +344,8 @@ class Poller:
                 due=time_due(w,now=now,catch_up_s=self.policy.catch_up_hours*3600,
                              timezone=self.policy.resolved_timezone(),jitter_unit=self.jitter())
                 if due:
-                    s.add_occurrence(w.id,due.dedupe_key,state=due.state)
+                    if not (w.kind in RECURRING_KINDS and due.state=='pending' and s.list_occurrences(w.id,state='pending')):
+                        s.add_occurrence(w.id,due.dedupe_key,state=due.state)
                     s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due.next_due_at)
                     if due.state=='missed':
                         s.cas_wake(w.id,'active',status='done',status_reason='missed')
@@ -309,17 +371,30 @@ class Poller:
                         'owner_silent',id=wid,platform=session.platform,chat_type=session.chat_type,chat_id=session.chat_id,
                         armed_session_id=session.current_session_id,creator='user',reason='The owner has been quiet.',
                         trigger_json={'after':self.policy.checkin_after_hours*3600,'builtin':True}))
+                elif w.status in {'done','orphaned'}:
+                    # This system wake belongs to the chat, not one agent id.
+                    s.cas_wake(w.id,w.status,expected_version=w.version,status='active',status_reason='',armed_session_id=session.current_session_id)
         for w in s.list_wakes(status='active'):
             if w.kind!='owner_silent': continue
-            session=s.get_session(w.session_key)
-            if session is None or session.last_human_at is None or not session.episode_id: continue
-            after=parse_duration(w.trigger_json.get('after',self.policy.checkin_after_hours*3600))
-            if w.trigger_json.get('builtin') and w.ignored_streak: after*=2
-            if now-session.last_human_at>=after:
-                s.add_occurrence(w.id,'s:'+session.episode_id)
+            self.evaluate(w,lambda w=w:self._silence(w))
+
+    def _silence(self,w):
+        s,now=self.store,self.clock.now()
+        session=s.get_session(w.session_key)
+        if session is None or session.last_human_at is None or not session.episode_id: return
+        builtin=bool(w.trigger_json.get('builtin'))
+        if builtin and not self.policy.owner_silent_checkin: return
+        after=self.policy.checkin_after_hours*3600 if builtin else parse_duration(w.trigger_json.get('after',self.policy.checkin_after_hours*3600))
+        if builtin and w.ignored_streak: after*=2
+        if now-session.last_human_at>=after:
+            s.add_occurrence(w.id,'s:'+session.episode_id)
 
     def gate(self,w,o,s):
         now=self.clock.now()
+        if w.trigger_json.get('builtin'):
+            if not self.policy.owner_silent_checkin: return 'setting_off',True,None
+            after=self.policy.checkin_after_hours*3600*(2 if w.ignored_streak else 1)
+            if s and s.last_human_at is not None and now-s.last_human_at<after: return 'checkin_not_due',True,None
         if w.status!='active': return 'expired' if w.status=='expired' else 'wake_inactive',False,None
         if w.expires_at is not None and now>=w.expires_at: return 'expired',False,None
         if w.max_fires is not None and w.fires>=w.max_fires: return 'max_fires',False,None
@@ -395,9 +470,13 @@ class Poller:
             else: s.refund(w.id,o.dedupe_key,attempt=o.attempt,error='inject_failed')
 
     def status(self):
+        runtime=getattr(self,'runtime_status',None)
+        if runtime:
+            status=runtime()
+            if status: return status
         last=self.store.get_meta('last_tick_at')
         reason=('no gateway in this process' if not self.eligible() else
                 'injection disabled' if not self.injection_allowed() else
-                'lock held elsewhere' if not self._lock_file else self.store.get_meta('last_error') or '')
+                'lock held elsewhere' if not runtime and not self._lock_file else self.store.get_meta('last_error') or '')
         if last and self.clock.now()-float(last)<=15: return {'state':'alive','reason':reason}
         return {'state':'stalled' if last else 'not running','since':float(last) if last else None,'reason':reason}

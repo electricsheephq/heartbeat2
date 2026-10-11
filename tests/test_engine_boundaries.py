@@ -84,8 +84,8 @@ def test_changed_user_floor_applies_to_existing_recurring_wake(engine):
 def test_paused_after_claim_cannot_deliver(engine):
     e=engine
     w=arm(e);e.tick();start(e)
+    e.store.cas_wake(w.id,'active',status='paused',status_reason='user')
     e.tool.handle({'action':'respond','notify':True,'outcome':'progress','summary':'update'},session_id='sid')
-    e.store.cas_wake(w.id,'active',status='paused')
     assert e.intake.transform_llm_output(response_text='update',session_id='sid')=='[SILENT]'
 
 

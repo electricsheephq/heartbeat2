@@ -13,7 +13,7 @@ def obj(properties):
 
 STR = {'type': 'string'}
 BOOL = {'type': 'boolean'}
-SCHEMA = obj({
+PARAMETERS = obj({
     'action': {'type': 'string', 'enum': ['create', 'list', 'update', 'pause', 'resume', 'cancel', 'respond', 'off']},
     'id': STR, 'title': STR, 'note': STR, 'reason': STR,
     'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','fire_on','event','check_every','deadline','cwd')},
@@ -24,10 +24,12 @@ SCHEMA = obj({
     'outcome': {'type':'string','enum':['no_change','progress','done','blocked','needs_attention']},
     'notify':BOOL, 'summary':STR, 'next_check':STR, 'scratch':STR,
 })
-SCHEMA['required'] = ['action']
-DESCRIPTION = ('Arm a wake or watcher in this messaging conversation. Create needs note and trigger.kind; '
-               'bounds and clamps are reported. Use respond during a wake turn to choose whether to notify, '
-               'record an outcome, and optionally replace scratch or set next_check. Never type silence markers.')
+PARAMETERS['required'] = ['action']
+DESCRIPTION = ('Use create to arm a wake/watcher (note and trigger.kind required); list to inspect; '
+               'update to change instructions or trigger; pause to suspend; resume to restart a paused wake; '
+               'cancel to end it; off to stop checks for this chat. During a wake turn, use respond to set '
+               'outcome and notify, optionally scratch/next_check. Bounds and clamps are reported. Never type silence markers.')
+SCHEMA = {'name':'pulse','description':DESCRIPTION,'parameters':PARAMETERS}
 
 
 def current_session_key():
@@ -67,7 +69,7 @@ class Tool:
         e = self.engine
         try:
             e.refresh()
-            if not isinstance(args, dict) or set(args) - set(SCHEMA['properties']):
+            if not isinstance(args, dict) or set(args) - set(PARAMETERS['properties']):
                 return {'error':'unknown_parameter'}
             s = self.identity()
             if s is None:
@@ -142,22 +144,22 @@ class Tool:
                             from .policy import INJECTION_CONFIG
                             return {'error':'injection_disabled','detail':INJECTION_CONFIG}
                         if action == 'resume':
-                            if w.status not in {'paused','active'}:
+                            if w.status != 'paused':
                                 return {'error':'not_resumable'}
                             if w.status == 'paused' and (sum(x.status in {'active','proposed'} for x in e.store.list_wakes(s.session_key)) >= e.policy.max_active or sum(x.status in {'active','proposed'} for x in e.store.list_wakes()) >= 50):
                                 return {'error':'max_active'}
                         result = self.prepare(w,args, reschedule=action=='resume' or 'trigger' in args)
                         candidate, clamps = result.wake, result.clamped
                         if action == 'resume':
-                            candidate = replace(candidate,status='active',status_reason='',noop_streak=0,
-                                                ignored_streak=0,error_streak=0,eff_interval_s=candidate.base_interval_s)
+                            candidate = replace(candidate,status='active',status_reason='')
                     else:
                         candidate = replace(w,status='paused' if action=='pause' else 'cancelled',status_reason='agent')
                     updates = {k:v for k,v in asdict(candidate).items() if k not in {'id','session_key','created_at','updated_at','version'} and v != getattr(w,k)}
                     if updates and not e.store.cas_wake(w.id,w.status,expected_version=w.version,**updates):
                         return {'error':'concurrent_change'}
                     if action == 'cancel':
-                        e.cancel_occurrences(w.id,'cancelled')
+                        e.cancel_occurrences(w.id,'cancelled',preserve_started=True)
+                    if action == 'resume': e.store.set_meta('card:'+w.id,'')
                     item={'ok':True,'wake':asdict(e.store.get_wake(w.id)),'clamped':clamps}
                     results.append(item)
                 return results[0] if args.get('id') != 'all' and results else {'ok':True,'results':results}
@@ -171,17 +173,20 @@ class Tool:
         e=self.engine
         updates={k:args[k] for k in ('title','note','reason','babysit','urgent') if k in args}
         trigger=dict(args.get('trigger',w.trigger_json))
-        if set(trigger) - set(SCHEMA['properties']['trigger']['properties']):
+        if set(trigger) - set(PARAMETERS['properties']['trigger']['properties']):
             raise ValueError('unknown trigger parameter')
         kind=trigger.get('kind',w.kind)
         updates.update(kind=kind,trigger_json=trigger)
+        if 'after' in trigger: parse_duration(trigger['after'])
         if kind in {'every','self'}:
             every=trigger.get('every')
             if isinstance(every,str) and ' at ' in every:
                 every,trigger['at']=every.split(' at ',1)
                 trigger['every']=every
             if every is not None:
-                updates.update(base_interval_s=parse_duration(every),eff_interval_s=parse_duration(every))
+                duration=parse_duration(every)
+                if 'trigger' in args or w.base_interval_s is None:
+                    updates.update(base_interval_s=duration,eff_interval_s=duration)
             elif kind=='every' and w.base_interval_s is None:
                 raise ValueError('every requires a duration')
         pacing=args.get('pacing',{})
@@ -246,12 +251,15 @@ class Tool:
         summary=args.get('summary','')
         if not isinstance(summary,str) or len(summary)>280: raise ValueError('summary exceeds 280 characters')
         changes={'outcome':outcome,'notify':args['notify'],'summary':summary}
+        w=e.store.get_wake(o.wake_id)
+        if o.outcome is None and w.status in {'paused','cancelled'} and w.status_reason!='agent':
+            changes['force_silent']=True
         clamps={}
         scratch=args.get('scratch')
         if scratch is not None:
             if not isinstance(scratch,str): raise ValueError('scratch must be text')
-            scratch=scratch[:4000]
             if len(scratch)>4000: clamps['scratch']='length → 4000'
+            scratch=scratch[:4000]
         if 'next_check' in args:
             w=e.store.get_wake(o.wake_id)
             if w.kind not in RECURRING_KINDS: raise ValueError('next_check requires a paced or recurring wake')

@@ -6,12 +6,13 @@ non-gateway processes may still write inbox events; they never run the poller.
 from contextlib import contextmanager
 from pathlib import Path
 import logging
+import json
 import threading
 
 LOG=logging.getLogger('heartbeat2')
 _RUNTIMES={}
 _GUARD=threading.RLock()
-HOOKS=('post_gateway_admission','pre_command','gateway_platform_event','pre_llm_call',
+HOOKS=('pre_gateway_dispatch','post_gateway_admission','pre_command','gateway_platform_event','pre_llm_call',
        'post_api_request','transform_llm_output','on_session_end','agent_loop_stopped',
        'on_session_reset','kanban_task_completed','kanban_task_blocked',
        'on_kanban_worker_exited','subagent_stop','api_request_error')
@@ -48,6 +49,11 @@ class Runtime:
         self._stop=threading.Event()
         self._thread=None
         self._threads=[]
+        self._reconciled=False
+        self._runner=None
+        self._last_tick_monotonic=None
+        self._last_bootstrap_error=''
+        self._started_monotonic=self.clock.monotonic()
         self.closed=False
 
     def policy(self):
@@ -79,11 +85,17 @@ class Runtime:
                 self._engine.refresh_policy=self.policy
                 self._engine.restart=self.restart
                 self._engine.signal=self._wake.set
+                self._engine.needs_restart=self.needs_restart
+                self._engine.runtime_status=self.status
             return self._engine
 
     def hook(self,name,**kwargs):
         try:
             with home_scope(self.home):
+                if name=='pre_llm_call':
+                    from .intake import delegated_child
+                    if not delegated_child(kwargs.get('platform','')) and (self._thread is None or not self._thread.is_alive()):
+                        self.restart()
                 intake=self.get_engine().intake
                 if name in EVENTS: return intake.event(EVENTS[name],**kwargs)
                 return getattr(intake,name)(**kwargs)
@@ -93,10 +105,10 @@ class Runtime:
 
     def tool(self,args,**kwargs):
         try:
-            with home_scope(self.home): return self.get_engine().tool.handle(args,**kwargs)
+            with home_scope(self.home): return json.dumps(self.get_engine().tool.handle(args,**kwargs),ensure_ascii=False)
         except Exception:
             LOG.warning('heartbeat2 tool adapter failed',exc_info=True)
-            return {'error':'engine_unavailable'}
+            return json.dumps({'error':'engine_unavailable'})
 
     def command(self,raw_args):
         with home_scope(self.home):
@@ -110,7 +122,21 @@ class Runtime:
             self._stop=stop
             self._thread=threading.Thread(target=self._bootstrap,args=(stop,),name='heartbeat2-bootstrap',daemon=True)
             self._threads.append(self._thread)
+            self._started_monotonic=self.clock.monotonic()
             self._thread.start()
+
+    def needs_restart(self):
+        if self.closed: return False
+        if self._thread is None or not self._thread.is_alive(): return True
+        last=self._last_tick_monotonic if self._last_tick_monotonic is not None else self._started_monotonic
+        return self.clock.monotonic()-last>180
+
+    def status(self):
+        if self._last_bootstrap_error: return {'state':'not running','reason':self._last_bootstrap_error}
+        if self._thread is None or not self._thread.is_alive(): return {'state':'not running','reason':'bootstrap thread stopped'}
+        if self._runner is None or self._runner._lock_file is None:
+            return {'state':'not running','reason':'lock held elsewhere' if self._runner else 'bootstrap starting'}
+        return None
 
     def restart(self):
         # Cooperative replacement: old thread retains its own lock until it
@@ -137,17 +163,25 @@ class Runtime:
                         e=self.get_engine()
                         runner=Poller(self.ctx,e.store,e.policy,self.clock)
                         runner.refresh_policy=self.policy
+                        runner.process_start=not self._reconciled
+                        self._runner=runner
                     if not runner.acquire():
                         stop.wait(30)
                         continue
+                    self._reconciled=True
                     remaining=next_tick-self.clock.monotonic()
                     if remaining>0:
                         self._wake.wait(min(remaining,self.bootstrap_interval))
                         self._wake.clear()
                         continue
                     runner.tick()
+                    self._last_tick_monotonic=self.clock.monotonic()
+                    self._last_bootstrap_error=''
                     next_tick=self.clock.monotonic()+self.tick_interval
-        except Exception:
+        except Exception as exc:
+            self._last_bootstrap_error=type(exc).__name__
+            if self._engine:
+                self._engine.store.set_meta('last_error',self._last_bootstrap_error)
             LOG.warning('heartbeat2 bootstrap stopped',exc_info=True)
         finally:
             if runner: runner.close()

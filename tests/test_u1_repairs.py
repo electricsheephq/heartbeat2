@@ -115,12 +115,12 @@ def test_babysit_respects_owner_floor(clock):
 @pytest.mark.parametrize("settings,wake_changes,action,kwargs,reason", [
     ({}, {"status": "proposed"}, "resume", {}, "needs_owner_ok"),
     ({"agent_can_create": "no"}, {}, "update", {}, "agent_create_disabled"),
-    ({"agent_can_create": "ask_first"}, {}, "resume", {}, "needs_owner_ok"),
+    ({"agent_can_create": "ask_first"}, {"status": "paused"}, "resume", {}, "needs_owner_ok"),
     ({"source_command": False}, {}, "update", {"new_kind": "command"}, "source_disabled"),
-    ({"source_file": False}, {"kind": "file"}, "resume", {}, "source_disabled"),
+    ({"source_file": False}, {"kind": "file", "status": "paused"}, "resume", {}, "source_disabled"),
     ({}, {}, "update", {"new_kind": "imaginary"}, "unknown_kind"),
     ({}, {}, "update", {"new_kind": "every", "untrusted_payload": True}, "untrusted_rearm"),
-    ({}, {"kind": "every"}, "resume", {"untrusted_payload": True}, "untrusted_rearm"),
+    ({}, {"kind": "every", "status": "paused"}, "resume", {"untrusted_payload": True}, "untrusted_rearm"),
     ({}, {"kind": "every"}, "update", {"babysit": True}, "babysit_human_turn"),
 ])
 def test_mutation_gate_rechecks_creation_rules(clock, settings, wake_changes, action, kwargs, reason):
