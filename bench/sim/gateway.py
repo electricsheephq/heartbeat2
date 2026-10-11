@@ -43,7 +43,7 @@ class FakeGateway:
         self.sessions={}; self.refs={}; self.tips={}; self.stopped=False
         self.deliveries=[]; self.turns=[]; self.humans=[]; self.cards=[]; self.command_log=[]; self.trace=[]
         self.pause_fires={}; self.counter=0
-        self.occ_seen={}; self.gate_opened={}; self.deferred=set(); self.lock_violations=[]; self.claim_violations=[]; self.stop_windows=[]
+        self.occ_seen={}; self.holds={}; self.lock_violations=[]; self.claim_violations=[]; self.stop_windows=[]
         profiles={x.get('profile','main') for x in scenario.get('sessions',[{'name':'owner'}])}
         for profile in sorted(profiles):
             self.injectors[profile]=FakeInjector(self,profile)
@@ -72,15 +72,11 @@ class FakeGateway:
             identity=(profile,w.id,o.dedupe_key)
             self.occ_seen.setdefault(identity,self.t)
             reason,defer,until=real_gate(w,o,s)
+            holds=self.holds.setdefault(identity,[])
             if defer and reason in {'quiet_hours','busy','wake_spacing','provider_unavailable','session_paused','global_flood'}:
-                self.deferred.add(identity)
-                if until is not None: self.gate_opened[identity]=until-self.origin
-                elif reason=='wake_spacing': self.gate_opened[identity]=s.last_wake_turn_at-self.origin+engine.policy.wake_spacing_minutes*60
-                else: self.gate_opened[identity]=self.t
-            elif not reason and identity in self.deferred:
-                # No known exact deadline (busy/provider trial): first observed
-                # open tick, at the declared 15 s simulation resolution.
-                self.gate_opened[identity]=max(self.gate_opened.get(identity,self.t),self.t)
+                if not holds or holds[-1][1] is not None: holds.append([self.t,None])
+            elif holds and holds[-1][1] is None:
+                holds[-1][1]=self.t  # observed release; 15 s tick resolution
             return reason,defer,until
         engine.gate=observed_gate
         self.engines[profile]=engine
@@ -177,12 +173,18 @@ class FakeGateway:
             prompted=bool(active_turn and (flight and flight.owner_replied or not flight and not turn.startswith('wake-turn-')))
             identity=(profile,wid,occ)
             due=float(occ[2:])-self.origin if occ.startswith('t:') else self.occ_seen.get(identity,item['t'])
-            stop_ends=[end for begin,end in self.stop_windows if end is not None and due<end<=item['t']]
-            opened=max(due,self.gate_opened.get(identity,due),max(stop_ends,default=due))
+            inj=item['t']
+            spans=sorted((max(begin,due),min(inj if end is None else end,inj))
+                         for begin,end in self.holds.get(identity,[])+self.stop_windows)
+            held=0; last=due
+            for begin,end in spans:
+                if end>max(begin,last): held+=end-max(begin,last)
+                last=max(last,end)
+            opened=due+held
             self.turns.append({'t':self.t,'inject_t':item['t'],'session_key':session['key'],'profile':profile,'wake_id':wid,
                               'ref':ref,'occurrence':occ,'attempt':attempt,'valid':valid,'outcome':step['outcome'] if result.get('ok') else 'unreported',
                               'respond':result,'due_t':due,'gates_opened_t':opened,
-                              'lateness_s':max(0,item['t']-opened),'deferred_s':max(0,opened-due)})
+                              'lateness_s':max(0,inj-due-held),'deferred_s':held})
             if text!='[SILENT]':
                 self.deliveries.append({'t':self.t,'session_key':session['key'],'text':text,'wake_id':wid,'ref':ref,
                     'occurrence':occ,'profile':profile,'owner_profile':profile,'prompted':prompted,'unprompted':not prompted,'owner_session_key':w.session_key,'terminal_before':terminal_before})

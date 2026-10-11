@@ -31,7 +31,7 @@ class Heartbeat1:
         self.model=ScriptedModel(scenario['model_policy'])
         self.last_active=list(gateway.sessions)[-1]
         self.retries=[];self.delayed=[];self.delivered=set();self.events=set()
-        self.deliveries=[];self.turns=[];self.cards=[];self.pause_fires={}
+        self.deliveries=[];self.turns=[];self.cards=[];self.pause_fires={};self.message_attempts=[]
 
     def event(self,event):
         kind=event['event']
@@ -75,13 +75,7 @@ class Heartbeat1:
         if kind in {'subagent_done','api_error'}: return kind in self.events
         return True
 
-    def fire(self,ref,occurrence,due,retry=False):
-        """Uncapped failed-send retry; #85743 reports 189 resends.
-
-        https://github.com/openclaw/openclaw/issues/85743
-        A send attempt is observed via the same configured transport faults.
-        Done is committed only after delivery; a failed send remains retryable.
-        """
+    def fire(self,ref,occurrence,due):
         task=self.checklist[ref];owner=self.gateway.sessions[task.get('session','owner')]
         destination=self.gateway.sessions[self.last_active]
         ready=self.ready(ref)
@@ -97,20 +91,34 @@ class Heartbeat1:
             self.gateway.human(task.get('session','owner'),step['drained_human'],drained=True)
         raw=self.model.raw(step)
         text='' if raw.strip().casefold()=='heartbeat_ok' else raw
-        injector=self.gateway.injectors[owner['profile']]
         identity=(ref,occurrence)
         item={'t':self.gateway.t,'session_key':destination['key'],'owner_session_key':owner['key'],
               'text':text,'wake_id':'b_'+ref,'ref':ref,'occurrence':occurrence,
               'profile':destination['profile'],'owner_profile':owner['profile'],'prompted':False,'unprompted':True,
               'terminal_before':identity in self.delivered}
-        sent=False
-        if injector.mode in {'return_false','drop','never_start'}:
-            self.retries.append((ref,occurrence,due))
-        elif injector.mode=='delay': self.delayed.append((self.gateway.t+injector.delay_s,item,step['outcome']))
+        self.send(item,step['outcome'])
+
+    def send(self,item,outcome,*,retry=False):
+        """Uncapped resends of the same model output, without another turn.
+
+        https://github.com/openclaw/openclaw/issues/85743
+        Only return_false is an observable failure; accepted/lost sends cannot
+        trigger retries. Attempts and resends are messages, never model wakes.
+        """
+        ref=item['ref']; identity=(ref,item['occurrence'])
+        task=self.checklist[ref]
+        injector=self.gateway.injectors[item['owner_profile']]
+        text=item['text']; sent=False
+        item={**item,'t':self.gateway.t,'terminal_before':identity in self.delivered}
+        if text:
+            self.message_attempts.append({**item,'retry':retry,'accepted':injector.mode!='return_false'})
+        if not text: sent=True
+        elif injector.mode=='return_false': self.retries.append((item,outcome))
+        elif injector.mode in {'drop','never_start'}: sent=True
+        elif injector.mode=='delay': self.delayed.append((self.gateway.t+injector.delay_s,item,outcome))
         elif text:
             self.deliveries.append(item); self.delivered.add(identity); sent=True
-        elif not text: sent=True
-        if sent and step['outcome']=='done': task['status']='done'
+        if sent and outcome=='done': task['status']='done'
 
     def tick(self):
         if self.gateway.t>=self.scenario.get('baseline_stop_after_s',float('inf')):
@@ -118,7 +126,7 @@ class Heartbeat1:
             # https://github.com/openclaw/openclaw/issues/59710
             self.next_due=None;return
         retry=self.retries;self.retries=[]
-        for ref,occ,due in retry:self.fire(ref,occ,due,True)
+        for item,outcome in retry:self.send(item,outcome,retry=True)
         if self.next_due is not None and self.gateway.t>=self.next_due:
             # Freeze candidates before either timer runs: a racy double-fire,
             # rather than reading done after timer one and hiding #59703.

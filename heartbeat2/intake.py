@@ -285,6 +285,9 @@ class Intake:
 
     @fail_open
     def api_request_error(self,session_id='',turn_id='',reason='',status_code=None,error=None,**kwargs):
+        self.event('api_error',session_id=session_id,
+            reason=reason or ('http_%s'%status_code if status_code else 'unknown'),
+            **{k:kwargs[k] for k in ('task_id',) if k in kwargs})
         # Hermes agent/api_request_hooks.py emits this per physical retry.
         # Retain only the bounded classification, never request/error text.
         if delegated_child(kwargs.get('platform','')): return None
@@ -299,17 +302,19 @@ class Intake:
         f=self.flights.get(session_id)
         if f and turn_id and f.turn_id and turn_id!=f.turn_id: return None
         with s.atomic():
+            stamp='provider_failure:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
             if f:
                 o=s.get_occurrence(f.wake_id,f.dedupe_key)
                 if o and o.state=='started' and o.attempt==f.attempt:
+                    first=not s.get_meta('provider_error:'+o.id)
                     s.set_meta('provider_error:'+o.id,kind)
-                    e.interrupt(o,'provider_error:'+kind)
-                    f.invalid=True
+                    # The physical attempt may recover through retries, refresh
+                    # or fallback. Only G5/end/timeout can settle the turn.
+                    if first: e.provider_failure(kind)
+                    s.set_meta(stamp,'1')
             elif session_id and turn_id:
-                stamp='provider_failure:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
                 if not s.get_meta(stamp):
                     s.set_meta(stamp,'1'); e.provider_failure(kind)
-        self.event('api_error',session_id=session_id,reason=kind)
         return None
 
     @fail_open
@@ -325,6 +330,8 @@ class Intake:
             s.cas_session(key,{'last_activity_at':session.last_activity_at},last_activity_at=e.clock.now())
         f=self.flights.get(session_id)
         if not f or f.invalid or turn_id and f.turn_id and turn_id!=f.turn_id: return None
+        o=s.get_occurrence(f.wake_id,f.dedupe_key)
+        if o and o.attempt==f.attempt: s.set_meta('provider_error:'+o.id,'')
         if usage is None: return None
         def count(*names):
             for name in names:

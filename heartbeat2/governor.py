@@ -55,7 +55,7 @@ def owner_answer(engine,wake,answer):
                 if w.kind=='cron' else next_every(engine.clock.now(),interval,anchor=w.trigger_json.get('at') if w.kind=='every' else None,timezone=p.resolved_timezone()))
         if answer=='slow' and w.kind in PROBE_KINDS:
             interval=max(p.probe_floor_seconds,parse_duration(w.trigger_json.get('check_every',p.probe_floor_seconds)))
-            interval=max(p.probe_floor_seconds,min(interval*2,p.noop_max_backoff_hours*3600,w.pacing_max_s or float('inf')))
+            interval=max(interval,min(interval*2,p.noop_max_backoff_hours*3600,w.pacing_max_s or float('inf')))
             updates.update(trigger_json={**w.trigger_json,'check_every':interval},next_due_at=engine.clock.now()+interval)
         if not s.cas_wake(w.id,'paused',expected_version=w.version,**updates): return {'error':'concurrent_change'}
         if answer=='keep': s.set_meta('ratio_since:'+w.id,str(engine.clock.now()))

@@ -18,7 +18,7 @@ def latency_samples(turns):
             [x.get('deferred_s',0) for x in rows])
 
 
-def compute(scenario,log,turns,humans,snapshot,pause_fires,cards):
+def compute(scenario,log,turns,humans,snapshot,pause_fires,cards,message_attempts=None):
     unprompted=[d for d in log if d['unprompted']]
     seen=set();duplicates=0
     for delivery in log:
@@ -42,6 +42,9 @@ def compute(scenario,log,turns,humans,snapshot,pause_fires,cards):
     noops=sum(x['outcome']=='no_change' for x in turns)
     lateness,deferred=latency_samples(turns)
     metrics={'duplicate_deliveries':duplicates,'missed_required_fires':missed,
+             'delivered_messages':len(log),
+             'message_attempts':len(log) if message_attempts is None else len(message_attempts),
+             'resent_messages':sum(m['retry'] for m in message_attempts or []),
              'msgs_per_silence_episode':max(episodes.values(),default=0),'model_wakes':len(turns),
              'noop_model_wakes':noops,'noop_ratio':noops/len(turns) if turns else 0,
              'est_tokens':len(turns)*scenario.get('context_tokens',150000),

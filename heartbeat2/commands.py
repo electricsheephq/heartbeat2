@@ -1,5 +1,4 @@
 """Compact /pulse controls; gateway-bound session is the only authority."""
-from dataclasses import replace
 from datetime import datetime, timedelta
 import json
 import re
@@ -36,13 +35,7 @@ def _activation(engine, session, wake):
 
 
 def _reschedule(engine,wake):
-    result=engine.tool.prepare(wake,{},reschedule=wake.kind!='at')
-    if wake.kind=='at':
-        due=max(wake.next_due_at or engine.clock.now(),engine.clock.now())
-        while engine.store.get_occurrence(wake.id,f't:{due:.17g}') is not None:
-            due+=.001
-        result=replace(result,wake=replace(result.wake,next_due_at=due))
-    return result
+    return engine.tool.reschedule(wake)
 
 
 def resume_timed(engine):
@@ -97,7 +90,7 @@ def _add(engine, session, text):
         if match:
             trigger, note = {'kind':'every','every':match[1]}, match[2]
             if re.match(r'at\s+\d',note):
-                anchor=re.fullmatch(r'at\s+(\d{1,2})(?::(\d{2}))?(am|pm)?\s+(.+)',note,re.I|re.DOTALL)
+                anchor=re.fullmatch(r'at\s+(\d{1,2})(?::(\d{2}))?(?:\s*(am|pm)\b)?\s+(.+)',note,re.I|re.DOTALL)
                 if not anchor or anchor[2] is None and anchor[3] is None:
                     raise ValueError('use at H:MM, 9am or 9:00pm followed by a note')
                 hour,minute=int(anchor[1]),int(anchor[2] or 0)

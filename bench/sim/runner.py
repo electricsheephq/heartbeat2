@@ -39,11 +39,13 @@ def simulate(scenario,home,baseline=False):
         if not baseline:
             for profile,p in snapshot.items():
                 for w in p['wakes']:w['ref']=gateway.ref_for(profile,w['id'])
-        metrics,failures=compute(scenario,driver.deliveries,driver.turns,gateway.humans,snapshot,driver.pause_fires,driver.cards)
+        messages=getattr(driver,'message_attempts',None)
+        metrics,failures=compute(scenario,driver.deliveries,driver.turns,gateway.humans,snapshot,driver.pause_fires,driver.cards,messages)
         if not baseline:
             if gateway.lock_violations: failures.append('poller_lock_exclusion violated')
             if gateway.claim_violations: failures.append('stale_claim_cas violated')
         return {'metrics':metrics,'failures':failures,'deliveries':driver.deliveries,'turns':driver.turns,
+                'message_attempts':messages if messages is not None else driver.deliveries,
                 'database':snapshot,'cards':driver.cards,'humans':gateway.humans,
                 'injections':{p:i.attempts for p,i in gateway.injectors.items()},'commands':gateway.command_log,'trace':gateway.trace}
     finally:gateway.close()

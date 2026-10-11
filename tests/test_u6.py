@@ -62,9 +62,12 @@ def test_R6_L3_provider_settlement_and_profile_gate(runtime,reason,code,klass):
     assert rt.hook('api_request_error',session_id='sid',turn_id='turn',platform='telegram',reason=reason,
                    status_code=code,retry_count=0,max_retries=5,error={'type':'SyntheticProviderError','message':'private fixture'}) is None
     o=e.store.list_occurrences(w.id)[0]
+    assert o.state=='started' and e.store.get_meta('provider_error:'+o.id)==klass
+    assert e.store.get_wake(w.id).error_streak==0
+    e.intake.on_session_end(session_id='sid',turn_id='turn',failed=True)
+    o=e.store.list_occurrences(w.id)[0]
     assert o.state=='interrupted' and o.error=='provider_error:'+klass and o.force_silent
     assert e.store.get_wake(w.id).error_streak==1
-    assert e.intake.transform_llm_output(session_id='sid',turn_id='turn',response_text='failed')=='[SILENT]'
     other=arm(e); e.tick()
     assert len(e.ctx.calls)==1
     assert e.store.list_occurrences(other.id)[0].error=='provider_unavailable'
@@ -89,6 +92,10 @@ def test_R6_L3_backoff_steps_and_g5_fallback(engine):
         e.intake.api_request_error(session_id='sid',turn_id='turn',reason='rate_limit',status_code=429)
         gate=json.loads(e.store.get_meta('provider_health'))
         assert gate['until']-e.clock.now()==delay
+        assert e.store.list_occurrences(w.id)[0].state=='started'
+        e.clock.advance(1800); e.acks()
+        assert e.store.list_occurrences(w.id)[0].error=='provider_error:rate_limit'
+        assert json.loads(e.store.get_meta('provider_health'))==gate
         e.store.cas_wake(w.id,e.store.get_wake(w.id).status,status='cancelled')
         e.clock.advance(delay+600)
     # Provider identity stored with a flight is consumed by the new-turn path.
@@ -241,7 +248,9 @@ def test_R6_E4_baseline_duplicates_and_resend(tmp_path):
     duplicate=simulate(load_scenarios('duplicates-59703')[0],tmp_path/'dup',baseline=True)
     resend=simulate(load_scenarios('resend-85743')[0],tmp_path/'resend',baseline=True)
     assert duplicate['metrics']['duplicate_deliveries']>0
-    assert resend['metrics']['model_wakes']>=20
+    assert resend['metrics']['resent_messages']>=20
+    occurrences=[t['occurrence'] for t in resend['turns']]
+    assert len(occurrences)==len(set(occurrences))
 
 
 def test_R6_E5_lateness_excludes_gates(tmp_path):

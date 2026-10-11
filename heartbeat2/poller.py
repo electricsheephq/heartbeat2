@@ -21,6 +21,8 @@ from . import governor
 
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
+FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_message_cap','dm_only',
+    'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires'})
 
 
 def check_paused():
@@ -210,6 +212,7 @@ class Poller:
             finally:
                 self._probing=False
                 s.set_meta('probing_since','')
+                s.set_meta('probing_until','')
                 s.set_meta('last_tick_at',str(self.clock.now()))
                 s.set_meta('last_tick_monotonic',str(self.clock.monotonic()))
             with s.atomic():
@@ -237,7 +240,8 @@ class Poller:
             w=s.get_wake(o.wake_id)
             session=s.get_session(w.session_key)
             activity=max(o.started_at if o.started_at is not None else now,session.last_activity_at or 0 if session else 0)
-            if now-activity<ttl: continue
+            limit=timeout if s.get_meta('provider_error:'+o.id) else ttl
+            if now-activity<limit: continue
             self.interrupt(o,'no_session_end')
         for session in s.list_sessions():
             if session.busy_since is not None and now-max(session.busy_since,session.last_activity_at or 0)>=ttl:
@@ -297,6 +301,9 @@ class Poller:
         # U3 implements per-kind timeouts. Fixed four-worker pool never exceeds
         # four probe jobs; it does not hold SQLite across probe I/O.
         if due:
+            from .probes import COMMAND_DEADLINE_S, URL_DEADLINE_S
+            waves=math.ceil(len(due)/4)
+            s.set_meta('probing_until',str(self.clock.now()+waves*max(COMMAND_DEADLINE_S,URL_DEADLINE_S)+10))
             with ThreadPoolExecutor(max_workers=4,thread_name_prefix='pulse-probe') as pool:
                 results=list(pool.map(self._safe_probe,due))
             with s.atomic():
@@ -361,6 +368,10 @@ class Poller:
                 if due:
                     if not (w.kind in RECURRING_KINDS and due.state=='pending' and s.list_occurrences(w.id,state='pending')):
                         s.add_occurrence(w.id,due.dedupe_key,state=due.state)
+                    if s.get_meta('restart_due:'+w.id):
+                        for pending in s.list_occurrences(w.id,state='pending'):
+                            s.set_meta('recovered:'+pending.id,'1')
+                        s.set_meta('restart_due:'+w.id,'')
                     s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due.next_due_at)
                     if due.state=='pending' and getattr(self,'_tick_started_wall',now)-float(due.dedupe_key[2:])>15:
                         self.notice(w.session_key,'Some wakes were late / scheduler was stalled.')
@@ -456,13 +467,18 @@ class Poller:
         reason,defer,until=self.gate(w,o,session)
         if reason:
             if defer:
+                first=o.error!=reason
                 s.update_occurrence(w.id,o.dedupe_key,'pending',error=reason)
                 if reason=='provider_unavailable':
-                    self.ledger(w,gated_skips=1,provider_deferrals=1)
+                    if first: self.ledger(w,provider_deferrals=1)
                 elif until: s.set_meta('not_before:'+o.id,str(until))
             else:
                 s.cas_occurrence(w.id,o.dedupe_key,'pending','skipped',error=reason)
-                self.terminal_one_shot(s.get_wake(w.id))
+                if reason=='cancel_on_reply' and w.status=='active':
+                    s.cas_wake(w.id,'active',expected_version=w.version,status='cancelled',status_reason='owner_replied')
+                    self.cancel_occurrences(w.id,'owner_replied')
+                elif w.status=='active' and reason in FINAL_SKIP_REASONS:
+                    self.terminal_one_shot(s.get_wake(w.id))
                 self.ledger(w,gated_skips=1)
             return
         # Check again at the claim barrier, not just at tick entry.
@@ -488,8 +504,7 @@ class Poller:
         text=render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-1,
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
-             after_restart=bool(s.get_meta('recovered:'+o.id) or s.get_meta('restart_due:'+w.id)))
-        s.set_meta('restart_due:'+w.id,'')
+             after_restart=bool(s.get_meta('recovered:'+o.id)))
         try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
         except Exception: accepted=False
         if accepted:
@@ -510,10 +525,14 @@ class Poller:
             else: s.refund(w.id,o.dedupe_key,attempt=o.attempt,error='inject_failed')
 
     def terminal_one_shot(self,w):
-        if w.kind!='at' or w.status not in {'active','paused'} or w.next_due_at is not None: return
-        occurrences=self.store.list_occurrences(w.id)
-        if len(occurrences)==1 and occurrences[0].state in {'skipped','interrupted','dead','missed'}:
-            o=occurrences[0]
+        if w.kind!='at' or w.status!='active' or w.next_due_at is not None: return
+        occurrences=[o for o in self.store.list_occurrences(w.id) if o.state!='superseded']
+        if not occurrences or any(o.state in {'pending','claimed','started'} for o in occurrences): return
+        o=occurrences[-1]
+        if o.state in {'interrupted','dead','missed'} or o.state=='skipped' and o.error in FINAL_SKIP_REASONS:
+            if o.error=='cancel_on_reply':
+                self.store.cas_wake(w.id,'active',expected_version=w.version,status='cancelled',status_reason='owner_replied')
+                return
             self.store.cas_wake(w.id,w.status,expected_version=w.version,
                 status='failed',status_reason=o.state+(':'+o.error if o.error else ''))
 
@@ -529,13 +548,14 @@ class Poller:
             self.ledger(w,tokens_in=o.tokens_in,tokens_out=o.tokens_out)
             self.terminal_one_shot(s.get_wake(w.id))
             if count_error or provider: governor.error(self,s.get_wake(w.id))
-            if provider: self.provider_failure(provider)
+            if provider and not s.get_meta('provider_health'): self.provider_failure(provider)
             session=s.get_session(w.session_key)
             if session: s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
             return True
 
     def provider_failure(self,kind):
         health=json.loads(self.store.get_meta('provider_health') or '{}')
+        if health and health.get('until',0)>self.clock.now() and not health.get('trial'): return
         step=min(int(health.get('step',-1))+1,3)
         self.store.set_meta('provider_health',json.dumps({'reason':'provider_unavailable','class':kind,
             'step':step,'until':self.clock.now()+(300,900,3600,14400)[step]}))
@@ -546,7 +566,8 @@ class Poller:
         s=self.store; now=self.clock.now()
         last=s.get_meta('last_tick_at'); started=s.get_meta('poller_started_at')
         probing=s.get_meta('probing_since')
-        if probing and s.get_meta('probing_epoch')==s.get_meta('epoch') and 0<=now-float(probing)<=40:
+        until=float(s.get_meta('probing_until') or (float(probing)+40 if probing else 0))
+        if probing and s.get_meta('probing_epoch')==s.get_meta('epoch') and float(probing)<=now<=until:
             return {'state':'alive','reason':'checking probes'}
         if last and now-float(last)<=15 and s.get_meta('poller_pid') and s.get_meta('epoch'):
             return {'state':'alive','reason':s.get_meta('last_error') or ''}

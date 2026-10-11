@@ -148,7 +148,7 @@ class Tool:
                                 return {'error':'not_resumable'}
                             if w.status == 'paused' and (sum(x.status in {'active','proposed'} for x in e.store.list_wakes(s.session_key)) >= e.policy.max_active or sum(x.status in {'active','proposed'} for x in e.store.list_wakes()) >= 50):
                                 return {'error':'max_active'}
-                        result = self.prepare(w,args, reschedule=action=='resume' or 'trigger' in args)
+                        result = self.reschedule(w) if action=='resume' else self.prepare(w,args,reschedule='trigger' in args)
                         candidate, clamps = result.wake, result.clamped
                         if action == 'resume':
                             candidate = replace(candidate,status='active',status_reason='')
@@ -157,8 +157,8 @@ class Tool:
                     updates = {k:v for k,v in asdict(candidate).items() if k not in {'id','session_key','created_at','updated_at','version'} and v != getattr(w,k)}
                     if updates and not e.store.cas_wake(w.id,w.status,expected_version=w.version,**updates):
                         return {'error':'concurrent_change'}
-                    if action == 'cancel':
-                        e.cancel_occurrences(w.id,'cancelled',preserve_started=True)
+                    if action in {'pause','cancel'}:
+                        e.cancel_occurrences(w.id,'paused' if action=='pause' else 'cancelled',preserve_started=True)
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
                     item={'ok':True,'wake':asdict(e.store.get_wake(w.id)),'clamped':clamps}
                     results.append(item)
@@ -168,6 +168,16 @@ class Tool:
         except Exception:
             e.log.warning('pulse tool failed', exc_info=True)
             return {'error':'engine_error'}
+
+    def reschedule(self,w):
+        """Shared tool/command resume: preserve stored one-shot due, fresh key."""
+        result=self.prepare(w,{},reschedule=w.kind!='at')
+        if w.kind=='at':
+            due=max(w.next_due_at or self.engine.clock.now(),self.engine.clock.now())
+            while self.engine.store.get_occurrence(w.id,f't:{due:.17g}') is not None:
+                due+=.001
+            result=replace(result,wake=replace(result.wake,next_due_at=due))
+        return result
 
     def prepare(self,w,args,*,reschedule=True):
         e=self.engine
