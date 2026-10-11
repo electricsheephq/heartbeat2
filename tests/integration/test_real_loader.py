@@ -1,4 +1,5 @@
 """Real Hermes loader + fake gateway/session. No model or socket operations."""
+import json
 import shutil
 import socket
 import sys
@@ -73,9 +74,15 @@ def test_real_loader_worker_registration_and_same_session_silence(tmp_path, monk
         finally:
             clear_session_vars(tokens)
         assert 'w_' in out, out
-        tool_schema = sys.modules[loaded.module.__name__+'.heartbeat2.tool'].SCHEMA
+        full_schema = sys.modules[loaded.module.__name__+'.heartbeat2.tool'].SCHEMA
+        assert full_schema['name'] == 'pulse' and full_schema['description']
+        tool_schema = full_schema['parameters']
         assert 'respond' in tool_schema['properties']['action']['enum']
         assert not {'target','session','chat','platform','model'} & set(tool_schema['properties'])
+        # The real loader must have put a valid definition into Hermes' global ToolRegistry.
+        from tools.registry import registry as hermes_registry
+        definition = hermes_registry.get_definitions({'pulse'}, quiet=True)[0]['function']
+        assert definition['parameters']['required'] == ['action']
         clock.advance(60)
         engine.tick()
         assert len(calls) == 1 and calls[0]['session_key'] == key
@@ -84,7 +91,9 @@ def test_real_loader_worker_registration_and_same_session_silence(tmp_path, monk
         session_token = set_current_session_key(key)
         try:
             manager.invoke_hook('pre_llm_call',session_id='sid',turn_id='turn',platform='telegram',user_message=calls[0]['content'])
-            assert runtime.tool({'action':'respond','outcome':'no_change','notify':False,'summary':'nothing new'},session_id='sid')['ok']
+            # Dispatch through Hermes' real registry, exactly as the agent loop does.
+            result = json.loads(hermes_registry.dispatch('pulse',{'action':'respond','outcome':'no_change','notify':False,'summary':'nothing new'},session_id='sid'))
+            assert result['ok'], result
         finally:
             reset_current_session_key(session_token)
         assert '[SILENT]' in manager.invoke_hook('transform_llm_output',session_id='sid',turn_id='turn',response_text='Chatty reply')
