@@ -25,182 +25,182 @@ config_schema:
     type: bool
     default: true
     label: "Enabled"
-    description: "Master switch"
+    description: "Master switch for wakes and watchers in this profile."
   agent_can_create:
     type: str
     default: "yes"
-    label: "Agent can create"
-    description: "ask_first \u2192 agent-created items are `proposed` until `/pulse ok <id>`"
+    label: "Agent can arm wakes"
+    description: "yes · ask_first (the agent's wakes wait for `/pulse ok <id>`) · no"
     choices: ["yes", "ask_first", "no"]
   dm_only:
     type: bool
     default: true
-    label: "Dm only"
-    description: "Refuse group chats; fail closed on unknown chat type"
+    label: "Direct messages only"
+    description: "Refuse group chats. Unknown chat types are refused too."
   timezone:
     type: str
     default: ""
-    label: "Timezone"
-    description: "Blank \u2192 Hermes profile timezone (`hermes_time`) \u2192 system"
+    label: "Time zone"
+    description: "IANA name such as Europe/Paris. Blank uses the profile's time zone."
   quiet_hours:
     type: str
     default: "22:00-08:00"
     label: "Quiet hours"
-    description: "\"\" = none; crossing midnight allowed; due wakes defer to quiet end, recurring ticks inside are skipped"
+    description: "HH:MM-HH:MM, may cross midnight; blank for none. Due one-shots wait until the end; recurring ticks inside are skipped."
   quiet_hours_urgent:
     type: bool
     default: false
-    label: "Quiet hours urgent"
-    description: "Let `urgent` wakes through quiet hours"
+    label: "Urgent wakes ignore quiet hours"
+    description: "Let wakes marked urgent through quiet hours."
   max_model_wakes_per_day:
     type: int
     default: 24
-    label: "Max model wakes per day"
-    description: "Per session, local day"
+    label: "Wake turns per day"
+    description: "Per chat, local day. Each wake turn is a full model turn."
   max_messages_per_day:
     type: int
     default: 6
-    label: "Max messages per day"
-    description: "Delivered notify=true per session per day"
+    label: "Unprompted messages per day"
+    description: "Per chat, local day."
   max_unanswered:
     type: int
     default: 2
-    label: "Max unanswered"
-    description: "After N delivered unprompted messages with no human reply, the session is muted (all occurrences skipped `unanswered`, except user-created `urgent`) until the owner writes"
+    label: "Unanswered messages before mute"
+    description: "After this many unprompted messages with no reply, the agent's wakes and check-ins pause until you write. Wakes you armed still fire."
   min_interval_minutes:
     type: int
     default: 15
-    label: "Min interval minutes"
-    description: "Floor for recurring time wakes"
+    label: "Shortest repeat (minutes)"
+    description: "Floor for every recurring time wake."
   agent_ungated_floor_minutes:
     type: int
     default: 60
-    label: "Agent ungated floor minutes"
-    description: "Floor for agent-created recurring time wakes with no probe gate (babysit excepted)"
+    label: "Shortest agent timer without a watcher (minutes)"
+    description: "Floor for recurring timers the agent arms without a watcher."
   wake_spacing_minutes:
     type: int
     default: 10
-    label: "Wake spacing minutes"
-    description: "Min gap between wake turns in one session"
+    label: "Minutes between wake turns"
+    description: "Per chat."
   probe_floor_seconds:
     type: int
     default: 60
-    label: "Probe floor seconds"
-    description: "Fastest probe check"
+    label: "Fastest watcher check (seconds)"
+    description: "Watchers never check more often than this."
   max_active:
     type: int
     default: 10
-    label: "Max active"
-    description: "Active items per session (global cap 50)"
+    label: "Active wakes per chat"
+    description: "Also capped at 50 across the profile."
   max_lifetime_days:
     type: int
     default: 14
-    label: "Max lifetime days"
-    description: "Hard expiry; agent recurring items default 7 days unless renewed"
+    label: "Longest lifetime (days)"
+    description: "Every wake expires by then; agent recurring wakes default to 7 days."
   owner_silent_checkin:
     type: bool
     default: false
-    label: "Owner silent checkin"
-    description: "Built-in check-in after silence (evaOS profiles turn it on)"
+    label: "Check in after a long silence"
+    description: "Off by default. One check-in per silence, with how to turn it off."
   checkin_after_hours:
     type: int
     default: 24
-    label: "Checkin after hours"
-    description: "Threshold for the built-in check-in; doubles for the next episode if ignored"
+    label: "Silence before a check-in (hours)"
+    description: "Doubles for the next silence if a check-in is ignored."
   max_rearm_chain:
     type: int
     default: 2
-    label: "Max rearm chain"
-    description: "Depth limit for wakes armed inside wake turns (reset by a human message); max 1 child per wake turn"
+    label: "Wake-from-wake depth"
+    description: "How many wakes deep a chain armed inside wake turns may go; a message from you resets it."
   noop_slowdown_after:
     type: int
     default: 3
-    label: "Noop slowdown after"
-    description: "Empty fires before interval doubling"
+    label: "Empty fires before slowing down"
+    description: "A recurring wake that keeps finding nothing doubles its interval after this many."
   noop_backoff_factor:
     type: int
     default: 2
-    label: "Noop backoff factor"
-    description: "Multiplier for recurring no-op backoff."
+    label: "Slow-down multiplier"
+    description: "How much each slow-down stretches the interval."
   noop_max_backoff_hours:
     type: int
     default: 24
-    label: "Noop max backoff hours"
-    description: "Maximum hours of recurring no-op backoff."
+    label: "Longest slowed interval (hours)"
+    description: "Slowing down stops at this interval."
   suggest_gate_after:
     type: int
     default: 4
-    label: "Suggest gate after"
-    description: "Wake text suggests converting to a probe watcher"
+    label: "Empty fires before suggesting a watcher"
+    description: "The wake text suggests turning the timer into a watcher."
   noop_pause_after:
     type: int
     default: 6
-    label: "Noop pause after"
-    description: "Auto-pause + one keep/slow/stop/watch card"
+    label: "Empty fires before pausing"
+    description: "Pauses the wake and asks you once: keep, slow, stop or watch."
   ignored_pause_after:
     type: int
     default: 3
-    label: "Ignored pause after"
-    description: "Delivered messages with no engagement before pause"
+    label: "Ignored messages before pausing"
+    description: "Delivered messages with no reply in the engagement window."
   error_pause_after:
     type: int
     default: 5
-    label: "Error pause after"
-    description: "Pause after this many consecutive errors."
+    label: "Errors in a row before pausing"
+    description: "Errors in a row before pausing."
   engagement_window_hours:
     type: int
     default: 6
-    label: "Engagement window hours"
-    description: "A human reply within this window marks a delivered message as engaged"
+    label: "Reply window (hours)"
+    description: "A reply within this window counts a delivered message as useful."
   catch_up_hours:
     type: int
     default: 6
-    label: "Catch up hours"
-    description: "One-shots later than this are `missed` (reported once), not fired"
+    label: "Catch-up window (hours)"
+    description: "A one-shot more than this late after downtime is reported as missed instead of firing."
   probe_commands:
     type: str
     default: "gh pr view, gh pr checks, gh run view, gh run list, git ls-remote, git status, git log"
-    label: "Probe commands"
-    description: "Comma-separated argv prefixes allowed for `command` probes; \"\" disables command probes"
+    label: "Allowed watcher commands"
+    description: "Comma-separated argv prefixes for command watchers. Blank disables command watchers."
   source_silence:
     type: bool
     default: true
-    label: "Source silence"
-    description: "Enable each trigger family"
+    label: "Silence check-ins"
+    description: "Silence check-ins."
   source_process:
     type: bool
     default: true
-    label: "Source process"
-    description: "Enable each trigger family"
+    label: "Process watchers"
+    description: "Process watchers."
   source_file:
     type: bool
     default: true
-    label: "Source file"
-    description: "Enable each trigger family"
+    label: "File watchers"
+    description: "File watchers."
   source_url:
     type: bool
     default: true
-    label: "Source url"
-    description: "Enable each trigger family"
+    label: "URL watchers"
+    description: "URL watchers."
   source_command:
     type: bool
     default: true
-    label: "Source command"
-    description: "Enable each trigger family"
+    label: "Command watchers"
+    description: "Command watchers."
   source_events:
     type: bool
     default: true
-    label: "Source events"
-    description: "Enable each trigger family"
+    label: "Hermes event watchers"
+    description: "Kanban, subagent, API error and reaction events."
   presence_line:
     type: bool
     default: true
-    label: "Presence line"
-    description: "One \u226425-token context line on human turns when something is armed (via `pre_llm_call`)"
+    label: "Tell the agent what's armed"
+    description: "One short context line on your turns while something is armed."
   ledger_days:
     type: int
     default: 30
-    label: "Ledger days"
-    description: "Days of local-calendar ledger history to retain."
+    label: "Ledger history (days)"
+    description: "Ledger history (days)."
 provides_tools: [pulse]
 provides_hooks: [pre_gateway_dispatch, post_gateway_admission, pre_command, gateway_platform_event, pre_llm_call, post_api_request, transform_llm_output, on_session_end, agent_loop_stopped, on_session_reset, kanban_task_completed, kanban_task_blocked, on_kanban_worker_exited, subagent_stop, api_request_error]
