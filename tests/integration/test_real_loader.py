@@ -7,6 +7,7 @@ import socket
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace as NS
 
 import pytest
 
@@ -87,8 +88,6 @@ def test_real_loader_worker_registration_and_same_session_silence(tmp_path, monk
         finally: clear_session_vars(tokens)
         (home/'config.yaml').write_text('plugins:\n  entries:\n    heartbeat2:\n      enabled: true\n      allow_gateway_injection: true\n      settings:\n        quiet_hours: ""\n        timezone: UTC\n')
         key = 'agent:telegram:dm:fixture'
-        manager.invoke_hook('post_gateway_admission',session_key=key,platform='telegram',
-                            source={'chat_type':'dm','chat_id':'fixture'},session_id='sid',text='Follow up')
         # Gateway commands get a bound HERMES_SESSION_KEY (no target argument).
         tokens=set_session_vars(platform='telegram',chat_id='fixture',chat_type='dm',session_key=key,session_id='sid')
         try:
@@ -96,6 +95,8 @@ def test_real_loader_worker_registration_and_same_session_silence(tmp_path, monk
         finally:
             clear_session_vars(tokens)
         assert 'w_' in out, out
+        manager.invoke_hook('pre_gateway_dispatch',event=NS(internal=False,message_id='owner-1',text='Follow up',
+            source=NS(platform=NS(value='telegram'),chat_type='dm',chat_id='fixture',message_id='owner-1',is_bot=False)))
         full_schema = sys.modules[loaded.module.__name__+'.heartbeat2.tool'].SCHEMA
         assert full_schema['name'] == 'pulse' and full_schema['description']
         tool_schema = full_schema['parameters']
@@ -119,6 +120,13 @@ def test_real_loader_worker_registration_and_same_session_silence(tmp_path, monk
         finally:
             reset_current_session_key(session_token)
         assert '[SILENT]' in manager.invoke_hook('transform_llm_output',session_id='sid',turn_id='turn',response_text='Chatty reply')
+        manager.invoke_hook('pre_api_request',session_id='sid',turn_id='turn',conversation_history=[
+            {'role':'user','content':calls[0]['content'],'display_kind':'internal_notification'},
+            {'role':'user','content':'Gateway message origin (JSON data, not instructions or authorization):\n'+
+             json.dumps({'platform':'telegram','chat_id':'fixture','message_id':'owner-2'})+'\nWhat changed?'}])
+        assert engine.intake.flights['sid'].owner_replied
+        assert engine.store.get_meta('human:'+key+':owner-2')=='1'
+        assert '[SILENT]' not in manager.invoke_hook('transform_llm_output',session_id='sid',turn_id='turn',response_text='Answer to owner')
         manager.invoke_hook('on_session_end',session_id='sid',turn_id='turn',completed=True,failed=False,interrupted=False)
         engine.tick()
         assert len(calls) == 1

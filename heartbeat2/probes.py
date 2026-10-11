@@ -183,7 +183,7 @@ def _bounded_search(pattern, texts):
     proc=subprocess.Popen([sys.executable,'-I','-c',_MATCHER],stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
     try:
-        body=json.dumps([pattern,texts],ensure_ascii=False).encode('utf-8')
+        body=json.dumps([pattern,texts],ensure_ascii=True).encode('utf-8')
         stdout,_=proc.communicate(body,timeout=max(.001,deadline-time.monotonic()))
         if proc.returncode: raise ValueError('pattern matching failed')
         return json.loads(stdout)

@@ -203,4 +203,4 @@ config_schema:
     label: "Ledger history (days)"
     description: "Ledger history (days)."
 provides_tools: [pulse]
-provides_hooks: [pre_gateway_dispatch, post_gateway_admission, pre_command, gateway_platform_event, pre_llm_call, post_api_request, transform_llm_output, on_session_end, agent_loop_stopped, on_session_reset, kanban_task_completed, kanban_task_blocked, on_kanban_worker_exited, subagent_stop, api_request_error]
+provides_hooks: [pre_gateway_dispatch, post_gateway_admission, pre_command, gateway_platform_event, pre_llm_call, pre_api_request, post_api_request, transform_llm_output, on_session_end, agent_loop_stopped, on_session_reset, kanban_task_completed, kanban_task_blocked, on_kanban_worker_exited, subagent_stop, api_request_error]

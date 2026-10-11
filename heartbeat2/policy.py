@@ -291,13 +291,14 @@ class Policy:
             if old != interval:
                 clamped["check_every"] = f"{old} → {interval} (probe_floor)"
         now = self.clock.now()
-        max_life = min(self.max_lifetime_days * 86400, 4 * 3600) if wake.babysit else self.max_lifetime_days * 86400
-        default_life = min(max_life, 7 * 86400) if wake.creator == "agent" and wake.kind in RECURRING_KINDS else max_life
-        hard_end = (wake.created_at or now) + max_life
-        expires = min(now + default_life, hard_end) if wake.expires_at is None else min(wake.expires_at, hard_end)
-        if not math.isfinite(expires) or expires <= now:
-            raise ValueError("expiry must be in the future")
-        change("expires_at", expires, "expires", "babysit_lifetime" if wake.babysit else "max_lifetime")
+        if not (wake.trigger_json.get('builtin') and wake.expires_at is None):
+            max_life = min(self.max_lifetime_days * 86400, 4 * 3600) if wake.babysit else self.max_lifetime_days * 86400
+            default_life = min(max_life, 7 * 86400) if wake.creator == "agent" and wake.kind in RECURRING_KINDS else max_life
+            hard_end = (wake.created_at or now) + max_life
+            expires = min(now + default_life, hard_end) if wake.expires_at is None else min(wake.expires_at, hard_end)
+            if not math.isfinite(expires) or expires <= now:
+                raise ValueError("expiry must be in the future")
+            change("expires_at", expires, "expires", "babysit_lifetime" if wake.babysit else "max_lifetime")
         if wake.max_fires is not None and (isinstance(wake.max_fires, bool) or not isinstance(wake.max_fires, int) or wake.max_fires < 1):
             raise ValueError("max_fires must be positive")
         if wake.babysit:

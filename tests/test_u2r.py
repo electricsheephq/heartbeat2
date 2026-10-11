@@ -7,7 +7,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from test_engine import engine, arm, start, end, session, KEY, GatewayCtx
+from test_engine import admit, fold, engine, arm, start, end, session, KEY, GatewayCtx
 from heartbeat2 import governor
 from heartbeat2.model import Session
 from heartbeat2.poller import Poller
@@ -150,13 +150,15 @@ def test_R2_G3_running_reply_counts_once_and_is_never_silent(engine, monkeypatch
     assert after.last_human_at>before.last_human_at and after.episode_id!=before.episode_id
     assert after.unanswered_count==0 and e.store.get_wake(a.id).engaged==1
     assert e.store.get_wake(b.id).status=='cancelled'
+    fold(e)
     assert e.intake.transform_llm_output(response_text='answer to owner',session_id='sid',turn_id='turn') is None
     e.intake.on_session_end(session_id='sid',turn_id='turn',completed=True)
     assert not e.store.list_occurrences(b.id)[0].delivered
     assert e.store.get_session(KEY).unanswered_count==0
     e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_id':'unit','chat_type':'dm'},message_id='m1')
     monkeypatch.setattr('heartbeat2.tool.session_env',lambda name: 'm1' if name=='HERMES_SESSION_MESSAGE_ID' else '')
-    e.intake.pre_llm_call(session_id='sid',turn_id='queued',user_message='owner reply',platform='telegram')
+    e.intake.pre_llm_call(session_id='sid',turn_id='queued',user_message='owner reply',platform='telegram',
+        conversation_history=[{'role':'user','content':'owner reply','platform_message_id':'m1'}])
     assert e.store.get_session(KEY).episode_id==after.episode_id
     assert len([ev for ev in e.store.pending_events() if ev['kind']=='human_message'])==1
 
@@ -165,16 +167,15 @@ def test_R2_G3_queued_without_admission_and_owner_interrupt(engine, monkeypatch)
     e=engine
     w=arm(e); e.tick(); start(e)
     e.clock.advance(1)
-    e.intake.pre_gateway_dispatch(event=inbound('interrupt'))
-    e.intake.on_session_end(session_id='sid',turn_id='turn',interrupted=True)
+    e.intake.on_session_end(session_id='sid',turn_id='turn',interrupted=True,turn_exit_reason='interrupted_by_user')
     assert e.store.get_wake(w.id).error_streak==0
     session(e,unanswered_count=2)
-    e.intake.pre_gateway_dispatch(event=inbound('queued'))
     monkeypatch.setattr('heartbeat2.tool.session_env',lambda name: 'queued' if name=='HERMES_SESSION_MESSAGE_ID' else '')
-    e.intake.pre_llm_call(session_id='sid',turn_id='q1',user_message='queued reply',platform='telegram')
+    row={'role':'user','content':'queued reply','platform_message_id':'queued'}
+    e.intake.pre_llm_call(session_id='sid',turn_id='q1',user_message='queued reply',platform='telegram',conversation_history=[row])
     assert e.store.get_session(KEY).unanswered_count==0
     episode=e.store.get_session(KEY).episode_id
-    e.intake.pre_llm_call(session_id='sid',turn_id='q1',user_message='queued reply',platform='telegram')
+    e.intake.pre_llm_call(session_id='sid',turn_id='q1',user_message='queued reply',platform='telegram',conversation_history=[row])
     assert e.store.get_session(KEY).episode_id==episode
 
 
@@ -407,7 +408,7 @@ def test_R2_G10_checkin_survives_episode_and_new(engine, transition):
         e.intake.on_session_reset(old_session_id='sid',new_session_id='sid-new')
         assert not e.store.get_meta('notice:'+KEY)
         expected=1
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='new-human')
+    admit(e,'new-human')
     e.clock.advance(5*86400); e.tick()
     assert len(e.ctx.calls)==expected
     sid='sid-new' if transition=='new' else 'sid'

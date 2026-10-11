@@ -53,6 +53,9 @@ class FakeGateway:
             name=data['name']; platform=data.get('platform','telegram'); ctype=data.get('chat_type','dm')
             self.sessions[name]={'name':name,'profile':data.get('profile','main'),'platform':platform,'chat_type':ctype,
                                  'chat_id':data.get('chat_id',name),'key':f'agent:{platform}:{ctype}:{data.get("chat_id",name)}','sid':f'sid-{name}'}
+            session=self.sessions[name]
+            self.engine_for(name).store.upsert_session(Session(session['key'],platform,ctype,
+                str(session['chat_id']),session['sid']))
             self.human(name,'Begin the named task.')
         for arm in scenario.get('arms',[]): self.arm(arm)
 
@@ -98,15 +101,14 @@ class FakeGateway:
         self.counter+=1; mid=f'human-{self.counter}'; turn=f'human-turn-{self.counter}'
         self.humans.append({'t':self.t,'session_key':session['key'],'profile':session['profile'],'text':text,'drained':drained})
         with self.bound(session):
-            # Running-lane/drained input still reaches dispatch, but may skip
-            # post_gateway_admission. Model-call kwargs never prove humanity.
-            source=SimpleNamespace(platform=SimpleNamespace(value=session['platform']),chat_type=session['chat_type'],chat_id=session['chat_id'],is_bot=False)
-            e.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False,source=source,message_id=mid,text=text))
             if not drained:
+                source=SimpleNamespace(platform=SimpleNamespace(value=session['platform']),chat_type=session['chat_type'],chat_id=session['chat_id'],message_id=mid,is_bot=False)
+                e.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False,source=source,message_id=mid,text=text))
                 e.intake.post_gateway_admission(session_key=session['key'],platform=session['platform'],
                     source={'chat_type':session['chat_type'],'chat_id':session['chat_id']},message_id=mid,text=text)
             if not mid_turn:
-                context=e.intake.pre_llm_call(session_id=session['sid'],turn_id=turn,platform=session['platform'],user_message=text)
+                context=e.intake.pre_llm_call(session_id=session['sid'],turn_id=turn,platform=session['platform'],user_message=text,
+                    conversation_history=[{'role':'user','content':text,'platform_message_id':mid}])
                 if context:
                     for line in context.get('context','').splitlines():
                         if '/pulse watch' in line:self.cards.append({'t':self.t,'session_key':session['key'],'text':line})
@@ -161,7 +163,7 @@ class FakeGateway:
         with self.bound(session):
             e.intake.pre_llm_call(session_id=sid,turn_id=turn,platform=session['platform'],user_message=item['text'])
             if step.get('drained_human'):
-                # Mid-turn drain: dispatch, no admission, then the human model call.
+                # In-band drain skips admission/dispatch; its history row has the id.
                 turn=self.human(session['name'],step['drained_human'],drained=True,finish=False)
             if step.get('compact'):
                 new=sid+'-compact';self.tips[sid]=new;session['sid']=new;sid=new

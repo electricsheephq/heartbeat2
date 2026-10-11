@@ -80,6 +80,22 @@ def start(e, sid='sid', message=None):
     return e.intake.pre_llm_call(session_id=sid, turn_id='turn', user_message=text, platform='telegram')
 
 
+def admit(e, mid='h1', text='hello'):
+    source=SimpleNamespace(platform=SimpleNamespace(value='telegram'),chat_type='dm',
+                           chat_id='unit',message_id=mid,is_bot=False)
+    return e.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False,source=source,message_id=mid,text=text))
+
+
+def fold(e, mid='m1', text='owner reply'):
+    from heartbeat2.intake import ORIGIN
+    f=e.intake.flights['sid']
+    marker=f'⟦pulse o:{f.wake_id}/{f.dedupe_key} a:{f.attempt}⟧'
+    content=ORIGIN+'\n'+json.dumps({'platform':'telegram','chat_id':'unit','message_id':mid})+'\n'+text
+    return e.intake.pre_api_request(session_id='sid',turn_id=f.turn_id,conversation_history=[
+        {'role':'user','content':marker,'display_kind':'internal_notification'},
+        {'role':'user','content':content,'api_content':'scaffold'}])
+
+
 def end(e, outcome='no_change', notify=False, summary='same', **args):
     assert e.tool.handle(dict(action='respond', outcome=outcome, notify=notify, summary=summary, **args), session_id='sid')['ok']
     result = e.intake.transform_llm_output(response_text='Chatty output', session_id='sid', turn_id='turn')
@@ -144,11 +160,11 @@ def test_I5_stalled_self_heal_one_late_note(engine):
     e.store.set_meta('last_tick_monotonic', str(e.clock.monotonic()-200))
     restarts = []
     e.restart = lambda: restarts.append(True)
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h1')
+    admit(e,'h1')
     ctx = e.intake.pre_llm_call(session_id='sid', user_message='hello', platform='telegram')
     assert restarts == [True]
     assert 'stalled' in ctx['context']
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h2')
+    admit(e,'h2')
     ctx = e.intake.pre_llm_call(session_id='sid', user_message='hello again', platform='telegram')
     assert ctx is None or 'stalled' not in ctx.get('context', '')
 
@@ -355,10 +371,10 @@ def test_I17_six_silent_runs_pause_one_card(engine):
         e.clock.advance(intervals[-1])
     assert intervals[:4] == [3600,3600,7200,14400]
     assert e.store.get_wake(w.id).status_reason == 'governor:noop'
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h1')
+    admit(e,'h1')
     card = e.intake.pre_llm_call(session_id='sid', user_message='hello')
     assert '/pulse watch' in card['context']
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h2')
+    admit(e,'h2')
     again = e.intake.pre_llm_call(session_id='sid', user_message='again')
     assert again is None or '/pulse watch' not in again.get('context','')
     assert len(e.ctx.calls) == 6
@@ -426,7 +442,7 @@ def test_I22_unanswered_human_unmutes(engine):
     arm(e); e.tick()
     assert len(e.ctx.calls) == 2
     assert any(o.error=='unanswered' for o in e.store.list_occurrences())
-    assert e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h1',text='hello') is None
+    assert admit(e,'h1','hello') is None
     assert e.store.get_session(KEY).unanswered_count == 0
     arm(e); e.tick()
     assert len(e.ctx.calls) == 3

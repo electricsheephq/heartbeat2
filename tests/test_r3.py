@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import FakeCtx
-from test_engine import engine, arm, KEY, start, end, session
+from test_engine import admit, engine, arm, KEY, start, end, session
 from test_commands import runtime
 from heartbeat2 import commands, governor, probes, registration
 from heartbeat2.model import Wake
@@ -304,7 +304,7 @@ def test_R3_R8_note_required(runtime,text):
 def test_R3_R9_governor_card(runtime):
     e=runtime.get_engine(); w=arm(e,'every',status='paused',status_reason='governor:noop')
     e.store.set_meta('card:'+w.id,'noop')
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='human')
+    admit(e,'human')
     context=e.intake.pre_llm_call(session_id='sid',turn_id='human',user_message='hello',platform='telegram')['context']
     assert f'/pulse watch {w.id}' in context
 

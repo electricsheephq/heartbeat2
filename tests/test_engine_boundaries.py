@@ -1,6 +1,6 @@
 """Required attempt, accounting, lifecycle and permission boundaries."""
 from dataclasses import replace
-from test_engine import engine,arm,session,start,end,KEY
+from test_engine import admit, engine,arm,session,start,end,KEY
 from heartbeat2.model import Session
 
 
@@ -128,5 +128,5 @@ def test_human_activity_resets_existing_rearm_chain_depth(engine):
     e=engine
     w=arm(e,depth=2)
     e.clock.advance(1)
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='new-human',text='continue')
+    admit(e,'new-human','continue')
     assert e.store.get_wake(w.id).depth==0

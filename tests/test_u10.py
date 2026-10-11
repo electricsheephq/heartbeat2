@@ -73,7 +73,7 @@ def test_R10_A1_core_heartbeat_admission_is_machine(engine):
     assert (after.last_human_at, after.episode_id, after.unanswered_count) == (
         before.last_human_at, before.episode_id, 2)
     assert e.store.get_wake(w.id).status == 'active'
-    # The machine admission flag must be consumed, not swallow the next owner.
+    # A skipped machine admission must not swallow the next owner.
     admitted(e)
     assert e.store.get_session(KEY).unanswered_count == 0
     assert e.store.get_wake(w.id).status == 'cancelled'
@@ -86,12 +86,13 @@ def test_R10_A1_real_and_drained_owner_messages_count(engine, tmp_path):
     session(e, unanswered_count=2)
     before = e.store.get_session(KEY)
     e.clock.advance(1)
-    # A running-lane input reaches pre_gateway_dispatch but skips admission.
-    e.intake.pre_gateway_dispatch(event=inbound())
+    # In-band drained owner messages reach only pre_llm_call, with a row id.
+    row={'role':'user','content':'Any update?','platform_message_id':'owner-1'}
+    e.intake.pre_llm_call(session_id='sid', turn_id='human', user_message='Any update?', platform='telegram',conversation_history=[row])
     after = e.store.get_session(KEY)
     assert after.last_human_at > before.last_human_at and after.episode_id != before.episode_id
     assert after.unanswered_count == 0 and e.store.get_wake(w.id).status == 'cancelled'
-    e.intake.pre_llm_call(session_id='sid', turn_id='human', user_message='Any update?', platform='telegram')
+    e.intake.pre_llm_call(session_id='sid', turn_id='human', user_message='Any update?', platform='telegram',conversation_history=[row])
     assert e.store.get_session(KEY).episode_id == after.episode_id
     assert e.intake.transform_llm_output(session_id='sid', turn_id='human', response_text='Your update') is None
     result = simulate(load_scenarios('hermes-drained')[0], tmp_path/'drained')
@@ -402,8 +403,8 @@ def test_R10_B1_unlimited_timeout_allows_retry_success(engine, monkeypatch, time
 
 @pytest.mark.parametrize('mode,children,holder,known,silent', [
     ('queue',[],None,True,True), ('interrupt',[object()],None,True,True),
-    ('interrupt',[],'compression-worker',True,True), ('interrupt',[],None,True,False),
-    ('steer',[],None,True,False), ('unknown',[],None,False,False),
+    ('interrupt',[],'compression-worker',True,True), ('interrupt',[],None,True,True),
+    ('steer',[],None,True,True), ('unknown',[],None,False,True),
 ])
 def test_R10_B2_queued_owner_keeps_wake_silent(engine, mode, children, holder, known, silent):
     e = engine; w = arm(e); e.tick(); start(e)
@@ -411,7 +412,7 @@ def test_R10_B2_queued_owner_keeps_wake_silent(engine, mode, children, holder, k
     gw = NS(_busy_input_mode=mode, _running_agents={KEY:NS(_active_children=children)},
             _session_db=NS(get_compression_lock_holder=lambda sid:holder)) if known else None
     e.clock.advance(1); e.intake.pre_gateway_dispatch(event=inbound(), gateway=gw)
-    # Later admission must not undo a positive queue verdict.
+    # Admission never marks a fold, regardless of private gateway busy state.
     e.intake.post_gateway_admission(session_key=KEY, platform='telegram',
         source={'chat_type':'dm','chat_id':'unit'},message_id='owner-1',text='Any update?')
     assert e.store.get_session(KEY).unanswered_count == 0

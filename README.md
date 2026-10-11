@@ -237,6 +237,7 @@ This is a workflow comparison, not a measured performance or parity claim.
 
 ## Known issues / proof boundary
 
+- Signal/SimpleX owner messages drained in-band lack message ids and are not counted; Codex app-server native steer appends no history row, so folds into wake turns are not detected.
 - A wake is a normal model turn, billed like one at your conversation's context size; `/pulse ledger` ≈tokens per wake and `/pulse status` "Today … ≈tokens" show the running cost.
 - Unreleased. CI is defined here; remote matrix results and live DM delivery are
   separate gates. Offline U4 scenarios and the comparison runner are in

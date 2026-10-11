@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_engine import engine, arm, session, start, end, GatewayCtx, KEY
+from test_engine import admit, engine, arm, session, start, end, GatewayCtx, KEY
 from heartbeat2.model import Session
 from heartbeat2.policy import Policy
 
@@ -70,7 +70,7 @@ def test_stale_ack_and_owner_reply_force_silent(engine):
     e.tick()
     text=e.ctx.calls[-1][0]
     e.clock.advance(1)
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h',text='reply')
+    admit(e,'h','reply')
     start(e,message=text)
     assert e.intake.transform_llm_output(response_text='stale',session_id='sid')=='[SILENT]'
     e.intake.on_session_end(session_id='sid',completed=True)
@@ -81,23 +81,23 @@ def test_stale_ack_and_owner_reply_force_silent(engine):
 def test_human_presence_limits_and_commands_keep_owner_state(engine):
     e=engine
     arm(e)
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='initial')
+    admit(e,'initial')
     assert 'armed' in e.intake.pre_llm_call(session_id='sid',user_message='human')['context']
     e.intake.on_session_end(session_id='sid',completed=True)
     session(e,enabled=False,paused_until=e.clock.now()+100,first_notice_sent=True,unanswered_count=2)
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='h',text='hello')
+    admit(e,'h','hello')
     s=e.store.get_session(KEY)
     assert not s.enabled and s.first_notice_sent and s.paused_until
     assert s.unanswered_count==0
     e.policy=replace(e.policy,max_active=2)
     ctx=e.intake.pre_llm_call(session_id='sid',user_message='human')
     assert 'limits changed' in ctx['context']
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},message_id='again')
+    admit(e,'again')
     assert 'limits changed' not in e.intake.pre_llm_call(session_id='sid',user_message='again')['context']
     before=e.store.get_session(KEY).last_human_at
     e.clock.advance(10)
     assert e.intake.pre_command(surface='gateway',session_key=KEY,platform='telegram') is None
-    assert e.store.get_session(KEY).last_human_at>before
+    assert e.store.get_session(KEY).last_human_at==before
 
 
 def test_event_scope_filter_coalesce_and_deadline(engine):
