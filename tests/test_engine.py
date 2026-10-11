@@ -141,6 +141,7 @@ def test_I4_compaction_tip_and_new_orphans(engine):
 def test_I5_stalled_self_heal_one_late_note(engine):
     e = engine
     e.store.set_meta('last_tick_at', str(e.clock.now()-200))
+    e.store.set_meta('last_tick_monotonic', str(e.clock.monotonic()-200))
     restarts = []
     e.restart = lambda: restarts.append(True)
     ctx = e.intake.pre_llm_call(session_id='sid', user_message='hello', platform='telegram')
@@ -295,7 +296,7 @@ def test_I14_non_gateway_arming_refused(engine):
 
 def test_I15_schema_default_and_group_refused(engine):
     e = engine
-    assert SCHEMA.get('properties', {}).get('action')
+    assert SCHEMA['parameters']['properties']['action']
     def walk(node):
         if isinstance(node, dict):
             assert not (set(node.get('properties', {})) & {'target','session','chat','platform','model'})

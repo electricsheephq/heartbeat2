@@ -23,7 +23,7 @@ def test_permission_matrix_and_proposals(engine):
     assert e.tool.handle(dict(action='resume',id=wid),session_id='sid')['error']=='needs_owner_ok'
     assert e.tool.handle(dict(action='update',id=wid,note='updated'),session_id='sid')['wake']['status']=='proposed'
     e.policy = replace(e.policy,agent_can_create='no',enabled=False)
-    assert e.tool.handle(dict(action='pause',id=wid))['ok']
+    assert e.tool.handle(dict(action='pause',id=wid))['error']=='not_pausable'
     assert e.tool.handle(dict(action='cancel',id=wid))['ok']
     assert e.tool.handle(dict(action='off'))['ok']
     e.policy = replace(e.policy,enabled=True,agent_can_create='yes')
@@ -38,7 +38,9 @@ def test_owner_items_and_cross_session_are_fenced(engine):
     other = e.store.create_wake(replace(w,id='w_other',session_key='other'))
     assert e.tool.handle(dict(action='pause',id=other.id),session_id='sid')['error']=='wrong_session'
     end(e)
-    assert e.tool.handle(dict(action='pause',id=w.id),session_id='sid')['ok']
+    assert e.tool.handle(dict(action='pause',id=w.id),session_id='sid')['error']=='not_pausable'
+    active=arm(e,'every',creator='user')
+    assert e.tool.handle(dict(action='pause',id=active.id),session_id='sid')['ok']
 
 
 def test_respond_last_wins_usage_success_only_scratch(engine):
@@ -152,7 +154,7 @@ def test_governor_ignored_engagement_and_ratio(engine):
     from heartbeat2 import governor
     e=engine
     e.policy=replace(e.policy,ignored_pause_after=1,engagement_window_hours=1)
-    w=arm(e)
+    w=arm(e,'every')
     e.tick(); start(e); end(e,'progress',True)
     e.clock.advance(3601); e.tick()
     assert e.store.get_wake(w.id).status_reason=='governor:ignored'

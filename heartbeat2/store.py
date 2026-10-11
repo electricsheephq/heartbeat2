@@ -342,7 +342,8 @@ class Store:
         if "summary" in updates:
             if len(updates["summary"]) > 280:
                 raise ValueError("summary exceeds length limit")
-            updates["summary_hash"] = hashlib.sha256(updates["summary"].encode("utf-8")).hexdigest()
+            summary = " ".join(updates["summary"].split())
+            updates["summary_hash"] = hashlib.sha256(summary.encode("utf-8")).hexdigest() if summary else ""
         return self.cas_occurrence(wake_id, dedupe_key, "started", "done", attempt=attempt, **updates)
 
     def update_occurrence(self, wake_id: str, dedupe_key: str, expected_state: str, *,
@@ -363,7 +364,8 @@ class Store:
         if "summary" in updates:
             if len(updates["summary"]) > 280:
                 raise ValueError("summary exceeds length limit")
-            updates["summary_hash"] = hashlib.sha256(updates["summary"].encode("utf-8")).hexdigest()
+            summary = " ".join(updates["summary"].split())
+            updates["summary_hash"] = hashlib.sha256(summary.encode("utf-8")).hexdigest() if summary else ""
         where = "wake_id=? AND dedupe_key=? AND state=?"
         params = [wake_id, dedupe_key, expected_state]
         if attempt is not None:

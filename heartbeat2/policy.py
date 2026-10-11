@@ -204,12 +204,20 @@ class Policy:
             return Gate(False, "owner_item")
         if action not in {"update", "resume", "pause", "cancel", "off"}:
             return Gate(False, "unknown_action")
+        if action == "pause" and wake.status != "active":
+            return Gate(False, "not_pausable")
+        if action == "resume" and wake.status != "paused" and wake.status != "proposed":
+            return Gate(False, "not_resumable")
+        if wake.status in {"done", "cancelled", "orphaned", "expired", "failed"}:
+            return Gate(False, "terminal_wake")
         if action in {"pause", "cancel", "off"}:
             return Gate(True)
         if not self.enabled:
             return Gate(False, "disabled")
         if action == "resume" and wake.status == "proposed":
             return Gate(False, "needs_owner_ok")
+        if action == "resume" and wake.status_reason.startswith("governor:") and created_in != "human_turn":
+            return Gate(False, "needs_owner")
         kind = new_kind if new_kind is not None else wake.kind
         if kind not in KINDS:
             return Gate(False, "unknown_kind")

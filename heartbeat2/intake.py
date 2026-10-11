@@ -37,6 +37,15 @@ def fail_open(fn):
     return call
 
 
+def delegated_child(platform=''):
+    if platform=='subagent': return True
+    try:
+        from agent.delegation_context import is_delegated_child_context
+        return is_delegated_child_context()
+    except Exception:
+        return False
+
+
 @dataclass
 class Flight:
     session_key: str
@@ -48,6 +57,7 @@ class Flight:
     untrusted: bool=False
     invalid: bool=False
     scratch: str | None=None
+    owner_replied: bool=False
 
 
 class Intake:
@@ -58,8 +68,34 @@ class Intake:
         self.turns={}
 
     def flight_for(self,sid,key):
-        f=self.flights.get(sid)
-        return f if f and f.session_key==key else None
+        # Tools in delegate children inherit the key, but have a different id.
+        self._follow(sid)
+        for f in self.flights.values():
+            if f.session_key!=key: continue
+            o=self.engine.store.get_occurrence(f.wake_id,f.dedupe_key)
+            if f.invalid and f.session_id==sid or o and o.state=='started' and o.attempt==f.attempt:
+                return f
+        return None
+
+    def _follow(self,sid):
+        if not sid or sid in self.bindings or sid in self.flights: return
+        e,s=self.engine,self.engine.store
+        for old in list(self.bindings):
+            if e.compression_tip(old)!=sid: continue
+            key=self.bindings.pop(old)
+            self.bindings[sid]=key
+            self.turns[sid]=self.turns.pop(old,'')
+            f=self.flights.pop(old,None)
+            if f:
+                f.session_id=sid
+                self.flights[sid]=f
+            with s.atomic():
+                session=s.get_session(key)
+                s.cas_session(key,{'current_session_id':old},current_session_id=sid)
+                for w in s.list_wakes(key):
+                    if w.armed_session_id==old:
+                        s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=sid)
+            return
 
     def _key(self,sid='',key=''):
         if key and key!='default': return key
@@ -73,6 +109,7 @@ class Intake:
         source=source or {}
         with s.atomic():
             if dedupe and s.get_meta('human:'+dedupe): return
+            if dedupe and s.get_meta('nonhuman:'+dedupe): return
             s.upsert_session(Session(key,platform=platform,chat_type=source.get('chat_type',''),chat_id=str(source.get('chat_id') or '')))
             old=s.get_session(key)
             now=e.clock.now()
@@ -82,6 +119,9 @@ class Intake:
             if 'chat_id' in source: updates['chat_id']=str(source['chat_id'] or '')
             s.cas_session(key,{f.name:getattr(old,f.name) for f in fields(Session) if f.name!='session_key'},**updates)
             if dedupe: s.set_meta('human:'+dedupe,'1')
+            for f in self.flights.values():
+                if f.session_key==key and not f.invalid:
+                    f.owner_replied=True
             for o in s.list_occurrences(session_key=key,state='done'):
                 if o.delivered and o.ended_at is not None and 0<=now-o.ended_at<=e.policy.engagement_window_hours*3600:
                     governor.engagement(e,o)
@@ -95,10 +135,32 @@ class Intake:
         e.signal()
 
     @fail_open
+    def pre_gateway_dispatch(self,event=None,gateway=None,**kwargs):
+        if event is None or getattr(event,'internal',False): return None
+        source=getattr(event,'source',None)
+        platform=getattr(getattr(source,'platform',None),'value','')
+        chat_id=str(getattr(source,'chat_id','') or '')
+        matches=[s for s in self.engine.store.list_sessions() if s.platform==platform and s.chat_id==chat_id]
+        if not chat_id or len(matches)!=1: return None
+        key=matches[0].session_key
+        mid=getattr(event,'message_id','')
+        identity=f'{key}:{mid}' if mid else None
+        # SessionSource.to_dict() drops is_bot; preserve the real event verdict
+        # for the later admission/human branch, never inspect an absent dict key.
+        if getattr(source,'is_bot',False):
+            if identity: self.engine.store.set_meta('nonhuman:'+identity,'1')
+            return None
+        authorized=getattr(gateway,'_is_user_authorized_for_source',None)
+        if authorized and not authorized(source): return None
+        self.engine.refresh()
+        self.human(key,platform,{'chat_type':getattr(source,'chat_type',''),'chat_id':chat_id},identity)
+        return None
+
+    @fail_open
     def post_gateway_admission(self,session_key='',platform='',source=None,message_id='',text='',**kwargs):
         self.engine.refresh()
         if not isinstance(source,dict): return None
-        if source.get('is_bot') or kwargs.get('internal'): return None
+        if kwargs.get('internal'): return None
         identity=f'{session_key}:{message_id}' if message_id else None
         self.human(session_key,platform,source,identity)
         return None
@@ -124,8 +186,13 @@ class Intake:
 
     @fail_open
     def pre_llm_call(self,session_id='',turn_id='',user_message='',platform='',**kwargs):
+        if delegated_child(platform): return None
         e,s=self.engine,self.engine.store
         e.refresh()
+        self._follow(session_id)
+        previous=self.flights.get(session_id)
+        if previous and turn_id and previous.turn_id and previous.turn_id!=turn_id:
+            self.on_session_end(session_id=session_id,turn_id=previous.turn_id,failed=True)
         key=self._key(session_id)
         if not key: return None
         identity=e.tool.identity()
@@ -174,10 +241,16 @@ class Intake:
                         s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
             # Human turn context never turns a model call into a wake.
             self.flights.pop(session_id,None)
+            from .tool import session_env
+            mid=kwargs.get('message_id') or session_env('HERMES_SESSION_MESSAGE_ID')
+            dedupe=f'{key}:{mid}' if mid else f'{key}:turn:{session_id}:{turn_id}' if turn_id else None
+            if not kwargs.get('internal'):
+                self.human(key,platform,dedupe=dedupe)
             lines=[]
             last_tick=s.get_meta('last_tick_at')
-            if last_tick and now-float(last_tick)>180:
+            if e.needs_restart():
                 stamp='stall_notice:'+key
+                last_tick=last_tick or 'before_first_tick'
                 if s.get_meta(stamp)!=last_tick:
                     e.restart()
                     s.set_meta(stamp,last_tick)
@@ -203,7 +276,13 @@ class Intake:
 
     @fail_open
     def post_api_request(self,session_id='',turn_id='',usage=None,**kwargs):
+        if delegated_child(kwargs.get('platform','')): return None
         e,s=self.engine,self.engine.store
+        self._follow(session_id)
+        key=self.bindings.get(session_id)
+        if key and (not turn_id or not self.turns.get(session_id) or self.turns[session_id]==turn_id):
+            session=s.get_session(key)
+            s.cas_session(key,{'last_activity_at':session.last_activity_at},last_activity_at=e.clock.now())
         f=self.flights.get(session_id)
         if not f or f.invalid or turn_id and f.turn_id and turn_id!=f.turn_id: return None
         if usage is None: return None
@@ -222,19 +301,22 @@ class Intake:
 
     @fail_open
     def transform_llm_output(self,response_text='',session_id='',turn_id='',**kwargs):
+        if delegated_child(kwargs.get('platform','')): return None
         e,s=self.engine,self.engine.store
+        self._follow(session_id)
         f=self.flights.get(session_id)
         if not f or turn_id and f.turn_id and f.turn_id!=turn_id: return None
         with s.atomic():
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
+            if f.owner_replied and not f.invalid: return None
             if f.invalid or not o or o.state!='started' or o.attempt!=f.attempt: return '[SILENT]'
             w=s.get_wake(o.wake_id)
             session=s.get_session(f.session_key)
-            silence=(w.status!='active' or not e.policy.enabled or not session.enabled or e.paused() or
+            silence=(not e.policy.enabled or not session.enabled or e.paused() or
                      o.force_silent or not o.notify) or (
                 o.outcome is None and response_text.strip().casefold() in BARE_SILENCE)
-            if o.notify and o.summary_hash:
-                silence=silence or any(x.delivered and x.summary_hash==o.summary_hash and x.ended_at is not None and
+            if o.notify and o.summary.strip() and o.summary_hash:
+                silence=silence or any(x.delivered and x.summary.strip() and x.summary_hash==o.summary_hash and x.ended_at is not None and
                     0<=e.clock.now()-x.ended_at<=86400 for x in s.list_occurrences(o.wake_id,state='done'))
             if silence:
                 s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=f.attempt,force_silent=True)
@@ -243,7 +325,9 @@ class Intake:
 
     @fail_open
     def on_session_end(self,session_id='',turn_id='',completed=None,failed=False,interrupted=False,**kwargs):
+        if delegated_child(kwargs.get('platform','')): return None
         e,s=self.engine,self.engine.store
+        self._follow(session_id)
         f=self.flights.get(session_id)
         if turn_id and self.turns.get(session_id) and turn_id!=self.turns[session_id]: return None
         key=f.session_key if f else self.bindings.get(session_id)
@@ -262,13 +346,13 @@ class Intake:
                 s.cas_wake(w.id,w.status,expected_version=w.version,
                            tokens_in=w.tokens_in+o.tokens_in,tokens_out=w.tokens_out+o.tokens_out)
                 e.ledger(w,tokens_in=o.tokens_in,tokens_out=o.tokens_out)
-                governor.error(e,s.get_wake(o.wake_id))
+                if not f.owner_replied: governor.error(e,s.get_wake(o.wake_id))
                 return None
             # Recheck cancellation after the final transform: a human can reply
             # between claim/start/transform and successful finalization.
             w=s.get_wake(o.wake_id)
-            silenced=o.force_silent or not o.notify or w.status!='active' or not e.policy.enabled or not session.enabled or e.paused()
-            delivered=bool(o.notify and not silenced)
+            silenced=o.force_silent or not o.notify or not e.policy.enabled or not session.enabled or e.paused()
+            delivered=bool(o.notify and not silenced and not f.owner_replied)
             if not s.finish(o.wake_id,o.dedupe_key,attempt=o.attempt,outcome=o.outcome or 'unreported',delivered=delivered,force_silent=silenced): return None
             if f.scratch is not None:
                 s.cas_wake(w.id,w.status,expected_version=w.version,scratch=f.scratch)
@@ -295,6 +379,11 @@ class Intake:
         with s.atomic():
             keys=set()
             for w in s.list_wakes():
+                if w.trigger_json.get('builtin') and w.armed_session_id==old:
+                    s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=new_session_id)
+                    session=s.get_session(w.session_key)
+                    if session: s.cas_session(w.session_key,{'current_session_id':session.current_session_id},current_session_id=new_session_id,busy_since=None)
+                    continue
                 if w.armed_session_id==old and w.status in {'active','paused','proposed'}:
                     s.cas_wake(w.id,w.status,status='orphaned',status_reason='session_reset')
                     e.cancel_occurrences(w.id,'session_reset')

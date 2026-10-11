@@ -20,18 +20,48 @@ def value(engine,o):
 def pause(engine,wake,rule):
     s=engine.store
     current=s.get_wake(wake.id)
-    if current.status in {'cancelled','expired','orphaned','failed'}:
-        return
-    if current.status=='paused' and current.status_reason==f'governor:{rule}':
+    if current.status!='active':
         return
     if s.cas_wake(current.id,current.status,expected_version=current.version,
                   status='paused',status_reason=f'governor:{rule}'):
         s.set_meta('card:'+current.id,rule)
+        for o in s.list_occurrences(current.id,state='started'):
+            if o.outcome is None:
+                s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=o.attempt,force_silent=True)
+
+
+def owner_answer(engine,wake,answer):
+    """User /pulse card-answer seam; ordinary tool resume never resets history."""
+    s,p=engine.store,engine.policy
+    with s.atomic():
+        w=s.get_wake(wake.id)
+        if w.status!='paused' or not w.status_reason.startswith('governor:'):
+            return {'error':'not_governor_paused'}
+        if answer not in {'keep','slow'}: return {'error':'unknown_answer'}
+        updates={'status':'active','status_reason':''}
+        interval=w.eff_interval_s or w.base_interval_s or p.interval_floor(w)
+        if answer=='keep':
+            updates.update(noop_streak=0,ignored_streak=0,error_streak=0)
+            interval=max(w.base_interval_s or p.interval_floor(w),p.interval_floor(w))
+        else:
+            interval*=2
+            if w.pacing_max_s is not None: interval=min(interval,w.pacing_max_s)
+            updates['base_interval_s']=max(w.base_interval_s or p.interval_floor(w),interval)
+        if w.kind in RECURRING_KINDS:
+            updates['eff_interval_s']=interval
+            updates['next_due_at']=(next_cron(w.trigger_json['cron'],now=engine.clock.now(),timezone=p.resolved_timezone(),minimum_interval_s=interval)
+                if w.kind=='cron' else next_every(engine.clock.now(),interval,anchor=w.trigger_json.get('at') if w.kind=='every' else None,timezone=p.resolved_timezone()))
+        if not s.cas_wake(w.id,'paused',expected_version=w.version,**updates): return {'error':'concurrent_change'}
+        if answer=='keep': s.set_meta('ratio_since:'+w.id,str(engine.clock.now()))
+        s.set_meta('card:'+w.id,'')
+        engine.signal()
+        return {'ok':True}
 
 
 def apply(engine,wake,*,next_check=None):
     s,p=engine.store,engine.policy
     w=s.get_wake(wake.id)
+    if w.status!='active': return
     k=max(0,w.noop_streak-(p.noop_slowdown_after-1))
     updates={}
     if w.kind in RECURRING_KINDS:
@@ -70,7 +100,8 @@ def apply(engine,wake,*,next_check=None):
     if updates:
         s.cas_wake(w.id,w.status,expected_version=w.version,**updates)
         w=s.get_wake(w.id)
-    history=[o for o in s.list_occurrences(w.id) if o.state=='done'][-20:]
+    since=float(s.get_meta('ratio_since:'+w.id) or '-inf')
+    history=[o for o in s.list_occurrences(w.id) if o.state=='done' and o.ended_at is not None and o.ended_at>since][-20:]
     rule=('noop' if w.noop_streak>=p.noop_pause_after else
           'ignored' if w.ignored_streak>=p.ignored_pause_after else
           'error' if w.error_streak>=p.error_pause_after else
@@ -119,7 +150,7 @@ def engagement(engine,o):
         w=s.get_wake(o.wake_id)
         s.cas_wake(w.id,w.status,expected_version=w.version,engaged=w.engaged+1,noop_streak=0,ignored_streak=0)
         engine.ledger(w,engaged=1)
-        apply(engine,s.get_wake(w.id))
+        engine.evaluate(s.get_wake(w.id),lambda:apply(engine,s.get_wake(w.id)))
 
 
 def settle_ignored(engine):
@@ -133,7 +164,7 @@ def settle_ignored(engine):
             w=s.get_wake(o.wake_id)
             s.cas_wake(w.id,w.status,expected_version=w.version,ignored_streak=w.ignored_streak+1)
             engine.ledger(w,ignored=1)
-            apply(engine,s.get_wake(w.id))
+            engine.evaluate(s.get_wake(w.id),lambda:apply(engine,s.get_wake(w.id)))
 
 
 def hint(engine,wake):
