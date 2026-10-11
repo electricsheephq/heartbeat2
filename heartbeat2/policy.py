@@ -5,7 +5,7 @@ import math
 import os
 import shlex
 from typing import Mapping, Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .clock import Clock, SystemClock
 from .model import Wake, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, KINDS
@@ -121,13 +121,24 @@ class Policy:
                 raise ValueError(f"{name} must be positive")
         # Validate configured boundaries without consulting the real wall clock.
         if result.timezone:
-            ZoneInfo(result.timezone)
+            try:
+                ZoneInfo(result.timezone)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ValueError(f"invalid timezone: {result.timezone}") from exc
         quiet_end(result.clock.now(), result.quiet_hours, result.resolved_timezone())
         return result
 
     def resolved_timezone(self) -> tzinfo:
-        if self.timezone or self.profile_timezone:
-            return ZoneInfo(self.timezone or self.profile_timezone)
+        if self.timezone:
+            try:
+                return ZoneInfo(self.timezone)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ValueError(f"invalid timezone: {self.timezone}") from exc
+        if self.profile_timezone:
+            try:
+                return ZoneInfo(self.profile_timezone)
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
         try:
             from hermes_time import get_timezone
             tz = get_timezone()
@@ -136,7 +147,10 @@ class Policy:
         except Exception:
             pass
         if os.environ.get("TZ"):
-            return ZoneInfo(os.environ["TZ"].lstrip(":"))
+            try:
+                return ZoneInfo(os.environ["TZ"].lstrip(":"))
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
         # ZoneInfo.from_file retains system DST rules, unlike a fixed UTC offset.
         try:
             with open("/etc/localtime", "rb") as source:
@@ -182,7 +196,8 @@ class Policy:
         return Gate(True, status="proposed" if creator == "agent" and self.agent_can_create == "ask_first" else "active")
 
     def mutation_gate(self, wake: Wake, *, action: str, session_key: str,
-                      created_in: str) -> Gate:
+                      created_in: str, new_kind: str | None = None,
+                      babysit: bool | None = None, untrusted_payload: bool = False) -> Gate:
         if wake.session_key != session_key:
             return Gate(False, "wrong_session")
         if wake.creator == "user" and created_in != "human_turn":
@@ -193,11 +208,29 @@ class Policy:
             return Gate(True)
         if not self.enabled:
             return Gate(False, "disabled")
-        return Gate(True)
+        if action == "resume" and wake.status == "proposed":
+            return Gate(False, "needs_owner_ok")
+        kind = new_kind if new_kind is not None else wake.kind
+        if kind not in KINDS:
+            return Gate(False, "unknown_kind")
+        family = ("silence" if kind == "owner_silent" else "events" if kind in EVENT_KINDS
+                  else kind if kind in PROBE_KINDS else None)
+        if family and not getattr(self, f"source_{family}"):
+            return Gate(False, "source_disabled")
+        if wake.creator == "agent":
+            if self.agent_can_create == "no":
+                return Gate(False, "agent_create_disabled")
+            if self.agent_can_create == "ask_first" and wake.status != "proposed":
+                return Gate(False, "needs_owner_ok")
+        if created_in == "wake_turn" and untrusted_payload and kind != "at":
+            return Gate(False, "untrusted_rearm")
+        if (wake.babysit if babysit is None else babysit) and created_in != "human_turn":
+            return Gate(False, "babysit_human_turn")
+        return Gate(True, status=wake.status)
 
     def interval_floor(self, wake: Wake, *, probe_gated: bool = False) -> float:
         if wake.babysit:
-            return 300
+            return max(300, self.min_interval_minutes * 60)
         floor = self.min_interval_minutes * 60
         if wake.creator == "agent" and not probe_gated:
             floor = max(floor, self.agent_ungated_floor_minutes * 60)
@@ -232,7 +265,7 @@ class Policy:
                 value = old if old is not None else wake.base_interval_s
                 # Cron retains its expression; this interval is the earliest
                 # permitted next scheduled time rather than a rewritten cron.
-                if value is None and wake.kind == "cron":
+                if value is None and wake.kind in {"cron", "self"}:
                     value = floor
                 if value is not None:
                     value = parse_duration(value)
@@ -252,7 +285,8 @@ class Policy:
         now = self.clock.now()
         max_life = min(self.max_lifetime_days * 86400, 4 * 3600) if wake.babysit else self.max_lifetime_days * 86400
         default_life = min(max_life, 7 * 86400) if wake.creator == "agent" and wake.kind in RECURRING_KINDS else max_life
-        expires = now + default_life if wake.expires_at is None else min(wake.expires_at, now + max_life)
+        hard_end = (wake.created_at or now) + max_life
+        expires = min(now + default_life, hard_end) if wake.expires_at is None else min(wake.expires_at, hard_end)
         if not math.isfinite(expires) or expires <= now:
             raise ValueError("expiry must be in the future")
         change("expires_at", expires, "expires", "babysit_lifetime" if wake.babysit else "max_lifetime")

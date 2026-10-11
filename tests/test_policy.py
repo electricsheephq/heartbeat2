@@ -95,7 +95,7 @@ def test_deescalation_and_item_ownership(clock):
 @pytest.mark.parametrize("wake,interval,expiry,max_fires", [
     (make_wake(), 3600, 7 * 86400, None),
     (make_wake(creator="user"), 900, 14 * 86400, None),
-    (make_wake(babysit=True, expires_at=10**12, max_fires=100), 300, 4 * 3600, 24),
+    (make_wake(babysit=True, expires_at=10**12, max_fires=100), 900, 4 * 3600, 24),
     (make_wake(expires_at=10**12), 3600, 14 * 86400, None),
 ])
 def test_I18_interval_lifetime_babysit_clamps(wake, interval, expiry, max_fires, clock):

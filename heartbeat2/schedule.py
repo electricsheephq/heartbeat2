@@ -167,8 +167,11 @@ def time_due(wake: Wake, *, now: float, catch_up_s: float,
     key = f"t:{due:.17g}"
     if wake.kind == "at":
         return DueTime("missed" if now - due > catch_up_s else "pending", key, due, None)
-    next_due = (next_cron(wake.trigger_json["cron"], now=now, timezone=timezone,
-                          minimum_interval_s=wake.eff_interval_s or 0)
-                if wake.kind == "cron" else next_every(now, wake.eff_interval_s,
-                                                       jitter_unit=jitter_unit))
+    if wake.kind == "cron":
+        next_due = next_cron(wake.trigger_json["cron"], now=now, timezone=timezone,
+                             minimum_interval_s=wake.eff_interval_s or 0)
+    elif wake.kind == "every" and wake.trigger_json.get("at"):
+        next_due = next_every(now, wake.eff_interval_s, anchor=wake.trigger_json["at"], timezone=timezone)
+    else:
+        next_due = next_every(now, wake.eff_interval_s, jitter_unit=jitter_unit)
     return DueTime("pending", key, due, next_due)

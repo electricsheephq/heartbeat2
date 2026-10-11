@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
+import time
 from typing import Any
 
 from .clock import Clock
@@ -27,7 +28,7 @@ _JSON_FIELDS = {"trigger_json", "probe_state_json", "payload_json"}
 _BOOL_FIELDS = {"babysit", "urgent", "cancel_on_reply", "notify", "force_silent",
                 "enabled", "first_notice_sent"}
 _TRANSITIONS = {
-    "pending": {"claimed", "skipped", "missed", "dead", "orphaned", "superseded"},
+    "pending": { "skipped", "missed", "dead", "orphaned", "superseded"},
     "claimed": {"pending", "started", "dead", "interrupted", "orphaned", "superseded"},
     "started": {"done", "interrupted", "orphaned", "superseded"},
 }
@@ -145,7 +146,20 @@ class Store:
         try:
             self.connection.execute("PRAGMA busy_timeout=5000")
             self.connection.execute("PRAGMA foreign_keys=ON")
-            self.connection.execute("PRAGMA journal_mode=WAL")
+            # journal_mode can return SQLITE_BUSY without honouring busy_timeout.
+            # Use real elapsed time here: an injected/frozen test clock cannot
+            # bound contention on an operating-system resource.
+            deadline = time.monotonic() + 5.0
+            while True:
+                try:
+                    mode = self.connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+                    break
+                except sqlite3.OperationalError as exc:
+                    if not any(word in str(exc).lower() for word in ("locked", "busy")) or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
+            if str(mode).lower() != "wal":
+                raise sqlite3.OperationalError(f"could not enable WAL (got {mode})")
             with self.atomic():
                 self.connection.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
                 current = self.get_meta("schema_version")
@@ -377,22 +391,14 @@ class Store:
         with self._lock:
             return _record(Session, self.connection.execute("SELECT * FROM sessions WHERE session_key=?", (session_key,)).fetchone())
 
-    def upsert_session(self, session: Session):
-        """Insert or replace metadata using a full expected-record CAS on update.
-
-        Engine hooks should normally use cas_session for read/modify/write so
-        stale snapshots cannot overwrite a newer unanswered/activity state.
-        """
+    def upsert_session(self, session: Session) -> bool:
+        """Create if absent; all updates go through cas_session."""
+        data = asdict(session)
         with self.atomic():
-            current = self.get_session(session.session_key)
-            if current is None:
-                self._insert_record("sessions", session)
-            else:
-                before, after = asdict(current), asdict(session)
-                before.pop("session_key")
-                after.pop("session_key")
-                return self.cas_session(session.session_key, before, **after)
-            return True
+            return self.connection.execute(
+                f"INSERT INTO sessions ({','.join(data)}) VALUES ({','.join('?' for _ in data)}) "
+                "ON CONFLICT(session_key) DO NOTHING",
+                [_encode(k, v) for k, v in data.items()]).rowcount == 1
 
     def cas_session(self, session_key: str, expected: dict, **updates) -> bool:
         if not expected or not updates:

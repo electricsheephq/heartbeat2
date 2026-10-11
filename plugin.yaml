@@ -1,0 +1,194 @@
+name: heartbeat2
+version: 0.1.0
+description: "HeartBeat 2.0: bounded wakes and watchers in the conversation that armed them."
+author: Electric Sheep
+manifest_version: 2
+api_version: 1
+kind: standalone
+requires_hermes: ">=0.21.6"
+license: Apache-2.0
+homepage: https://github.com/electricsheephq/heartbeat2
+config_schema:
+  enabled:
+    type: bool
+    default: true
+    label: "Enabled"
+    description: "Master switch"
+  agent_can_create:
+    type: str
+    default: "yes"
+    label: "Agent can create"
+    description: "ask_first \u2192 agent-created items are `proposed` until `/pulse ok <id>`"
+    choices: ["yes", "ask_first", "no"]
+  dm_only:
+    type: bool
+    default: true
+    label: "Dm only"
+    description: "Refuse group chats; fail closed on unknown chat type"
+  timezone:
+    type: str
+    default: ""
+    label: "Timezone"
+    description: "Blank \u2192 Hermes profile timezone (`hermes_time`) \u2192 system"
+  quiet_hours:
+    type: str
+    default: "22:00-08:00"
+    label: "Quiet hours"
+    description: "\"\" = none; crossing midnight allowed; due wakes defer to quiet end, recurring ticks inside are skipped"
+  quiet_hours_urgent:
+    type: bool
+    default: false
+    label: "Quiet hours urgent"
+    description: "Let `urgent` wakes through quiet hours"
+  max_model_wakes_per_day:
+    type: int
+    default: 24
+    label: "Max model wakes per day"
+    description: "Per session, local day"
+  max_messages_per_day:
+    type: int
+    default: 6
+    label: "Max messages per day"
+    description: "Delivered notify=true per session per day"
+  max_unanswered:
+    type: int
+    default: 2
+    label: "Max unanswered"
+    description: "After N delivered unprompted messages with no human reply, the session is muted (all occurrences skipped `unanswered`, except user-created `urgent`) until the owner writes"
+  min_interval_minutes:
+    type: int
+    default: 15
+    label: "Min interval minutes"
+    description: "Floor for recurring time wakes"
+  agent_ungated_floor_minutes:
+    type: int
+    default: 60
+    label: "Agent ungated floor minutes"
+    description: "Floor for agent-created recurring time wakes with no probe gate (babysit excepted)"
+  wake_spacing_minutes:
+    type: int
+    default: 10
+    label: "Wake spacing minutes"
+    description: "Min gap between wake turns in one session"
+  probe_floor_seconds:
+    type: int
+    default: 60
+    label: "Probe floor seconds"
+    description: "Fastest probe check"
+  max_active:
+    type: int
+    default: 10
+    label: "Max active"
+    description: "Active items per session (global cap 50)"
+  max_lifetime_days:
+    type: int
+    default: 14
+    label: "Max lifetime days"
+    description: "Hard expiry; agent recurring items default 7 days unless renewed"
+  owner_silent_checkin:
+    type: bool
+    default: false
+    label: "Owner silent checkin"
+    description: "Built-in check-in after silence (evaOS profiles turn it on)"
+  checkin_after_hours:
+    type: int
+    default: 24
+    label: "Checkin after hours"
+    description: "Threshold for the built-in check-in; doubles for the next episode if ignored"
+  max_rearm_chain:
+    type: int
+    default: 2
+    label: "Max rearm chain"
+    description: "Depth limit for wakes armed inside wake turns (reset by a human message); max 1 child per wake turn"
+  noop_slowdown_after:
+    type: int
+    default: 3
+    label: "Noop slowdown after"
+    description: "Empty fires before interval doubling"
+  noop_backoff_factor:
+    type: int
+    default: 2
+    label: "Noop backoff factor"
+    description: "Multiplier for recurring no-op backoff."
+  noop_max_backoff_hours:
+    type: int
+    default: 24
+    label: "Noop max backoff hours"
+    description: "Maximum hours of recurring no-op backoff."
+  suggest_gate_after:
+    type: int
+    default: 4
+    label: "Suggest gate after"
+    description: "Wake text suggests converting to a probe watcher"
+  noop_pause_after:
+    type: int
+    default: 6
+    label: "Noop pause after"
+    description: "Auto-pause + one keep/slow/stop/convert card"
+  ignored_pause_after:
+    type: int
+    default: 3
+    label: "Ignored pause after"
+    description: "Delivered messages with no engagement before pause"
+  error_pause_after:
+    type: int
+    default: 5
+    label: "Error pause after"
+    description: "Pause after this many consecutive errors."
+  engagement_window_hours:
+    type: int
+    default: 6
+    label: "Engagement window hours"
+    description: "A human reply within this window marks a delivered message as engaged"
+  catch_up_hours:
+    type: int
+    default: 6
+    label: "Catch up hours"
+    description: "One-shots later than this are `missed` (reported once), not fired"
+  probe_commands:
+    type: str
+    default: "gh pr view, gh pr checks, gh run view, gh run list, git ls-remote, git status, git log"
+    label: "Probe commands"
+    description: "Comma-separated argv prefixes allowed for `command` probes; \"\" disables command probes"
+  source_silence:
+    type: bool
+    default: true
+    label: "Source silence"
+    description: "Enable each trigger family"
+  source_process:
+    type: bool
+    default: true
+    label: "Source process"
+    description: "Enable each trigger family"
+  source_file:
+    type: bool
+    default: true
+    label: "Source file"
+    description: "Enable each trigger family"
+  source_url:
+    type: bool
+    default: true
+    label: "Source url"
+    description: "Enable each trigger family"
+  source_command:
+    type: bool
+    default: true
+    label: "Source command"
+    description: "Enable each trigger family"
+  source_events:
+    type: bool
+    default: true
+    label: "Source events"
+    description: "Enable each trigger family"
+  presence_line:
+    type: bool
+    default: true
+    label: "Presence line"
+    description: "One \u226425-token context line on human turns when something is armed (via `pre_llm_call`)"
+  ledger_days:
+    type: int
+    default: 30
+    label: "Ledger days"
+    description: "Days of local-calendar ledger history to retain."
+provides_tools: [pulse]
+provides_hooks: [post_gateway_admission, pre_command, gateway_platform_event, pre_llm_call, post_api_request, transform_llm_output, on_session_end, agent_loop_stopped, on_session_reset, kanban_task_completed, kanban_task_blocked, on_kanban_worker_exited, subagent_stop, api_request_error]
