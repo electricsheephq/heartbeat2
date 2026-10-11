@@ -329,7 +329,7 @@ class Store:
     def claim(self, wake_id: str, dedupe_key: str, *, epoch: str, pid: int) -> bool:
         with self.atomic():
             return self.connection.execute("""UPDATE occurrences SET state='claimed',
-                attempt=attempt+1,epoch=?,pid=?,claimed_at=?,started_at=NULL,ended_at=NULL
+                attempt=attempt+1,epoch=?,pid=?,claimed_at=?,started_at=NULL,ended_at=NULL,error=''
                 WHERE wake_id=? AND dedupe_key=? AND state='pending'""",
                 (epoch, pid, self.clock.now(), wake_id, dedupe_key)).rowcount == 1
 

@@ -310,7 +310,7 @@ def test_R6_L2_engine_restart_wording(engine):
     e=engine; w=arm(e,next_due_at=e.clock.now()+60)
     e.tick(); session(e,busy_since=e.clock.now()); e.clock.advance(3600); e.tick()
     session(e,busy_since=None); e.tick()
-    assert 'late by' in e.ctx.calls[-1][0] and 'after restart' not in e.ctx.calls[-1][0]
+    assert 'held by a busy chat' in e.ctx.calls[-1][0] and 'after restart' not in e.ctx.calls[-1][0]
 
 
 def test_R6_E9_ABA_retarget_generation(engine):

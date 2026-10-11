@@ -227,7 +227,7 @@ def test_R8_F9_restart_scope_is_occurrence(engine,skip_quiet):
         session(e2,busy_since=e2.clock.now()); e2.tick()
         e2.clock.advance(120); session(e2,busy_since=None); e2.tick()
         why=next(line for line in e2.ctx.calls[-1][0].splitlines() if line.startswith('Why'))
-        assert 'late by 2m' in why and 'after restart' not in why
+        assert 'held by a busy chat' in why and 'after restart' not in why
     finally: e2.close()
 
 

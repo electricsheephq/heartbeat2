@@ -489,6 +489,7 @@ class Poller:
             self.terminal_one_shot(s.get_wake(w.id))
             governor.error(self,s.get_wake(w.id))
             return
+        held_by=o.error  # Claim clears the stored deferral; retain it for this prompt.
         if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
         o=s.get_occurrence(w.id,o.dedupe_key)
         health=json.loads(s.get_meta('provider_health') or '{}')
@@ -504,7 +505,7 @@ class Poller:
         text=render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-1,
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
-             after_restart=bool(s.get_meta('recovered:'+o.id)))
+             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by)
         try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
         except Exception: accepted=False
         if accepted:

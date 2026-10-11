@@ -8,6 +8,16 @@ from .clock import Clock
 from .model import Wake, Occurrence, Session, TIME_KINDS
 from .schedule import zone
 
+HOLD_LABELS = {
+    "quiet_hours": "quiet hours",
+    "busy": "a busy chat",
+    "wake_spacing": "wake spacing",
+    "in_flight": "another wake in flight",
+    "session_paused": "a pause",
+    "provider_unavailable": "a provider outage",
+    "not_before": "an error backoff",
+}
+
 
 def _age(seconds: float) -> str:
     minutes = max(0, int(seconds // 60))
@@ -28,14 +38,17 @@ def escape_text(text: str) -> str:
 def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: Clock,
                 timezone="UTC", recent_outcomes=(), messages_today: int = 0,
                 max_messages: int = 6, payload=None, governor_hint: str = "",
-                late_by_s: float | None = None, trigger_summary: str = "", after_restart: bool = False) -> str:
+                late_by_s: float | None = None, trigger_summary: str = "", after_restart: bool = False,
+                held_by: str = "") -> str:
     now = clock.now()
     local = datetime.fromtimestamp(now, zone(timezone))
     label = "wake" if wake.kind in TIME_KINDS else "watcher"
     owner = "you" if wake.creator == "agent" else "the owner"
     owner_age = _age(now - session.last_human_at) if session.last_human_at is not None else "unknown"
     why = wake.reason or trigger_summary or wake.kind
-    if late_by_s is not None and late_by_s >= 60:
+    if held_by in HOLD_LABELS:
+        why += f" (held by {HOLD_LABELS[held_by]}" + (" after restart" if after_restart else "") + ")"
+    elif late_by_s is not None and late_by_s >= 60:
         why += f" (late by {_age(late_by_s)}" + (" after restart" if after_restart else "") + ")"
     owner_clause = f" · owner last wrote {owner_age} ago" if session.last_human_at is not None else ""
     fire_limit = 1 if wake.kind == "at" else wake.max_fires if wake.max_fires is not None else "∞"
