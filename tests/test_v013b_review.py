@@ -2,10 +2,14 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from conftest import clock  # noqa: F401
-from test_engine import engine, arm, session, admit, KEY  # noqa: F401
+from test_engine import engine, arm, session, start, admit, KEY  # noqa: F401
 from test_v013b import NOTE, interrupted, replay
 from heartbeat2 import commands
+from heartbeat2.intake import Intake
+from heartbeat2.poller import Poller
 
 
 def hist(w, o, cur):
@@ -66,3 +70,83 @@ def test_first_fire_cache_line_describes_this_wake(engine, monkeypatch):
     engine.tick()
     lines = [l for t in (c[0] for c in engine.ctx.calls) for l in t.splitlines() if 'Cache' in l]
     assert lines and all('this wake warm' in l for l in lines), lines
+
+
+# PR #30 bot-review round: startup ordering, inbound admission, owner-reply lifetime, output tokens.
+
+
+def crashed(engine, state='started'):
+    """An attempt the crashed gateway claimed or started; this process has not reconciled yet."""
+    w = arm(engine)
+    engine.tick()
+    if state == 'started':
+        start(engine)
+    o, = engine.store.list_occurrences(w.id)
+    engine.store.connection.execute('UPDATE occurrences SET epoch=? WHERE wake_id=?', ('crashed-process', w.id))
+    engine.intake = Intake(engine)
+    return engine.store.get_wake(w.id), engine.store.get_occurrence(w.id, o.dedupe_key)
+
+
+def reconcile(engine):
+    Poller(engine.ctx, engine.store, engine.policy, engine.clock, paused=lambda: False).reconcile()
+
+
+@pytest.mark.parametrize('order', ['replay_first', 'reconcile_first'])
+def test_replay_settles_the_same_whichever_runs_first(engine, order):
+    w, o = crashed(engine)
+    assert o.state == 'started'
+    steps = [lambda: replay(engine, w, o), lambda: reconcile(engine)]
+    for step in (steps if order == 'replay_first' else steps[::-1]):
+        step()
+        if order == 'replay_first' and step is steps[0]:
+            assert engine.store.get_session(KEY).busy_since is not None
+    assert engine.intake.transform_llm_output(session_id='sid', turn_id='resumed', response_text='Restored') == '[SILENT]'
+    o2, w2 = engine.store.get_occurrence(w.id, o.dedupe_key), engine.store.get_wake(w.id)
+    assert (o2.state, o2.error, o2.delivered) == ('interrupted', 'restart', False)
+    assert (w2.fires, w2.delivered, w2.model_turns, w2.error_streak) == (w.fires, 0, w.model_turns + 1, w.error_streak + 1)
+    assert (w2.status, w2.status_reason) == ('failed', 'resumed_after_restart')
+
+
+def test_replay_of_a_claimed_crashed_attempt_leaves_it_for_refund(engine):
+    w, o = crashed(engine, state='claimed')
+    assert o.state == 'claimed'
+    replay(engine, w, o)
+    assert engine.intake.transform_llm_output(session_id='sid', turn_id='resumed', response_text='Restored') == '[SILENT]'
+    assert engine.store.get_occurrence(w.id, o.dedupe_key).state == 'claimed'
+    reconcile(engine)
+    o2 = engine.store.get_occurrence(w.id, o.dedupe_key)
+    assert (o2.state, o2.error) == ('pending', 'restart_refund')
+    assert engine.store.get_wake(w.id).model_turns == w.model_turns + 1
+
+
+def test_replay_never_silences_an_attempt_this_process_claimed(engine):
+    w, o = crashed(engine)
+    engine.store.connection.execute('UPDATE occurrences SET epoch=? WHERE wake_id=?', (engine.epoch, w.id))
+    replay(engine, w, o)
+    assert engine.intake.transform_llm_output(session_id='sid', turn_id='resumed', response_text='Normal') is None
+    assert engine.store.get_occurrence(w.id, o.dedupe_key).state == 'started'
+    assert engine.store.get_wake(w.id).model_turns == w.model_turns
+
+
+@pytest.mark.parametrize('sender,silenced', [('bot', True), ('unauthorized', True), ('owner', False)])
+def test_only_an_admitted_inbound_vetoes_replay(engine, sender, silenced):
+    w, o = interrupted(engine)
+    source = SimpleNamespace(platform=SimpleNamespace(value='telegram'), chat_type='dm', chat_id='unit',
+                             message_id='x1', is_bot=sender == 'bot')
+    gateway = SimpleNamespace(_session_key_for_source=lambda _: KEY,
+                              _is_user_authorized_for_source=lambda _: sender != 'unauthorized')
+    engine.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False, source=source, message_id='x1', text='hi'),
+                                       gateway=gateway)
+    replay(engine, w, o)
+    out = engine.intake.transform_llm_output(session_id='sid', turn_id='resumed', response_text='Restored')
+    assert (out == '[SILENT]') is silenced
+
+
+@pytest.mark.parametrize('usage,out', [({}, 0), ({'completion_tokens': 5}, 5), (SimpleNamespace(output_tokens=7), 7)])
+def test_output_tokens_count_without_prompt_counts(engine, usage, out):
+    w = arm(engine)
+    engine.tick()
+    start(engine)
+    engine.intake.post_api_request(session_id='sid', turn_id='turn', usage=usage, provider='openai', model='gpt-6.1-sol')
+    o, = engine.store.list_occurrences(w.id)
+    assert (o.tokens_out, o.unpriced_calls, o.warm_wakes, o.cold_wakes, o.cost_microusd) == (out, 1, 0, 0, 0)

@@ -262,7 +262,6 @@ class Intake:
             if not chat_id or len(matches)>1: return None
             key=matches[0].session_key if matches else ''
         mid=getattr(event,'message_id','')
-        if key: self.inbounds.add(key)
         # SessionSource.to_dict() drops is_bot; preserve the real event verdict
         # for the later admission/human branch, never inspect an absent dict key.
         if getattr(source,'is_bot',False):
@@ -270,6 +269,8 @@ class Intake:
             return None
         authorized=getattr(gateway,'_is_user_authorized_for_source',None)
         if authorized and not authorized(source): return None
+        # Only an admitted owner inbound vetoes crash-replay recognition.
+        if key: self.inbounds.add(key)
         if not mid and getattr(source,'message_id',None): return None
         # A leftover ORIGIN steer always becomes a turn; B owns its count.
         if text.startswith(ORIGIN): return None
@@ -361,9 +362,20 @@ class Intake:
                 if not internal: row=None
                 replay=marker(row_text(row.get('content',''))) if isinstance(row,dict) and row.get('role')=='user' else None
                 if replay:
+                    from .poller import LOCAL_EPOCHS
                     wid,dedupe,attempt=replay
                     w,o=s.get_wake(wid),s.get_occurrence(wid,dedupe)
-                    if w and w.session_key==key and w.armed_session_id==session_id and o and o.attempt==attempt and o.state not in {'claimed','started'}:
+                    # Startup replay can reach this hook before this process's poller
+                    # reconciles, so the crashed attempt may still read claimed/started.
+                    # It is live only if a poller in this process claimed it.
+                    live=o is not None and o.state in {'claimed','started'} and o.epoch in LOCAL_EPOCHS
+                    if w and w.session_key==key and w.armed_session_id==session_id and o and o.attempt==attempt and not live:
+                        # Apply restart recovery's own fenced settlement now, so either
+                        # order ends in the same state; a claimed attempt stays for its refund.
+                        if o.state=='started':
+                            e.interrupt(o,'restart')
+                            w=s.get_wake(wid)
+                            s.cas_session(key,{'busy_since':None},busy_since=now)  # this replay turn is running
                         self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,invalid=True)
                         stamp='resumed_turn:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
                         updates={'model_turns':w.model_turns+1}
@@ -513,9 +525,9 @@ class Intake:
         if delegated_child(kwargs.get('platform','')): return None
         self._follow(session_id)
         key=self.bindings.get(session_id)
-        has_prompt=any((usage.get(name) if isinstance(usage,dict) else getattr(usage,name,None)) is not None
-                       for name in ('prompt_tokens','input_tokens'))
-        if not has_prompt: usage=None
+        # Without prompt counts a call is unpriced and unclassified; known output tokens still count.
+        priced=usage is not None and any((usage.get(name) if isinstance(usage,dict) else getattr(usage,name,None)) is not None
+                                         for name in ('prompt_tokens','input_tokens'))
         def count(*names):
             for name in names:
                 v=usage.get(name) if isinstance(usage,dict) else getattr(usage,name,None)
@@ -527,14 +539,14 @@ class Intake:
         if key and (not turn_id or not self.turns.get(session_id) or self.turns[session_id]==turn_id):
             session=s.get_session(key)
             s.cas_session(key,{'last_activity_at':session.last_activity_at},last_activity_at=e.clock.now())
-            if usage is not None:
+            if priced:
                 cache.touch(s,session,started_at=kwargs.get('started_at'),route=route,prompt=prompt,read=read,api_mode=kwargs.get('api_mode',''))
         f=self.flights.get(session_id)
         if not f or f.invalid or turn_id and f.turn_id and turn_id!=f.turn_id: return None
         o=s.get_occurrence(f.wake_id,f.dedupe_key)
         if o and o.attempt==f.attempt: s.set_meta('provider_error:'+o.id,'')
         price=None
-        if usage is not None:
+        if priced:
             try: price=cache.cost(route,prompt=prompt,read=read,written=written,out=count('completion_tokens','output_tokens'),ttl=cache.cache_ttl_for(route,store=s,platform=s.get_session(key).platform,api_mode=kwargs.get('api_mode',''))[0])
             except Exception: pass
         with s.atomic():
@@ -543,8 +555,8 @@ class Intake:
                 s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=f.attempt,
                     api_calls=o.api_calls+1,
                     cache_read_tokens=o.cache_read_tokens+read,cache_write_tokens=o.cache_write_tokens+written,
-                    warm_wakes=o.warm_wakes+int(not o.api_calls and prompt>0 and read/prompt>=.5),
-                    cold_wakes=o.cold_wakes+int(usage is not None and not o.api_calls and (not prompt or read/prompt<.5)),
+                    warm_wakes=o.warm_wakes+int(priced and not o.api_calls and prompt>0 and read/prompt>=.5),
+                    cold_wakes=o.cold_wakes+int(priced and not o.api_calls and (not prompt or read/prompt<.5)),
                     cost_microusd=o.cost_microusd+(round(price*1e6) if price is not None else 0),unpriced_calls=o.unpriced_calls+int(price is None),
                     tokens_in=o.tokens_in+count('prompt_tokens','input_tokens'),
                     tokens_out=o.tokens_out+count('completion_tokens','output_tokens'))

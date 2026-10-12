@@ -23,6 +23,9 @@ LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
 FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires'})
+# Every claim records its poller's epoch; an epoch outside this set was minted
+# by another (for a startup replay: the crashed) process.
+LOCAL_EPOCHS = set()
 
 
 def check_paused():
@@ -48,6 +51,7 @@ class Poller:
         self.tool=Tool(self,session_key_fn or current_session_key)
         self.probe_runner=probe_runner or self._probe
         self.epoch=uuid.uuid4().hex
+        LOCAL_EPOCHS.add(self.epoch)
         self.log=LOG
         self.closed=False
         self.process_start=True

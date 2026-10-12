@@ -117,14 +117,14 @@ def test_resume_nonmatching_conditions_unchanged(engine, case):
 
 
 @pytest.mark.parametrize('edit,field', [({'until':{'expires':'in 2d'}},'expires_at'),
-    ({'until':{'max_fires':2}},'max_fires'), ({'babysit':True},'babysit')])
+    ({'until':{'max_fires':2}},'max_fires'), ({'until':{'owner_replies':True}},'cancel_on_reply'), ({'babysit':True},'babysit')])
 def test_agent_lifetime_edit_revokes_owner_status(engine, edit, field):
     w = arm(engine,'every',creator='user',trigger_json={'kind':'every','every':'1h'})
     result = engine.tool.handle({'action':'update','id':w.id,**edit}, session_id='sid')
     assert result['ok'] and engine.store.get_wake(w.id).agent_edited
 
 
-@pytest.mark.parametrize('field,value', [('expires_at',None),('max_fires',2),('babysit',True)])
+@pytest.mark.parametrize('field,value', [('expires_at',None),('max_fires',2),('cancel_on_reply',True),('babysit',True)])
 def test_owner_command_lifetime_edit_preserves_owner_status(engine, monkeypatch, field, value):
     prepare = engine.tool.prepare
     # /pulse exposes no arbitrary lifetime edit syntax. Exercise its shared

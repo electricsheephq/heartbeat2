@@ -1,10 +1,10 @@
 # Changelog
 
-## 0.1.3 — draft (undated)
+## 0.1.3 — 2026-10-13
 
-- Silence crash-resumed wake replays, reject stale responses, and count their model spend without another fire or delivery.
-- Revoke owner-wake privileges when agent tools edit lifetime limits or babysit.
-- Correct empty-usage accounting, call-route pricing TTL, transactional learned routes, owner first-wake cache age, and failed probe CAS handling.
+- Silence crash-resumed wake replays, including a replay that arrives before restart recovery runs, and reject stale responses. Each replay counts as a model turn toward the daily cap, never as a fire or delivery. Only an admitted owner message (not a bot or unauthorized sender) marks a resumed turn as the owner's.
+- Revoke owner-wake privileges when agent tools edit lifetime limits (expiry, max fires, owner-reply cancellation) or babysit.
+- Correct empty-usage accounting (known output tokens still count), call-route pricing TTL, transactional learned routes, owner first-wake cache age, and failed probe CAS handling.
 - Provider-exhaustion settlement (#27) remains blocked upstream; its strict expected failure is unchanged.
 
 ## 0.1.2 — 2026-10-13

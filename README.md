@@ -80,7 +80,7 @@ Every scenario and its hard bars are in [bench/README.md](bench/README.md); the 
           ledger + no-op governor (slow down → suggest a watcher → pause → ask once)
 ```
 
-One poller per profile runs inside the messaging gateway and ticks every 5 seconds. A file lock guarantees only one poller even when several Hermes processes share the profile. Every fire is a durable claim with an attempt marker. An accepted turn that never starts is tried three times, and a refused injection backs off and is tried five times, before it is marked dead. A turn that started but never finished (a crash or restart) is recorded as interrupted. Hermes may auto-resume that wake turn; heartbeat2 keeps the replay silent, never counts it as a fire or delivery, and counts its model spend.
+One poller per profile runs inside the messaging gateway and ticks every 5 seconds. A file lock guarantees only one poller even when several Hermes processes share the profile. Every fire is a durable claim with an attempt marker. An accepted turn that never starts is tried three times, and a refused injection backs off and is tried five times, before it is marked dead. A turn that started but never finished (a crash or restart) is recorded as interrupted. Hermes may auto-resume that wake turn, sometimes before heartbeat2's restart recovery has run; heartbeat2 keeps the replay silent either way, never counts it as a fire or delivery, and counts it as a model turn toward the daily cap.
 
 ## Install
 Requires **Hermes ≥ 0.21.6** and Python ≥ 3.11 on macOS or Linux. v0.1 delivers into **messaging-gateway DMs**: Telegram, Discord, Slack, WhatsApp and the other gateway platforms.

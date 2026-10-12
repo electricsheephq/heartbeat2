@@ -156,7 +156,8 @@ class Tool:
                         until = args.get('until') if isinstance(args.get('until'),dict) else {}
                         edited = ['trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','note']
                         # Lifetime fields revoke only when the agent set them, never via a policy re-clamp.
-                        edited += [f for f,present in (('expires_at','expires' in until),('max_fires','max_fires' in until),('babysit','babysit' in args)) if present]
+                        edited += [f for f,present in (('expires_at','expires' in until),('max_fires','max_fires' in until),
+                                                        ('cancel_on_reply','owner_replies' in until),('babysit','babysit' in args)) if present]
                         if action == 'update' and w.creator == 'user' and any(
                             getattr(candidate,k) != getattr(w,k) for k in edited):
                             candidate = replace(candidate,agent_edited=True)
