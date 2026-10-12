@@ -222,8 +222,14 @@ class Tool:
             if not isinstance(argv,list) or not all(isinstance(x,str) for x in argv) or not e.policy.command_allowed(argv):
                 raise ValueError('command probe is not allowlisted')
         if kind=='url':
-            from .probes import validate_url
-            validate_url(trigger.get('url'))
+            from .probes import classify_url
+            classify_url(trigger.get('url'), e.policy.url_allow_private)
+        if kind=='file':
+            from .probes import file_path, check_file_read
+            from .registration import home_scope
+            home=e.ctx._manager.home_path
+            with home_scope(home):
+                check_file_read(file_path(trigger.get('path'), home))
         if kind=='process':
             try:
                 import psutil  # Hermes-provided, only this kind needs it.

@@ -181,6 +181,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Process watchers | `source_process` | on | Process watchers. |
 | File watchers | `source_file` | on | File watchers. |
 | URL watchers | `source_url` | on | URL watchers. |
+| Let URL watchers reach private and local addresses | `url_allow_private` | off | Allow private and local URL targets. Cloud metadata stays blocked. |
 | Command watchers | `source_command` | on | Command watchers. |
 | Hermes event watchers | `source_events` | on | Kanban, subagent, API error and reaction events. |
 | Tell the agent what's armed | `presence_line` | on | One short context line on your turns while something is armed. |
@@ -200,15 +201,25 @@ Every guardrail is configurable:
 A wake turn is an ordinary model turn in that conversation. It is billed like a message, and its size is your conversation's context size: on a long-running agent that can be 100–200k input tokens per wake. Watchers, gates and skipped wakes cost nothing. `/pulse status` and `/pulse ledger` show the running count of wake turns and estimated tokens. Start with watchers and long intervals.
 
 ## Security and privacy
-Disclosure — wakes and watchers run full turns on the conversation's own model, billed like any message; command watchers run allowlisted read-only commands without an approval prompt; URL watchers make the GET requests you configured; state stays in the profile's plugin-data; no telemetry.
+Disclosure — wakes and watchers run full turns on the conversation's own model, billed like any message; command watchers run allowlisted read-only commands without an approval prompt; URL watchers make the GET requests you configured; state stays in the profile's plugin-data; no telemetry. Command environments use Hermes' sanitizer on an allowlisted base and carry no provider, bot or GitHub tokens; gh uses its own hosts.yml or keyring. URL watchers always block cloud metadata, and block private/local addresses unless `url_allow_private` is enabled, checking every hop at connect time. File watchers honor Hermes read blocks at arm/update and every check, including rotation. Helpers run in the watcher's profile scope.
 
 Command watchers:
 - run only argv prefixes from your allowlist. The default is `gh pr view/checks`, `gh run view/list`, `git ls-remote/status/log`;
 - run with no shell and no terminal;
-- refuse output, config, editor, browser and mutating flags and verbs;
+- refuse output, config, editor, browser and mutating flags and verbs, including gh `--jq`/`-q` and `--template`/`-t`;
 - have the whole process group killed after 30 seconds.
 
 The argv guard is not a sandbox: only allow programs you trust to be read-only. URL watchers refuse credentials in the URL and send no cookies, auth headers or proxy settings. Wake turns keep the conversation's normal tools and permissions. Full threat model and limits: [SECURITY.md](SECURITY.md).
+
+The default command allowlist still permits `gh -R HOST/...` and `git ls-remote <url>` to reach any host the machine can reach; v0.1.1 does not change this exception.
+
+## Roadmap
+
+- [v0.1.1: catalog listing conditions](https://github.com/electricsheephq/heartbeat2/milestone/5)
+- [v0.1.2: no silent loss + cache-aware timing](https://github.com/electricsheephq/heartbeat2/milestone/4)
+- [v0.2: real-gateway proof, behaviour bench, cost](https://github.com/electricsheephq/heartbeat2/milestone/2)
+- [v0.3: more triggers + learning](https://github.com/electricsheephq/heartbeat2/milestone/3)
+- [Research / blocked](https://github.com/electricsheephq/heartbeat2/milestone/6)
 
 ## Compatibility and known issues
 - **v0.1 delivers only to messaging-gateway DMs.** It refuses to arm wakes from the CLI, TUI, Desktop, the API server or cron: a CLI wake would interrupt your turn, and TUI/Desktop have no silence filter for injected turns yet. Desktop and TUI wakes are planned for v0.2, once Hermes core supports them.

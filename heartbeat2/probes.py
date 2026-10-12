@@ -4,6 +4,8 @@ Fingerprint gating follows the idea in Hermes cron/monitor.py. The argv guard
 is deliberately conservative, but is not a sandbox for configured executables.
 """
 import http.client
+import contextvars
+import ipaddress
 import socket
 import threading
 import hashlib
@@ -39,6 +41,7 @@ UNSAFE_OPTIONS = frozenset({
     '--editor', '--command', '--shell', '--eval', '--execute', '--write',
     '--write-out', '--append', '--delete', '--remove', '--force', '--apply',
     '--request', '--data', '--data-raw', '--data-binary', '--form', '--upload-file',
+    '--jq', '--template',
 })
 UNSAFE_VERBS = frozenset({'sh','bash','zsh','fish','python','python3','node','ruby',
     'perl','eval','exec','rm','mv','cp','touch','tee','sudo','chmod','chown',
@@ -58,7 +61,7 @@ def command_allowed(argv, allowlist):
         option=token.split('=',1)[0]
         if token in UNSAFE_VERBS or (option.startswith('--') and any(flag.startswith(option) for flag in UNSAFE_OPTIONS)):
             return False
-        if token in {'-w','-p'} or (os.path.basename(argv[0])=='gh' and token.startswith('-') and not token.startswith('--') and any(c in token[1:] for c in 'wp')): return False
+        if token in {'-w','-p'} or (os.path.basename(argv[0])=='gh' and token.startswith('-') and not token.startswith('--') and any(c in token[1:] for c in 'wpqt')): return False
         if argv[:2]==['git','ls-remote'] and token.startswith('-u'):
             return False
         if token.startswith(('-o', '-c', '-P')) and not token.startswith('--'):
@@ -82,9 +85,43 @@ def validate_url(url):
     return url
 
 
+def _url_safety():
+    try:
+        from importlib import import_module
+        safety = import_module('tools.url_safety')
+        # Private helper verified at the supported Hermes pins; fail closed.
+        if not all(callable(getattr(safety, name)) for name in
+                   ('is_safe_url', 'is_always_blocked_url', '_resolved_ip_block_reason')):
+            raise ImportError('URL safety helper unavailable')
+        return safety
+    except Exception as exc:
+        raise ValueError('URL watchers need Hermes url_safety') from exc
+
+
+def classify_url(url, allow_private=False, *, resolve=False):
+    validate_url(url)
+    safety = _url_safety()
+    host = urllib.parse.urlsplit(url).hostname.lower().rstrip('.')
+    if host in getattr(safety, '_BLOCKED_HOSTNAMES', ()):
+        raise ValueError('URL targets cloud metadata')
+    try: ip = ipaddress.ip_address(host)
+    except ValueError: ip = ipaddress.ip_address('127.0.0.1') if host == 'localhost' else None
+    if ip is not None:
+        reason = safety._resolved_ip_block_reason(ip, allow_private)
+        if reason: raise ValueError('URL targets ' + reason)
+    if resolve:
+        if safety.is_always_blocked_url(url): raise ValueError('URL targets cloud metadata')
+        if not allow_private and not safety.is_safe_url(url):
+            raise ValueError('URL targets private/internal address')
+    return url
+
+
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def __init__(self, allow_private=False):
+        self.allow_private = allow_private
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        validate_url(newurl)
+        classify_url(newurl, self.allow_private, resolve=True)
         if hasattr(self, 'deadline'):
             remaining = self.deadline - time.monotonic()
             if remaining <= 0: raise TimeoutError('URL probe exceeded 10 s total')
@@ -92,7 +129,7 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _get_url(url):
+def _get_url(url, allow_private=False):
     """One wall deadline, including DNS, TLS, headers and chunk framing.
 
     urllib's per-read timeout cannot bound a peer that keeps dripping bytes.
@@ -113,6 +150,25 @@ def _get_url(url):
         class Connection(base):
             def connect(self):
                 if expired.is_set(): raise TimeoutError('URL deadline')
+                def vetted_connection(address, timeout, source_address=None):
+                    safety = _url_safety()
+                    host, port = address
+                    answers = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+                    ips = [answer[4][0] for answer in answers]
+                    for ip in ips:
+                        reason = safety._resolved_ip_block_reason(ipaddress.ip_address(ip), allow_private)
+                        if reason: raise ValueError('URL targets ' + reason)
+                    if not ips: raise ValueError('URL DNS returned no addresses')
+                    for ip in ips:
+                        remaining = deadline-time.monotonic()
+                        if expired.is_set() or remaining <= 0: raise TimeoutError('URL deadline')
+                        try:
+                            return socket.create_connection((ip, port), min(timeout, remaining), source_address)
+                        except OSError as exc:
+                            error = exc
+                    raise error
+                # HTTPSConnection keeps self.host for certificate validation/SNI.
+                self._create_connection = vetted_connection
                 super().connect()
                 with guard:
                     if expired.is_set():
@@ -127,7 +183,8 @@ def _get_url(url):
 
     def request():
         try:
-            redirect=_SafeRedirect(); redirect.deadline=deadline
+            classify_url(url, allow_private, resolve=True)
+            redirect=_SafeRedirect(allow_private); redirect.deadline=deadline
             opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),redirect,HTTP(),HTTPS())
             req=urllib.request.Request(url,method='GET')
             with opener.open(req,timeout=max(.001,deadline-time.monotonic())) as response:
@@ -148,7 +205,7 @@ def _get_url(url):
             with guard:
                 for sock in sockets: shutdown(sock)
 
-    worker=threading.Thread(target=request,name='pulse-url',daemon=True)
+    worker=threading.Thread(target=contextvars.copy_context().run,args=(request,),name='pulse-url',daemon=True)
     worker.start(); worker.join(max(0,deadline-time.monotonic()))
     if worker.is_alive() or time.monotonic()>=deadline:
         expired.set()
@@ -199,22 +256,44 @@ def _bounded_search(pattern, texts):
             if stream: stream.close()
 
 
-def _file(wake, home):
-    trigger, old = wake.trigger_json, _state(wake)
-    path = Path(trigger['path']).expanduser()
+def file_path(raw, home):
+    path = Path(raw).expanduser()
     if not path.is_absolute():
         if home is None: raise ValueError('relative file path requires profile home')
         path = Path(home) / path
+    return path
+
+
+def check_file_read(path):
     try:
-        if not stat_module.S_ISREG(path.stat().st_mode):
+        from agent.file_safety import get_read_block_error
+        error = get_read_block_error(str(path))
+    except Exception as exc:
+        raise ValueError('File watchers need Hermes file_safety') from exc
+    if error is not None: raise ValueError(error)
+
+
+def _file(wake, home):
+    trigger, old = wake.trigger_json, _state(wake)
+    path = file_path(trigger['path'], home)
+    check_file_read(path)
+    try:
+        before = os.stat(path)
+        if not stat_module.S_ISREG(before.st_mode):
             raise ValueError('file probe requires a regular file')
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
         return _result(wake, {'absent':True, 'fingerprint':_hash('absent'), 'offset':0, 'size':0}, False, '')
     with os.fdopen(fd, 'rb') as source:
         stat = os.fstat(source.fileno())
+        if (stat.st_dev, stat.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError('file changed between stat and open')
         if not stat_module.S_ISREG(stat.st_mode):
             raise ValueError('file probe requires a regular file')
+        rotated = bool(old) and (old.get('inode') != stat.st_ino or old.get('device') != stat.st_dev or stat.st_size < old.get('size', 0))
+        if rotated:
+            # Maintainer condition: re-check Hermes read blocks after rotation.
+            check_file_read(path)
         state = {'fingerprint':_hash([stat.st_mtime_ns, stat.st_size, stat.st_ino, stat.st_dev]),
                  'inode':stat.st_ino, 'device':stat.st_dev, 'size':stat.st_size, 'offset':stat.st_size}
         pattern = trigger.get('pattern')
@@ -224,7 +303,7 @@ def _file(wake, home):
         offset = int(old.get('offset', old.get('size', 0)))
         skipping = bool(old.get('skip_to_newline'))
         skipped = int(old.get('skipped_overlong_lines', 0))
-        if old.get('inode') != stat.st_ino or old.get('device') != stat.st_dev or stat.st_size < old.get('size', 0):
+        if rotated:
             offset, skipping = 0, False
         source.seek(offset)
         cursor, consumed, buffer, lines = offset, 0, b'', []
@@ -275,9 +354,9 @@ def _process(wake):
     return _result(wake, state, exited and not old.get('exited'), 'process exited (or PID was reused)')
 
 
-def _url(wake):
+def _url(wake, policy):
     validate_url(wake.trigger_json['url'])
-    body = _get_url(wake.trigger_json['url'])
+    body = _get_url(wake.trigger_json['url'], allow_private=policy.url_allow_private)
     if len(body) > MAX_BODY: raise ValueError('URL body exceeds 256 KB')
     old, fingerprint = _state(wake), _hash(body)
     pattern = wake.trigger_json.get('pattern')
@@ -292,12 +371,26 @@ def _kill_group(proc):
     proc.wait()
 
 
+def _command_env():
+    allowed = {'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'TMPDIR', 'SSH_AUTH_SOCK',
+               'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'GH_HOST'}
+    allowlisted = {key: value for key, value in os.environ.items()
+                   if key in allowed or key.startswith('LC_')}
+    try:
+        from tools.environments.local import hermes_subprocess_env
+        env = hermes_subprocess_env(inherit_credentials=False, base_env=allowlisted)
+    except Exception:
+        env = allowlisted
+    env.update({'GIT_OPTIONAL_LOCKS':'0', 'GIT_PAGER':'cat',
+           'GH_PAGER':'cat', 'PAGER':'cat', 'GIT_TERMINAL_PROMPT':'0',
+           'GH_PROMPT_DISABLED':'1', 'GCM_INTERACTIVE':'never'})
+    return env
+
+
 def _run_command(argv, cwd):
     """Capture while reading; both the pipe and process lifetime have one deadline."""
     deadline = time.monotonic() + COMMAND_DEADLINE_S
-    env = {**os.environ, 'GIT_OPTIONAL_LOCKS':'0', 'GIT_PAGER':'cat',
-           'GH_PAGER':'cat', 'PAGER':'cat', 'GIT_TERMINAL_PROMPT':'0',
-           'GH_PROMPT_DISABLED':'1', 'GCM_INTERACTIVE':'never'}
+    env = _command_env()
     proc = subprocess.Popen(argv, shell=False, cwd=cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             env=env, start_new_session=True)
@@ -363,11 +456,11 @@ def check(wake, *, policy=None, home=None):
     try:
         if wake.kind == 'file': return _file(wake, home)
         if wake.kind == 'process': return _process(wake)
-        if wake.kind == 'url': return _url(wake)
-        if wake.kind == 'command':
+        if wake.kind in {'url', 'command'}:
             if policy is None:
                 from .policy import Policy
                 policy = Policy()
+            if wake.kind == 'url': return _url(wake, policy)
             return _command(wake, policy, home)
         raise ValueError('unknown probe kind')
     except Exception as exc:

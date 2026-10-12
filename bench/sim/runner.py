@@ -1,9 +1,12 @@
 """15-second ticks, with safe idle jumps through the identical tick path."""
 import math
+from unittest.mock import patch
 from .gateway import FakeGateway
 from .metrics import compute
 
 
+# Synthetic temp-file scenarios measure scheduling, not Hermes file safety.
+@patch('heartbeat2.probes.check_file_read', lambda path: None)
 def simulate(scenario,home,baseline=False):
     data=scenario
     if baseline:data={**scenario,'arms':[]}

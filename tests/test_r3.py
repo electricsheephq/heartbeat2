@@ -31,9 +31,9 @@ def drip(monkeypatch):
     def connect(sock, address):
         assert address[0] == '127.0.0.1'
         return _CONNECT(sock, address)
-    def dns(host, *args):
+    def dns(host, *args, **kwargs):
         assert host == '127.0.0.1'
-        return _DNS(host, *args)
+        return _DNS(host, *args, **kwargs)
     monkeypatch.setattr(socket.socket, 'connect', connect)
     monkeypatch.setattr(socket, 'getaddrinfo', dns)
     monkeypatch.setattr(socket, 'create_connection', _CREATE)
@@ -60,13 +60,14 @@ def drip(monkeypatch):
 
 def test_R3_R1_url_total_deadline(drip):
     before = time.monotonic()
-    result = probes.check(Wake(KEY, 'observe', 'url', trigger_json={'url':drip}))
+    result = probes.check(Wake(KEY, 'observe', 'url', trigger_json={'url':drip}), policy=Policy(url_allow_private=True))
     assert result.get('error') == 'TimeoutError', result
     assert time.monotonic() - before < 2.5  # deadline .25 s; the drip lasts 5 s
 
 
 def test_R3_R1_slow_url_cannot_block_due_at(engine, drip):
     e = engine
+    e.policy = replace(e.policy, url_allow_private=True)
     arm(e, 'url', trigger_json={'url':drip})
     w = arm(e)
     before = time.monotonic(); e.tick()
@@ -132,7 +133,7 @@ def test_R3_R3_streaming_cap_read_budget(monkeypatch):
             data=super().read(n); counts.append(len(data)); return data
         def read1(self,n=-1): return self.read(n)
     monkeypatch.setattr(probes.urllib.request,'build_opener',lambda *a:SimpleNamespace(open=lambda *a,**k:Response(b'x'*(2*1024*1024))))
-    with pytest.raises(ValueError): probes._get_url('http://127.0.0.1/fixture')
+    with pytest.raises(ValueError): probes._get_url('http://127.0.0.1/fixture', allow_private=True)
     assert sum(counts)<=probes.MAX_BODY+1
 
 

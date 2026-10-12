@@ -68,6 +68,7 @@ class Policy:
     source_process: bool = True
     source_file: bool = True
     source_url: bool = True
+    url_allow_private: bool = False
     source_command: bool = True
     source_events: bool = True
     presence_line: bool = True

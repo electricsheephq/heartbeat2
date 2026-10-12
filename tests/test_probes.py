@@ -73,14 +73,14 @@ def test_file_baseline_change_regex_appended_lines_rotation_truncation(tmp_path)
 
 def test_file_and_url_errors_are_not_changes(tmp_path, monkeypatch):
     assert not probes.check(wake('file', path=str(tmp_path/'absent'))).get('error')
-    monkeypatch.setattr(probes, '_get_url', lambda url: (_ for _ in ()).throw(OSError()), raising=False)
+    monkeypatch.setattr(probes, '_get_url', lambda url, **kwargs: (_ for _ in ()).throw(OSError()), raising=False)
     result = probes.check(wake('url', url='https://example.test'))
     assert result.get('error') and not result['fire'] and 'state' not in result
 
 
 def test_url_hash_change_regex_and_size_bound(monkeypatch):
     body = [b'pending']
-    monkeypatch.setattr(probes, '_get_url', lambda url: body[0], raising=False)
+    monkeypatch.setattr(probes, '_get_url', lambda url, **kwargs: body[0], raising=False)
     w = wake('url', url='https://example.test')
     first = probes.check(w)
     assert not first['fire'] and len(first['state']['fingerprint']) == 64
@@ -102,7 +102,7 @@ def test_url_transport_get_timeout_no_proxy_cookie_or_auth(monkeypatch):
             captured.append((request, timeout))
             return Response(b'ok')
     monkeypatch.setattr('urllib.request.build_opener', lambda *handlers: (captured.append(handlers) or Opener()))
-    result = probes.check(wake('url', url='http://127.0.0.1:1234/fixture'))
+    result = probes.check(wake('url', url='http://127.0.0.1:1234/fixture'), policy=Policy(url_allow_private=True))
     assert not result.get('error')
     request, timeout = captured[-1]
     assert request.get_method() == 'GET' and 0 < timeout <= 10

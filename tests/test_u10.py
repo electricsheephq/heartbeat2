@@ -199,7 +199,9 @@ import json, sys, threading, time
 from pathlib import Path
 from dataclasses import replace
 sys.path[:0] = [sys.argv[1], str(Path(sys.argv[1])/'tests')]
-from conftest import FakeClock
+from conftest import FakeClock, install_probe_helpers
+from pytest import MonkeyPatch
+install_probe_helpers(MonkeyPatch())
 from test_engine import GatewayCtx, KEY
 from heartbeat2.model import Session
 from heartbeat2.store import Store
@@ -212,7 +214,7 @@ store.upsert_session(Session(KEY,'telegram','dm','unit','sid',clock.now(),clock.
 e=Poller(GatewayCtx(home),store,Policy(clock=clock,quiet_hours='',timezone='UTC'),clock,
          session_key_fn=lambda:KEY,paused=lambda:False,compression_tip=lambda sid:sid)
 kind=sys.argv[3]; path=home/'build.log'; path.write_text('start\n')
-body=[b'initial']; probes._get_url=lambda url:body[0]
+body=[b'initial']; probes._get_url=lambda url,**kwargs:body[0]
 trigger={'kind':kind,'pattern':'(a+)+$','path':str(path)} if kind=='file' else {'kind':kind,'pattern':'.*"x".*','url':'http://example.test'}
 r=e.tool.handle({'action':'create','note':'Check build','trigger':trigger},session_id='sid')
 assert r.get('ok'),r

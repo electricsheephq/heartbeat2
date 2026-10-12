@@ -2,6 +2,9 @@
 import importlib.util
 import sys
 import socket
+import ipaddress
+import urllib.parse
+from types import ModuleType
 from pathlib import Path
 
 import pytest
@@ -85,6 +88,45 @@ def no_network(monkeypatch):
 @pytest.fixture
 def fake_ctx():
     return FakeCtx()
+
+
+def install_probe_helpers(monkeypatch):
+    """Hermes seams for stdlib-only units; integration always uses real modules."""
+    def module(name):
+        result = ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, result)
+        return result
+    for name in ('tools', 'agent'):
+        if name not in sys.modules:
+            module(name).__path__ = []
+    safety = module('tools.url_safety')
+    safety._BLOCKED_HOSTNAMES = frozenset({'metadata.google.internal', 'metadata.goog'})
+    def reason(ip, allow_private):
+        if str(ip) == '169.254.169.254': return 'cloud metadata address'
+        if not allow_private and not ip.is_global: return 'private/internal address'
+        return None
+    def blocked(url):
+        host = urllib.parse.urlsplit(url).hostname.rstrip('.').lower()
+        if host in safety._BLOCKED_HOSTNAMES: return True
+        try: return reason(ipaddress.ip_address(host), True) is not None
+        except ValueError: return False
+    def safe(url):
+        host = urllib.parse.urlsplit(url).hostname.rstrip('.').lower()
+        if blocked(url) or host == 'localhost': return False
+        try: return reason(ipaddress.ip_address(host), False) is None
+        except ValueError: return True
+    safety._resolved_ip_block_reason = reason
+    safety.is_always_blocked_url = blocked
+    safety.is_safe_url = safe
+    files = module('agent.file_safety')
+    files.get_read_block_error = lambda path: None
+    return safety, files
+
+
+@pytest.fixture(autouse=True)
+def hermes_probe_helpers(request, monkeypatch):
+    if 'integration' not in request.node.path.parts:
+        return install_probe_helpers(monkeypatch)
 
 
 @pytest.fixture
