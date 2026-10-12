@@ -70,7 +70,7 @@ def _occurrences(engine, wake):
         'unanswered':'dropped: unanswered mute', 'daily_model_cap':f'dropped: daily model cap ({engine.policy.max_model_wakes_per_day})',
         'daily_message_cap':f'dropped: daily message cap ({engine.policy.max_messages_per_day})', 'expired_held':'expired while held'}
     return '\n'.join(f'{o.dedupe_key} · {o.state} · {reasons.get(o.error,o.error.replace("_"," ") or o.outcome or "none")} · '
-        f'matched/created {_time(engine,o.matched_at) if o.matched_at is not None else _time(engine,o.created_at) if o.created_at else "before v0.1.1"} · held-since {_time(engine,o.held_since)} · delivered {"yes" if o.delivered else "no"}'
+        f'matched/created {_time(engine,o.matched_at) if o.matched_at is not None else _time(engine,o.created_at) if o.created_at else "before v0.1.2"} · held-since {_time(engine,o.held_since)} · delivered {"yes" if o.delivered else "no"}'
         for o in engine.store.list_occurrences(wake.id)[-10:])
 
 

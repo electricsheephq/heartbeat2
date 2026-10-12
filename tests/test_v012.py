@@ -1,4 +1,4 @@
-"""V011 acceptance: deterministic gateway/storage proof, no model or network."""
+"""v0.1.2 acceptance: deterministic gateway/storage proof, no model or network."""
 from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace
@@ -307,7 +307,7 @@ def test_store_additive_migration_from_v010(tmp_path, clock):
     (package/'__init__.py').write_text('')
     for name in ('store','model','schedule','clock'):
         (package/(name+'.py')).write_bytes(subprocess.check_output(['git','show',f'06c188b:heartbeat2/{name}.py']))
-    spec=importlib.util.spec_from_file_location('v011_old_fixture',package/'__init__.py',submodule_search_locations=[str(package)])
+    spec=importlib.util.spec_from_file_location('v012_old_fixture',package/'__init__.py',submodule_search_locations=[str(package)])
     module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
     oldstore=__import__(spec.name+'.store',fromlist=['Store'])
     oldmodel=__import__(spec.name+'.model',fromlist=['Wake'])

@@ -8,7 +8,7 @@ import pytest
 from heartbeat2 import cache, commands, governor
 from heartbeat2.schedule import local_day
 from test_engine import engine, arm, pending, session, start, end, admit, KEY
-from test_v011 import hermes_helpers
+from test_v012 import hermes_helpers
 
 
 @pytest.mark.parametrize('edit', [
@@ -170,13 +170,13 @@ def test_R5_record_tolerates_future_additive_columns(engine):
     assert engine.store.get_session(KEY).session_key == KEY
 
 
-def test_N1_why_migrated_timestamp_is_before_v011(engine, monkeypatch):
+def test_N1_why_migrated_timestamp_is_before_v012(engine, monkeypatch):
     w = arm(engine)
     pending(engine, w)
     engine.store.connection.execute('UPDATE occurrences SET created_at=0, matched_at=NULL')
     monkeypatch.setattr(commands, 'session_env', lambda n: KEY if n == 'HERMES_SESSION_KEY' else '')
     output = commands.handle('why ' + w.id, SimpleNamespace(get_engine=lambda: engine))
-    assert 'before v0.1.1' in output and '1970' not in output
+    assert 'before v0.1.2' in output and '1970' not in output
 
 
 def test_N2_released_text_uses_latest_hold_reason(engine):

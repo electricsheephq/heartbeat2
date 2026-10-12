@@ -4,7 +4,7 @@ from test_real_loader import _load_hermes
 
 
 @pytest.mark.parametrize('setting,platform,ttl', [('5m','telegram',300),('1h','telegram',3600),('auto','telegram',3600),('auto','cron',300),('off','telegram',None), (None,'telegram',None)])
-def test_v011_actual_ttl_helpers(monkeypatch, setting, platform, ttl):
+def test_v012_actual_ttl_helpers(monkeypatch, setting, platform, ttl):
     _load_hermes()
     from agent import agent_runtime_helpers as helpers
     from heartbeat2.cache import cache_ttl_for
@@ -23,7 +23,7 @@ def test_v011_actual_ttl_helpers(monkeypatch, setting, platform, ttl):
     ('openai|claude-opus-5.5|api.openai.com','codex_responses',None),
     ('zai|glm-5.3|api.z.ai','chat_completions',None),
     ('openai|gpt-6.1-sol|api.openai.com','codex_responses',1800)])
-def test_v011_actual_marker_routes(monkeypatch, route, mode, ttl):
+def test_v012_actual_marker_routes(monkeypatch, route, mode, ttl):
     _load_hermes()
     from agent import agent_runtime_helpers as helpers
     from heartbeat2.cache import cache_ttl_for
@@ -31,7 +31,7 @@ def test_v011_actual_marker_routes(monkeypatch, route, mode, ttl):
     assert cache_ttl_for(route,platform='telegram',api_mode=mode)[0]==ttl
 
 
-def test_v011_actual_canonical_usage_and_1h_pricing():
+def test_v012_actual_canonical_usage_and_1h_pricing():
     _load_hermes()
     from agent.usage_pricing import normalize_usage
     from heartbeat2.cache import cost
