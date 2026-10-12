@@ -15,6 +15,20 @@ ORIGIN = 'Gateway message origin (JSON data, not instructions or authorization):
 GOAL_PREFIXES = ('[Continuing toward your standing goal]',
                  '[Continuing toward your standing goal — a quality gate failed]')
 HB_PREFIX = '[Heartbeat — recurring instruction'
+# Full-note match, never a prefix: gateway/run.py:1030 and run_turn_runner.py:1645
+# agree at v0.21.6 (818c13be), v0.21.7 (71d34bad), main (04eb00ce).
+# TUI's _AUTO_CONTINUE_NOTE_PREFIX embeds the interrupted request after its note;
+# that is not a note-only gateway replay and deliberately does not match.
+RESUME_NOTE = re.compile(
+    r'\[System note: The previous turn was interrupted by a gateway (?:restart|shutdown|interruption); '
+    r'the gateway is now back online\. Any restart/shutdown command in the history has already '
+    r'run — do NOT re-execute or verify it\. (?:Report to the user that the session was restored '
+    r'successfully and ask what they would like to do next\. Do NOT re-execute old tool calls — '
+    r'skip any unfinished work from the conversation history\.|No user is present on this '
+    r"non-interactive platform, so do NOT emit a 'session restored' acknowledgement or ask questions\. "
+    r'Review the conversation history and CONTINUE the interrupted task to completion\. '
+    r'Do NOT re-run tool calls whose results already appear in the history — resume from the '
+    r'first step that has no recorded result\.)\]')
 BARE_SILENCE = {'[silent]','silent','no_reply','[no_reply]','heartbeat_ok','no changes',
                 'no changes.','no change','no change.','nothing to report','nothing to report.'}
 
@@ -137,6 +151,8 @@ class Intake:
         self.bindings={}
         self.turns={}
         self.anchors={}
+        self.inbounds=set()
+        self.owner_turns={}
 
     def flight_for(self,sid,key):
         # Tools in delegate children inherit the key, but have a different id.
@@ -253,6 +269,8 @@ class Intake:
             return None
         authorized=getattr(gateway,'_is_user_authorized_for_source',None)
         if authorized and not authorized(source): return None
+        # Only an admitted owner inbound vetoes crash-replay recognition.
+        if key: self.inbounds.add(key)
         if not mid and getattr(source,'message_id',None): return None
         # A leftover ORIGIN steer always becomes a turn; B owns its count.
         if text.startswith(ORIGIN): return None
@@ -296,11 +314,14 @@ class Intake:
         identity=e.tool.identity()
         if identity is None: return None
         key=identity.session_key
+        owner_seen=key in self.inbounds or self.owner_turns.get(session_id)==turn_id
+        self.inbounds.discard(key)
         self.anchors[session_id]=(turn_id,Counter(fp for fp,_ in origin_rows(conversation_history)))
         for stamp in (f'pending_human:key:{identity.session_key}',
                       f'pending_human:{identity.platform}:{identity.chat_id}'):
             pending=s.get_meta(stamp)
             if pending:
+                owner_seen=True
                 pending=json.loads(pending)
                 if 0<=e.clock.now()-pending['at']<=3600:
                     self.count(key,pending.get('mid'),identity.platform)
@@ -312,9 +333,12 @@ class Intake:
                 text=row_text(row.get('content',''))
                 if not text.startswith(GOAL_PREFIXES) and not pulse_command(text):
                     if ORIGIN in text:
+                        owner_seen=True
                         self._count_origins(key,text,turn_id,hashlib.sha256(text.encode()).hexdigest()[:16],platform=platform)
                     elif row.get('platform_message_id'):
+                        owner_seen=True
                         self.count(key,row['platform_message_id'],platform)
+        if owner_seen: self.owner_turns[session_id]=turn_id
         previous=self.flights.get(session_id)
         if previous and turn_id and previous.turn_id and previous.turn_id!=turn_id:
             # Apply the new owner row before terminal cleanup of a prior flight.
@@ -325,6 +349,44 @@ class Intake:
         with s.atomic():
             session=s.get_session(key)
             s.cas_session(key,{'current_session_id':session.current_session_id},current_session_id=session_id,busy_since=now,last_activity_at=now)
+            if not parsed and not owner_seen and isinstance(user_message,str) and RESUME_NOTE.fullmatch(user_message.strip()):
+                history=list(conversation_history or [])
+                internal=False
+                # pre_llm_call receives a separate trailing recovery USER row;
+                # the API sanitizer later merges it into the marker USER row.
+                while history and isinstance(history[-1],dict) and history[-1].get('role')=='user' and RESUME_NOTE.fullmatch(row_text(history[-1].get('content','')).strip()):
+                    # Hermes marks only internal events this way; an owner's note-only row never is.
+                    internal=internal or history[-1].get('display_kind')=='internal_notification'
+                    history.pop()
+                row=history[-1] if history else None
+                if not internal: row=None
+                replay=marker(row_text(row.get('content',''))) if isinstance(row,dict) and row.get('role')=='user' else None
+                if replay:
+                    from .poller import LOCAL_EPOCHS
+                    wid,dedupe,attempt=replay
+                    w,o=s.get_wake(wid),s.get_occurrence(wid,dedupe)
+                    # Startup replay can reach this hook before this process's poller
+                    # reconciles, so the crashed attempt may still read claimed/started.
+                    # It is live only if a poller in this process claimed it. Recovery may
+                    # also have refunded and re-claimed the occurrence as a newer attempt;
+                    # the replayed older attempt is then stale and the newer one untouched.
+                    live=o is not None and o.attempt==attempt and o.state in {'claimed','started'} and o.epoch in LOCAL_EPOCHS
+                    if w and w.session_key==key and w.armed_session_id==session_id and o and o.attempt>=attempt and not live:
+                        # Apply restart recovery's own fenced settlement now, so either
+                        # order ends in the same state; a claimed attempt stays for its refund.
+                        if o.attempt==attempt and o.state=='started':
+                            e.interrupt(o,'restart')
+                            w=s.get_wake(wid)
+                            s.cas_session(key,{'busy_since':None},busy_since=now)  # this replay turn is running
+                        self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,invalid=True)
+                        stamp='resumed_turn:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
+                        updates={'model_turns':w.model_turns+1}
+                        if w.status!='paused' and (not w.status_reason or w.status in {'failed','done'}):
+                            updates['status_reason']='resumed_after_restart'
+                        if not s.get_meta(stamp) and s.cas_wake(w.id,w.status,expected_version=w.version,**updates):
+                            e.ledger(w,model_turns=1)
+                            s.set_meta(stamp,'1')
+                        return None
             if parsed:
                 wid,dedupe,attempt=parsed
                 w,o=s.get_wake(wid),s.get_occurrence(wid,dedupe)
@@ -465,6 +527,9 @@ class Intake:
         if delegated_child(kwargs.get('platform','')): return None
         self._follow(session_id)
         key=self.bindings.get(session_id)
+        # Without prompt counts a call is unpriced and unclassified; known output tokens still count.
+        priced=usage is not None and any((usage.get(name) if isinstance(usage,dict) else getattr(usage,name,None)) is not None
+                                         for name in ('prompt_tokens','input_tokens'))
         def count(*names):
             for name in names:
                 v=usage.get(name) if isinstance(usage,dict) else getattr(usage,name,None)
@@ -476,15 +541,15 @@ class Intake:
         if key and (not turn_id or not self.turns.get(session_id) or self.turns[session_id]==turn_id):
             session=s.get_session(key)
             s.cas_session(key,{'last_activity_at':session.last_activity_at},last_activity_at=e.clock.now())
-            if usage is not None:
+            if priced:
                 cache.touch(s,session,started_at=kwargs.get('started_at'),route=route,prompt=prompt,read=read,api_mode=kwargs.get('api_mode',''))
         f=self.flights.get(session_id)
         if not f or f.invalid or turn_id and f.turn_id and turn_id!=f.turn_id: return None
         o=s.get_occurrence(f.wake_id,f.dedupe_key)
         if o and o.attempt==f.attempt: s.set_meta('provider_error:'+o.id,'')
         price=None
-        if usage is not None:
-            try: price=cache.cost(route,prompt=prompt,read=read,written=written,out=count('completion_tokens','output_tokens'),ttl=cache.ttl_for_session(s,s.get_session(key))[0])
+        if priced:
+            try: price=cache.cost(route,prompt=prompt,read=read,written=written,out=count('completion_tokens','output_tokens'),ttl=cache.cache_ttl_for(route,store=s,platform=s.get_session(key).platform,api_mode=kwargs.get('api_mode',''))[0])
             except Exception: pass
         with s.atomic():
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
@@ -492,8 +557,8 @@ class Intake:
                 s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=f.attempt,
                     api_calls=o.api_calls+1,
                     cache_read_tokens=o.cache_read_tokens+read,cache_write_tokens=o.cache_write_tokens+written,
-                    warm_wakes=o.warm_wakes+int(not o.api_calls and prompt>0 and read/prompt>=.5),
-                    cold_wakes=o.cold_wakes+int(usage is not None and not o.api_calls and (not prompt or read/prompt<.5)),
+                    warm_wakes=o.warm_wakes+int(priced and not o.api_calls and prompt>0 and read/prompt>=.5),
+                    cold_wakes=o.cold_wakes+int(priced and not o.api_calls and (not prompt or read/prompt<.5)),
                     cost_microusd=o.cost_microusd+(round(price*1e6) if price is not None else 0),unpriced_calls=o.unpriced_calls+int(price is None),
                     tokens_in=o.tokens_in+count('prompt_tokens','input_tokens'),
                     tokens_out=o.tokens_out+count('completion_tokens','output_tokens'))

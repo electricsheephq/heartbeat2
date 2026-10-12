@@ -23,6 +23,9 @@ LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
 FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires'})
+# Every claim records its poller's epoch; an epoch outside this set was minted
+# by another (for a startup replay: the crashed) process.
+LOCAL_EPOCHS = set()
 
 
 def check_paused():
@@ -48,6 +51,7 @@ class Poller:
         self.tool=Tool(self,session_key_fn or current_session_key)
         self.probe_runner=probe_runner or self._probe
         self.epoch=uuid.uuid4().hex
+        LOCAL_EPOCHS.add(self.epoch)
         self.log=LOG
         self.closed=False
         self.process_start=True
@@ -338,7 +342,7 @@ class Poller:
         # The prepared wake version is the probe generation. Any concurrent
         # mutation discards the result, including A -> B -> A retargets.
         if w.version!=original.version or w.kind!=original.kind or w.trigger_json!=original.trigger_json: return
-        s.cas_wake(w.id,'active',expected_version=w.version,checks=w.checks+1)
+        if not s.cas_wake(w.id,'active',expected_version=w.version,checks=w.checks+1): return
         self.ledger(w,checks=1)
         w=s.get_wake(w.id)
         if result.get('error'):
@@ -623,9 +627,10 @@ class Poller:
 
     def cache_line(self,w,*,seconds=None,watcher=False):
         from .cache import line
+        first=w.creator=='user' and w.created_in=='command' and not w.fires
         return line(self.store,self.store.get_session(w.session_key),self.clock.now(),seconds=seconds,
                     floor=max(self.policy.interval_floor(w),w.pacing_min_s or 0),watcher=watcher,
-                    pricing=not self.store.connection.in_transaction)
+                    pricing=not self.store.connection.in_transaction,first_wake=first)
 
     def end_max_fires(self,w):
         """Retire a spent cap once the last running turn has settled."""

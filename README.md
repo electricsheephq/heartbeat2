@@ -80,7 +80,7 @@ Every scenario and its hard bars are in [bench/README.md](bench/README.md); the 
           ledger + no-op governor (slow down → suggest a watcher → pause → ask once)
 ```
 
-One poller per profile runs inside the messaging gateway and ticks every 5 seconds. A file lock guarantees only one poller even when several Hermes processes share the profile. Every fire is a durable claim with an attempt marker. An accepted turn that never starts is tried three times, and a refused injection backs off and is tried five times, before it is marked dead. A turn that started but never finished (a crash or restart) is recorded as interrupted and never re-run, so you never get the same message twice.
+One poller per profile runs inside the messaging gateway and ticks every 5 seconds. A file lock guarantees only one poller even when several Hermes processes share the profile. Every fire is a durable claim with an attempt marker. An accepted turn that never starts is tried three times, and a refused injection backs off and is tried five times, before it is marked dead. A turn that started but never finished (a crash or restart) is recorded as interrupted. Hermes may auto-resume that wake turn, sometimes before heartbeat2's restart recovery has run; heartbeat2 keeps the replay silent either way, never counts it as a fire or delivery, and counts it as a model turn toward the daily cap.
 
 ## Install
 Requires **Hermes ≥ 0.21.6** and Python ≥ 3.11 on macOS or Linux. v0.1 delivers into **messaging-gateway DMs**: Telegram, Discord, Slack, WhatsApp and the other gateway platforms.
@@ -267,3 +267,5 @@ CI runs the unit tests on Ubuntu and macOS with Python 3.11, 3.13 and 3.14. It a
 Credits: claim, refund and coalescing semantics follow Hermes core `/heartbeat`. Fingerprinting follows Hermes' cron monitor, and estop and busy ordering follow the gateway. OpenClaw's public issue reports shaped the benchmark scenarios.
 
 Built for [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Electric Sheep. Apache-2.0.
+
+Known issues: provider-exhaustion settlement (#27) remains blocked by [NousResearch/hermes-agent#137357](https://github.com/NousResearch/hermes-agent/issues/137357).
