@@ -68,7 +68,9 @@ These same disclosure and exception paragraphs appear in README and the manifest
   base_env=allowlisted)` sanitizes that base; import/call failures use the same
   allowlisted base. Pager and no-prompt variables are applied last. GH_TOKEN and
   GITHUB_TOKEN are never passed; gh authenticates through its own hosts.yml or
-  keyring. No token passthrough setting is offered.
+  keyring. No token passthrough setting is offered, so a gh that was authenticated
+  only through those variables needs `gh auth login`. Proxy, custom-CA and D-Bus
+  variables are not part of the allowlisted base.
 - Pool probes enter the wake's pinned Hermes home scope; the URL worker copies
   that context. Child HOME handling, adapter secrets, URL configuration and file
   blocks therefore use the wake's profile rather than the launch profile.
