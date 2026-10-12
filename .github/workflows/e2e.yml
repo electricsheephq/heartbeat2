@@ -42,13 +42,13 @@ jobs:
         with:
           python-version: '3.14'
       - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc # v6
-      - name: Install isolated pinned environment
-        working-directory: plugin
+        with:
+          version: "0.9.28"
+      - name: Install pinned Hermes from its lockfile
+        working-directory: hermes
         run: |
-          pwd
-          uv venv --python 3.14 .e2e-venvs/${{ matrix.pin }}
-          uv pip install --python .e2e-venvs/${{ matrix.pin }}/bin/python \
-            -e "../hermes[messaging]" pytest pytest-xdist pytest-timeout pyyaml croniter psutil
+          uv sync --frozen --no-dev --extra messaging --python 3.14
+          uv pip install --python .venv/bin/python pytest pytest-xdist pytest-timeout pyyaml croniter psutil
       - name: Run real gateways on loopback
         working-directory: plugin
         run: |
@@ -56,12 +56,22 @@ jobs:
           git rev-parse HEAD
           mkdir -p "$HEARTBEAT2_E2E_RESULTS"
           set +e
-          .e2e-venvs/${{ matrix.pin }}/bin/python -m pytest tests/e2e -q -n 4 \
+          ../hermes/.venv/bin/python -m pytest tests/e2e -q -n 4 \
             -p no:cacheprovider --junitxml="$HEARTBEAT2_E2E_RESULTS/results.xml" \
             > "$HEARTBEAT2_E2E_RESULTS/full.log" 2>&1
           result=$?
           cat "$HEARTBEAT2_E2E_RESULTS/full.log"
-          exit "$result"
+          [ "$result" = 0 ] || exit "$result"
+          # A run where every scenario skipped is not a proof.
+          python3 - "$HEARTBEAT2_E2E_RESULTS/results.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).getroot().iter("testcase"))
+          # junitxml reports strict xfails as <skipped type="pytest.xfail">.
+          skipped = [c.get("name") for c in cases
+                     if any(x.get("type") != "pytest.xfail" for x in c.findall("skipped"))]
+          print(f"e2e cells: {len(cases)}, skipped: {skipped}")
+          sys.exit(0 if len(cases) >= 15 and not skipped else 1)
+          PY
       - name: Retain failed gateway evidence
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
