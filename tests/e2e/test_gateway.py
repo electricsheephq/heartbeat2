@@ -52,7 +52,8 @@ def test_silent_verdict_shows_nothing(make_rig, loud):
     before = rig.visible_ids()
     row = rig.settled(wid)
     rig.assert_tools_ok()
-    assert row["state"] == "done" and row["notify"] == 0 and row["delivered"] == 0, row
+    assert row["state"] == "done" and row["outcome"] == "no_change", row
+    assert row["notify"] == 0 and row["delivered"] == 0, row
     shown = [t for t in rig.new_visible(before) if "HeartBeat 2.0:" not in t]
     assert shown == [], shown
 
@@ -80,6 +81,8 @@ def test_steer_in_setup_window(make_rig):
     before = rig.visible_ids()
     rig.driver.dm("/steer OWNER-SETUP")
     rig.wait(lambda: any("OWNER-SETUP" in t for t in rig.new_visible(before)), "setup steer accepted", 20)
+    # Still before heartbeat2's pre_llm_call: an abandoned barrier would take the busy path.
+    assert rig.session()["busy_since"] is None
     (rig.root / "barrier.release").touch()
     rig.settled(wid)
     rig.assert_tools_ok()
@@ -108,6 +111,8 @@ def test_stop_during_wake(make_rig):
     assert sum(r["errors"] for r in rig.rows("ledger")) == 0
     rig.tick_barrier()
     assert len(rig.director.wake_starts) == 1
+    assert len(rig.wake_openers()) == 1, "stopped wake was sent to the model again"
+    assert not any("WAKE-DELIVERED" in t for t in rig.texts())
     # /stop is an owner action; it may clear mute, but must never add a provider error.
     assert len(rig.events()) == before_events + 1
     assert not any("STOPPED-WAKE-MUST-NOT-SHOW" in t for t in rig.texts())
@@ -150,7 +155,7 @@ def test_midturn_compaction_carrier(make_rig):
     rig.owner("make a carried owner row [in:carrier]", "CARRIER-CREATED")
     script.raise_errors("carrier creation")
     rig.llm._responder = original
-    assert any("OWNER-CARRIER" in str(r) and "origin" in str(r).lower() for r in rig.llm.main_requests())
+    assert any("OWNER-CARRIER" in str(r) and "Gateway message origin" in str(r) for r in rig.llm.main_requests())
     before_events, before_human = len(rig.events()), rig.session()["last_human_at"]
     rig.director.notify = False
     rig.director.wake_script.actions = [ToolCall("pulse", {"action": "list"}),
@@ -163,6 +168,7 @@ def test_midturn_compaction_carrier(make_rig):
     row = rig.settled(wid)
     rig.assert_tools_ok()
     assert len(rig.llm.aux_requests()) > aux_before, "midturn compaction did not run"
+    assert "E2E-COMPACTION-SUMMARY" not in str(rig.director.wake_requests[0]), "compaction ran before the wake turn"
     assert any("E2E-COMPACTION-SUMMARY" in str(r) for r in rig.director.wake_requests), "no summary on wake wire"
     assert any("E2E-COMPACTION-SUMMARY" in str(r) and "OWNER-CARRIER" in str(r)
                for r in rig.director.wake_requests), "compaction dropped owner row; carrier path not exercised"
@@ -250,6 +256,7 @@ def test_owner_reply_clears_mute(make_rig):
     for w in wakes[:2]:
         rig.settled(w["id"])
     assert rig.session()["unanswered_count"] == 2
+    assert sum("WAKE-DELIVERED" in t for t in rig.texts()) == 2
     third = rig.settled(wakes[2]["id"], ("skipped",))
     assert third["error"] == "unanswered" and len(rig.director.wake_starts) == 2
     rig.owner("I am back [in:returned]", "reply to returned")
@@ -257,6 +264,7 @@ def test_owner_reply_clears_mute(make_rig):
     fourth = rig.agent_arm("after-reply", {"kind": "at", "at": "in 5s"})
     row = rig.settled(fourth)
     assert row["delivered"] == 1 and len(rig.director.wake_starts) == 3
+    assert sum("WAKE-DELIVERED" in t for t in rig.texts()) == 3
     rig.assert_tools_ok()
 
 
@@ -284,12 +292,16 @@ def test_new_session_orphans_wake(make_rig):
     rig.llm._responder = script
     rig.owner("hello again [in:new-session]", "Wakes from the old conversation were orphaned after /new.")
     script.raise_errors("orphan notice")
+    rig.llm._responder = rig.director
     rig.tick_barrier(seconds=25)
     assert len(rig.director.wake_starts) == 0
+    assert rig.wake_openers() == [], "orphaned wake reached the model"
     assert sum("Wakes from the old conversation were orphaned after /new." in t for t in rig.texts()) == 1
 
 
 def test_api_error_watcher_no_self_loop(make_rig):
+    """One wake API error yields exactly one coalesced watcher occurrence, held by provider
+    backoff. A self-loop spanning backoff periods is not observable in this window."""
     rig = make_rig()
     watcher = rig.agent_arm("watch-errors", {"kind": "api_error"})
     # A real wake errors while the API-error watcher is active. Never seed a fake
@@ -302,8 +314,7 @@ def test_api_error_watcher_no_self_loop(make_rig):
     rig.tick_barrier(seconds=20)
     assert len(rig.director.wake_starts) == 1
     watcher_rows = rig.rows("occurrences", "WHERE wake_id=?", (watcher,))
-    assert len(watcher_rows) <= 1, "one wake error generated repeated watcher occurrences"
-    assert all(o["state"] == "pending" and o["error"] == "provider_unavailable" for o in watcher_rows)
-    if watcher_rows:
-        assert any(r["key"] == "api_cooldown:" + watcher and float(r["value"]) > 0 for r in rig.rows("meta"))
+    assert len(watcher_rows) == 1, watcher_rows
+    assert watcher_rows[0]["state"] == "pending" and watcher_rows[0]["error"] == "provider_unavailable"
+    assert any(r["key"] == "api_cooldown:" + watcher and float(r["value"]) > 0 for r in rig.rows("meta"))
     assert sum(r["fires"] for r in rig.rows("ledger")) == 1

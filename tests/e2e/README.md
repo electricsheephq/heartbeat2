@@ -79,8 +79,9 @@ E11 records the provider's visible failure copy without failing on it. Its stric
 xfail covers the separate observed settlement gap: after an HTTP 500, backoff is
 recorded and the gateway is idle, but the occurrence stays started and heartbeat2
 keeps the session busy pending the `HERMES_AGENT_TIMEOUT` fallback (30 minutes by
-default; this suite does not wait for it). E14's no-loop proof covers a
-bounded window with the real provider backoff and API-watcher cooldown active.
+default; this suite does not wait for it). E14 proves that one wake API error
+yields exactly one coalesced API-error watcher occurrence, held by the real
+provider backoff. A self-loop across backoff periods is not covered here.
 E10's separate strict xfail records native startup auto-resume replaying the old
 wake marker even though heartbeat2 has recovered the occurrence as interrupted.
 Both xfails require the named signature; unrelated failures still fail the run.
