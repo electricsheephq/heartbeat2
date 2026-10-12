@@ -181,7 +181,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Process watchers | `source_process` | on | Process watchers. |
 | File watchers | `source_file` | on | File watchers. |
 | URL watchers | `source_url` | on | URL watchers. |
-| Let URL watchers reach private and local addresses | `url_allow_private` | off | Allow private and local URL targets. Cloud metadata stays blocked. |
+| Let URL watchers reach private and local addresses | `url_allow_private` | off | Allow private and local URL targets (loopback, private ranges). Cloud metadata and the whole IPv4 link-local range 169.254.0.0/16 stay blocked, as Hermes treats that range as metadata. |
 | Command watchers | `source_command` | on | Command watchers. |
 | Hermes event watchers | `source_events` | on | Kanban, subagent, API error and reaction events. |
 | Tell the agent what's armed | `presence_line` | on | One short context line on your turns while something is armed. |

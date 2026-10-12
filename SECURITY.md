@@ -44,7 +44,7 @@ These same disclosure and exception paragraphs appear in README and the manifest
   disable ambient proxies, use a 10 s total monotonic deadline (remaining socket
   timeout on each read and redirect), and read at most 256 KB plus one
   overflow-detection byte. Hermes' `tools.url_safety` enforces the cloud-metadata
-  floor always. Private/local targets are refused unless `url_allow_private=true`
+  floor always. Private/local targets are refused unless `url_allow_private=true` (IPv4 link-local 169.254.0.0/16 stays blocked even then, because Hermes classifies the whole range as cloud metadata)
   (default false), independent of Hermes' global private-URL toggle. Initial and
   redirected URLs are checked before connecting; every DNS answer is classified
   at connect time and only a vetted IP is dialed. HTTPS still verifies the

@@ -15,7 +15,8 @@
 **Upgrade:** existing watchers using `--jq`/`--template`, a private URL or a
 blocked path will error and then pause after 5 errors (the default). Re-arm them
 with an allowed command/path, or enable `url_allow_private` for private URLs.
-Cloud metadata remains blocked with that setting enabled.
+Cloud metadata, including the whole IPv4 link-local range 169.254.0.0/16,
+remains blocked with that setting enabled.
 
 gh watchers that authenticated only through `GH_TOKEN`/`GITHUB_TOKEN` in the
 gateway environment stop authenticating: run `gh auth login` (hosts.yml or
