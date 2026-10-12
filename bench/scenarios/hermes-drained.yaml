@@ -1,7 +1,7 @@
 id: hermes-drained
-title: A mid-turn drained human message is a prompted reply
+title: A queued owner message is answered after the silent wake finishes
 cites:
-- 'Hermes: drained human input reaches pre_gateway_dispatch but may skip post_gateway_admission'
+- 'Hermes: drained human input reaches only pre_llm_call (no dispatch, no admission)'
 settings: {}
 arms:
 - ref: task
@@ -28,6 +28,7 @@ model_policy:
     summary: Waiting.
     drained_human: Any update?
     raw: Here is the update you requested.
+    human_raw: Here is your requested update.
 duration: 1200
 expectations:
   required_fires:
@@ -39,7 +40,8 @@ expectations:
   bars:
     task:
       deliveries: 0
-      status: cancelled
+      status: done
+      model_wakes: 1
       prompted_deliveries: 1
     pending_reply:
       deliveries: 0

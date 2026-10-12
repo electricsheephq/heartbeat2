@@ -12,7 +12,7 @@ import threading
 LOG=logging.getLogger('heartbeat2')
 _RUNTIMES={}
 _GUARD=threading.RLock()
-HOOKS=('pre_gateway_dispatch','post_gateway_admission','pre_command','gateway_platform_event','pre_llm_call',
+HOOKS=('pre_gateway_dispatch','gateway_platform_event','pre_llm_call',
        'pre_api_request','post_api_request','transform_llm_output','on_session_end','agent_loop_stopped',
        'on_session_reset','kanban_task_completed','kanban_task_blocked',
        'on_kanban_worker_exited','subagent_stop','api_request_error')

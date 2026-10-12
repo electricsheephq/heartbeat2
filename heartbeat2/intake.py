@@ -55,6 +55,14 @@ def origin_ids(text):
             yield str(data.get('message_id') or data.get('source_message_id') or '') or None
 
 
+def row_text(content):
+    if isinstance(content,str): return content
+    if isinstance(content,list):
+        return '\n'.join(part['text'] for part in content if isinstance(part,dict)
+                         and part.get('type')=='text' and isinstance(part.get('text'),str))
+    return ''
+
+
 def keys_for(key,mid):
     return [f'{key}:{mid}',f'{key}:{hashlib.sha256(str(mid).encode()).hexdigest()[:12]}']
 
@@ -113,6 +121,7 @@ class Intake:
         self.flights={}
         self.bindings={}
         self.turns={}
+        self.anchors={}
 
     def flight_for(self,sid,key):
         # Tools in delegate children inherit the key, but have a different id.
@@ -132,6 +141,7 @@ class Intake:
             key=self.bindings.pop(old)
             self.bindings[sid]=key
             self.turns[sid]=self.turns.pop(old,'')
+            if old in self.anchors: self.anchors[sid]=self.anchors.pop(old)
             f=self.flights.pop(old,None)
             if f:
                 f.session_id=sid
@@ -185,6 +195,13 @@ class Intake:
     def count(self,key,mid,platform='',source=None):
         self.human(key,platform,source,keys_for(key,mid) if mid else None,folded=False)
 
+    def _count_origins(self,key,text,turn_id,row_index,platform=''):
+        for mid in origin_ids(text):
+            if mid: self.count(key,mid,platform)
+            else:
+                dedupe=f'{key}:origin:{turn_id}:{row_index}:{hashlib.sha256(text.encode()).hexdigest()[:12]}'
+                self.human(key,platform,dedupe=dedupe,folded=False)
+
     def _session_switch(self,w,session_id):
         """A known non-lineage switch has the same ownership boundary as /new."""
         e,s=self.engine,self.engine.store
@@ -207,30 +224,26 @@ class Intake:
         platform=getattr(getattr(source,'platform',None),'value','')
         chat_id=str(getattr(source,'chat_id','') or '')
         matches=[s for s in self.engine.store.list_sessions() if s.platform==platform and s.chat_id==chat_id]
-        if not chat_id or len(matches)!=1: return None
-        key=matches[0].session_key
+        if not chat_id or len(matches)>1: return None
+        key=matches[0].session_key if matches else ''
         mid=getattr(event,'message_id','')
         # SessionSource.to_dict() drops is_bot; preserve the real event verdict
         # for the later admission/human branch, never inspect an absent dict key.
         if getattr(source,'is_bot',False):
-            if mid: self.engine.store.set_meta(f'nonhuman:{key}:{mid}','1')
+            if mid and key: self.engine.store.set_meta(f'nonhuman:{key}:{mid}','1')
             return None
         authorized=getattr(gateway,'_is_user_authorized_for_source',None)
         if authorized and not authorized(source): return None
         if not mid and getattr(source,'message_id',None): return None
+        # A leftover ORIGIN steer always becomes a turn; B owns its count.
+        if text.startswith(ORIGIN): return None
         self.engine.refresh()
+        if not matches:
+            self.engine.store.set_meta(f'pending_human:{platform}:{chat_id}',
+                                       json.dumps({'mid':mid or None,'at':self.engine.clock.now()}))
+            return None
         route={'chat_type':getattr(source,'chat_type',''),'chat_id':chat_id}
-        if text.startswith(ORIGIN):
-            for origin_mid in origin_ids(text): self.count(key,origin_mid,platform,route)
-        else: self.count(key,mid,platform,route)
-        return None
-
-    @fail_open
-    def post_gateway_admission(self,session_key='',platform='',source=None,message_id='',text='',**kwargs):
-        return None
-
-    @fail_open
-    def pre_command(self,surface='',session_key='',platform='',command='',**kwargs):
+        self.count(key,mid,platform,route)
         return None
 
     @fail_open
@@ -241,7 +254,7 @@ class Intake:
         # Chat mapping must be unambiguous (topics/groups can share chat ids).
         if len(matches)!=1: return None
         key=matches[0].session_key
-        self.human(key,platform)
+        self.human(key,platform,folded=False)
         payload=bounded_payload(payload)
         digest=hashlib.sha1(json.dumps(payload,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         s.add_event(event_type,f'{platform}:{event_type}:{digest}',payload,session_key=key,chat_id=matches[0].chat_id)
@@ -259,14 +272,22 @@ class Intake:
         identity=e.tool.identity()
         if identity is None: return None
         key=identity.session_key
+        self.anchors[session_id]=(turn_id,len(conversation_history or [])-1)
+        stamp=f'pending_human:{identity.platform}:{identity.chat_id}'
+        pending=s.get_meta(stamp)
+        if pending:
+            pending=json.loads(pending)
+            if 0<=e.clock.now()-pending['at']<=3600:
+                self.count(key,pending.get('mid'),identity.platform)
+            s.set_meta(stamp,'')
         parsed=marker(user_message)
         if not parsed:
             row=conversation_history[-1] if conversation_history else None
             if isinstance(row,dict) and row.get('role')=='user' and not row.get('display_kind'):
-                text=row.get('content','')
-                if isinstance(text,str) and not text.startswith(GOAL_PREFIXES) and not pulse_command(text):
-                    if text.startswith(ORIGIN):
-                        for mid in origin_ids(text): self.count(key,mid,platform)
+                text=row_text(row.get('content',''))
+                if not text.startswith(GOAL_PREFIXES) and not pulse_command(text):
+                    if ORIGIN in text:
+                        self._count_origins(key,text,turn_id,len(conversation_history)-1,platform)
                     elif row.get('platform_message_id'):
                         self.count(key,row['platform_message_id'],platform)
         previous=self.flights.get(session_id)
@@ -360,21 +381,28 @@ class Intake:
     def pre_api_request(self,session_id='',turn_id='',conversation_history=None,**kwargs):
         self._follow(session_id)
         f=self.flights.get(session_id)
-        if not f or f.invalid or turn_id!=f.turn_id: return None
-        o=self.engine.store.get_occurrence(f.wake_id,f.dedupe_key)
-        if not o or o.state!='started' or o.attempt!=f.attempt: return None
+        o=self.engine.store.get_occurrence(f.wake_id,f.dedupe_key) if f else None
+        valid=bool(f and not f.invalid and turn_id==f.turn_id and
+                   o and o.state=='started' and o.attempt==f.attempt)
         history=conversation_history or []
         after=None
-        expected=(f.wake_id,f.dedupe_key,f.attempt)
-        for idx,row in enumerate(history):
-            if isinstance(row,dict) and marker(row.get('content',''))==expected: after=idx+1
-        if after is None: return None
-        for row in history[after:]:
+        if valid:
+            token=f'⟦pulse o:{f.wake_id}/{f.dedupe_key} a:{f.attempt}⟧'
+            for idx,row in enumerate(history):
+                if isinstance(row,dict) and row.get('role')=='user' and token in row_text(row.get('content','')): after=idx+1
+        fold=after is not None
+        if after is None:
+            anchor=self.anchors.get(session_id)
+            if not anchor or anchor[0]!=turn_id or len(history)<anchor[1]+1: return None
+            after=anchor[1]+1
+        key=self.bindings.get(session_id)
+        if not key: return None
+        for idx,row in enumerate(history[after:],after):
             if not isinstance(row,dict) or row.get('role')!='user': continue
-            text=row.get('content','')
-            if not isinstance(text,str) or ORIGIN not in text: continue
-            for mid in origin_ids(text): self.count(f.session_key,mid)
-            mark_fold(f)
+            text=row_text(row.get('content',''))
+            if ORIGIN not in text: continue
+            self._count_origins(key,text,turn_id,idx)
+            if fold: mark_fold(f)
         return None
 
     @fail_open
@@ -508,7 +536,8 @@ class Intake:
     def agent_loop_stopped(self,session_key='',**kwargs):
         for sid,f in list(self.flights.items()):
             if f.session_key==session_key:
-                self.on_session_end(session_id=sid,interrupted=True)
+                reason='interrupted_by_user' if kwargs.get('invalidation_reason')=='stop_command' else ''
+                self.on_session_end(session_id=sid,interrupted=True,turn_exit_reason=reason)
         return None
 
     @fail_open

@@ -155,7 +155,6 @@ def test_R2_G3_running_reply_counts_once_and_is_never_silent(engine, monkeypatch
     e.intake.on_session_end(session_id='sid',turn_id='turn',completed=True)
     assert not e.store.list_occurrences(b.id)[0].delivered
     assert e.store.get_session(KEY).unanswered_count==0
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_id':'unit','chat_type':'dm'},message_id='m1')
     monkeypatch.setattr('heartbeat2.tool.session_env',lambda name: 'm1' if name=='HERMES_SESSION_MESSAGE_ID' else '')
     e.intake.pre_llm_call(session_id='sid',turn_id='queued',user_message='owner reply',platform='telegram',
         conversation_history=[{'role':'user','content':'owner reply','platform_message_id':'m1'}])
@@ -439,9 +438,6 @@ def test_R2_G12_real_bot_source_never_counts(engine, internal):
     before=e.store.get_session(KEY)
     e.clock.advance(1)
     e.intake.pre_gateway_dispatch(event=inbound(bot=not internal,internal=internal))
-    if not internal:
-        # Admission only supplies SessionSource.to_dict(), which omits is_bot.
-        e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_id':'unit','chat_type':'dm'},message_id='m1')
     assert e.store.get_session(KEY)==before
     assert e.store.get_wake(w.id).status=='active'
 

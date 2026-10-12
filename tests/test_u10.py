@@ -34,8 +34,6 @@ def inbound(mid='owner-1', **extras):
 
 def admitted(e, mid='owner-1'):
     e.intake.pre_gateway_dispatch(event=inbound(mid))
-    e.intake.post_gateway_admission(session_key=KEY, platform='telegram',
-        source={'chat_type':'dm', 'chat_id':'unit'}, message_id=mid, text='Any update?')
 
 
 @pytest.mark.parametrize('text', [
@@ -66,8 +64,6 @@ def test_R10_A1_core_heartbeat_admission_is_machine(engine):
     e.clock.advance(10)
     ev = inbound(None, _heartbeat_session_id='sid')
     e.intake.pre_gateway_dispatch(event=ev)
-    e.intake.post_gateway_admission(session_key=KEY, platform='telegram',
-        source={'chat_type':'dm','chat_id':'unit'}, message_id=None, text=ev.text)
     e.intake.pre_llm_call(session_id='sid', turn_id='heartbeat', user_message=ev.text, platform='telegram')
     after = e.store.get_session(KEY)
     assert (after.last_human_at, after.episode_id, after.unanswered_count) == (
@@ -83,6 +79,11 @@ def test_R10_A1_real_and_drained_owner_messages_count(engine, tmp_path):
     e = engine
     w = arm(e, cancel_on_reply=True)
     e.tick(); start(e)
+    assert e.tool.handle({'action':'respond','outcome':'progress','notify':False},session_id='sid')['ok']
+    assert e.intake.transform_llm_output(session_id='sid',turn_id='turn',response_text='Wake status')=='[SILENT]'
+    e.intake.on_session_end(session_id='sid',turn_id='turn',completed=True)
+    assert e.store.get_wake(w.id).status=='done'
+    cancel=arm(e,cancel_on_reply=True,next_due_at=e.clock.now()+3600)
     session(e, unanswered_count=2)
     before = e.store.get_session(KEY)
     e.clock.advance(1)
@@ -91,7 +92,8 @@ def test_R10_A1_real_and_drained_owner_messages_count(engine, tmp_path):
     e.intake.pre_llm_call(session_id='sid', turn_id='human', user_message='Any update?', platform='telegram',conversation_history=[row])
     after = e.store.get_session(KEY)
     assert after.last_human_at > before.last_human_at and after.episode_id != before.episode_id
-    assert after.unanswered_count == 0 and e.store.get_wake(w.id).status == 'cancelled'
+    assert after.unanswered_count == 0 and e.store.get_wake(cancel.id).status == 'cancelled'
+    assert e.store.get_wake(w.id).status=='done'
     e.intake.pre_llm_call(session_id='sid', turn_id='human', user_message='Any update?', platform='telegram',conversation_history=[row])
     assert e.store.get_session(KEY).episode_id == after.episode_id
     assert e.intake.transform_llm_output(session_id='sid', turn_id='human', response_text='Your update') is None
@@ -413,8 +415,6 @@ def test_R10_B2_queued_owner_keeps_wake_silent(engine, mode, children, holder, k
             _session_db=NS(get_compression_lock_holder=lambda sid:holder)) if known else None
     e.clock.advance(1); e.intake.pre_gateway_dispatch(event=inbound(), gateway=gw)
     # Admission never marks a fold, regardless of private gateway busy state.
-    e.intake.post_gateway_admission(session_key=KEY, platform='telegram',
-        source={'chat_type':'dm','chat_id':'unit'},message_id='owner-1',text='Any update?')
     assert e.store.get_session(KEY).unanswered_count == 0
     assert e.intake.transform_llm_output(session_id='sid',response_text='Internal status') == ('[SILENT]' if silent else None)
 

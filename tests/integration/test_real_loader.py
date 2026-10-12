@@ -80,7 +80,6 @@ def test_real_loader_worker_registration_and_same_session_silence(tmp_path, monk
         fresh_key='agent:telegram:dm:fresh'
         tokens=set_session_vars(platform='telegram',chat_id='fresh',chat_type='dm',session_key=fresh_key,session_id='fresh-sid')
         try:
-            manager.invoke_hook('pre_command',surface='gateway',command='pulse',session_key=fresh_key,platform='telegram')
             status=manager._plugin_commands['pulse']['handler']('status')
             assert 'plugins:\n  entries:\n    heartbeat2:\n      allow_gateway_injection: true' in status
             assert engine.store.get_session(fresh_key).last_human_at is None

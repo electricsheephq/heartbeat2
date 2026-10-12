@@ -96,7 +96,6 @@ def test_human_presence_limits_and_commands_keep_owner_state(engine):
     assert 'limits changed' not in e.intake.pre_llm_call(session_id='sid',user_message='again')['context']
     before=e.store.get_session(KEY).last_human_at
     e.clock.advance(10)
-    assert e.intake.pre_command(surface='gateway',session_key=KEY,platform='telegram') is None
     assert e.store.get_session(KEY).last_human_at==before
 
 
@@ -191,7 +190,6 @@ def test_gateway_event_mapping_fail_open_and_manifest(engine):
     assert e.intake.gateway_platform_event(platform='telegram',event_type='reaction',payload={'chat_id':'unit','message_id':'1','emojis':['yes']}) is None
     e.tick()
     assert len(e.ctx.calls)==1
-    assert e.intake.post_gateway_admission(source='malformed') is None
     import yaml
     data=yaml.safe_load((Path(__file__).resolve().parents[1]/'plugin.yaml').read_text())
     assert data['manifest_version']==2 and data['kind']=='standalone'

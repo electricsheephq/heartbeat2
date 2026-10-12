@@ -68,8 +68,6 @@ def test_idle_owner(engine, platform, mid):
     e=engine; session(e,platform=platform,unanswered_count=2)
     ev=event(mid=mid,source_mid=mid,platform=platform)
     e.intake.pre_gateway_dispatch(event=ev,gateway=NS(_is_user_authorized_for_source=lambda src:True))
-    e.intake.post_gateway_admission(session_key=KEY,platform=platform,
-        source={'chat_id':'unit','chat_type':'dm','message_id':mid},message_id=mid,text='hi')
     row={'role':'user','content':'hi'}
     if mid: row['platform_message_id']=mid
     llm(e,row,platform=platform)
@@ -162,11 +160,8 @@ def test_busy_voice_and_cron_history(engine):
     count(e,'111','114')
 
 
-@pytest.mark.parametrize('inline',[False,True])
-def test_owner_status_command(engine,inline):
+def test_owner_status_command(engine):
     e=engine; e.intake.pre_gateway_dispatch(event=event('/status','112','112'))
-    if not inline:
-        e.intake.pre_command(surface='gateway',command='status',alias_used='status',args_raw='',session_key=KEY,platform='telegram')
     count(e,'112')
 
 
@@ -185,7 +180,7 @@ def test_internal_machine_rows(engine,text):
 def test_slash_loop_tick(engine):
     e=engine; w=arm(e,cancel_on_reply=True,next_due_at=e.clock.now()+3600)
     before=e.store.get_session(KEY); e.clock.advance(5)
-    e.intake.pre_command(surface='gateway',command='recap',alias_used='recap',args_raw='',session_key=KEY,platform='telegram')
+    e.intake.pre_gateway_dispatch(event=NS(internal=True,text='/recap'))
     unchanged(e,before,w)
 
 
@@ -195,7 +190,6 @@ def test_core_heartbeat(engine,attribute):
     before=e.store.get_session(KEY); e.clock.advance(5)
     ev=event(HB,None,None,**({'_heartbeat_session_id':'sid'} if attribute else {}))
     e.intake.pre_gateway_dispatch(event=ev)
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_id':'unit'},message_id=None,text=HB)
     llm(e,{'role':'user','content':HB,'display_kind':'internal_notification'})
     unchanged(e,before,w)
 
@@ -207,14 +201,14 @@ def test_goal_continuation(engine,text,admission):
     before=e.store.get_session(KEY); e.clock.advance(5)
     if admission:
         e.intake.pre_gateway_dispatch(event=event(text,None,None))
-        e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_id':'unit'},message_id=None,text=text)
     llm(e,{'role':'user','content':text})
     unchanged(e,before,w)
 
 
 def test_own_wake_stale_env(engine,monkeypatch):
     e=engine; before=e.store.get_session(KEY)
-    monkeypatch.setenv('HERMES_SESSION_MESSAGE_ID','55')
+    from heartbeat2 import tool
+    monkeypatch.setattr(tool,'session_env',lambda name:'55' if name=='HERMES_SESSION_MESSAGE_ID' else '')
     w,row=wake(e)
     unchanged(e,before,w)
     assert e.intake.flights['sid'].turn_id=='wake'
@@ -230,7 +224,6 @@ def test_retry_replay(engine):
 
 def test_orphan_rescue(engine):
     e=engine; e.intake.pre_gateway_dispatch(event=event('new','116','116'))
-    e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_id':'unit'},message_id=None,text=GOALS[0])
     llm(e,{'role':'user','content':GOALS[0]})
     llm(e,{'role':'user','content':'new','platform_message_id':'116'},'later')
     count(e,'116')

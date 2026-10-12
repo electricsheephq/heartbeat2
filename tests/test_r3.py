@@ -201,16 +201,14 @@ def test_R3_R5_successful_probe_clears_error_streak(engine,fire):
     assert engine.store.get_wake(w.id).error_streak==0
 
 
-@pytest.mark.parametrize('hook',['pre_command','post_gateway_admission','pre_gateway_dispatch','pre_llm_call'])
+@pytest.mark.parametrize('hook',['pre_gateway_dispatch','pre_llm_call'])
 def test_R3_R6_pulse_is_never_human_reply(engine,hook):
     e=engine
     w=arm(e,cancel_on_reply=True,next_due_at=e.clock.now()+1000)
     session(e,unanswered_count=2)
     before=e.store.get_session(KEY)
     e.clock.advance(60)
-    if hook=='pre_command':e.intake.pre_command(surface='gateway',command='pulse',session_key=KEY,platform='telegram')
-    elif hook=='post_gateway_admission':e.intake.post_gateway_admission(session_key=KEY,platform='telegram',source={'chat_type':'dm','chat_id':'unit'},text='/pulse status',message_id='cmd')
-    elif hook=='pre_gateway_dispatch':e.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False,text='/pulse status',message_id='cmd',source=SimpleNamespace(platform=SimpleNamespace(value='telegram'),chat_type='dm',chat_id='unit',is_bot=False)))
+    if hook=='pre_gateway_dispatch':e.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False,text='/pulse status',message_id='cmd',source=SimpleNamespace(platform=SimpleNamespace(value='telegram'),chat_type='dm',chat_id='unit',is_bot=False)))
     else:e.intake.pre_llm_call(session_id='sid',turn_id='cmd',user_message='/pulse status',platform='telegram')
     after=e.store.get_session(KEY)
     assert e.store.get_wake(w.id).status=='active'
@@ -220,7 +218,7 @@ def test_R3_R6_pulse_is_never_human_reply(engine,hook):
 def test_R3_R6_command_never_credits_engagement(engine):
     w=arm(engine); engine.tick(); start(engine); end(engine,'progress',True)
     engine.clock.advance(60)
-    engine.intake.pre_command(surface='gateway',command='pulse',session_key=KEY,platform='telegram')
+    engine.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False,text='/pulse status'))
     assert engine.store.get_wake(w.id).engaged==0
     assert engine.store.get_session(KEY).unanswered_count==1
 

@@ -96,7 +96,7 @@ class FakeGateway:
 
     def engine_for(self,name):return self.engines[self.sessions[name]['profile']]
 
-    def human(self,name,text,*,drained=False,mid_turn=False,finish=True):
+    def human(self,name,text,*,drained=False,mid_turn=False,finish=True,response_text='Acknowledged.',reply=None):
         session=self.sessions[name]; e=self.engine_for(name)
         self.counter+=1; mid=f'human-{self.counter}'; turn=f'human-turn-{self.counter}'
         self.humans.append({'t':self.t,'session_key':session['key'],'profile':session['profile'],'text':text,'drained':drained})
@@ -104,8 +104,6 @@ class FakeGateway:
             if not drained:
                 source=SimpleNamespace(platform=SimpleNamespace(value=session['platform']),chat_type=session['chat_type'],chat_id=session['chat_id'],message_id=mid,is_bot=False)
                 e.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False,source=source,message_id=mid,text=text))
-                e.intake.post_gateway_admission(session_key=session['key'],platform=session['platform'],
-                    source={'chat_type':session['chat_type'],'chat_id':session['chat_id']},message_id=mid,text=text)
             if not mid_turn:
                 context=e.intake.pre_llm_call(session_id=session['sid'],turn_id=turn,platform=session['platform'],user_message=text,
                     conversation_history=[{'role':'user','content':text,'platform_message_id':mid}])
@@ -113,7 +111,12 @@ class FakeGateway:
                     for line in context.get('context','').splitlines():
                         if '/pulse watch' in line:self.cards.append({'t':self.t,'session_key':session['key'],'text':line})
                 if finish:
-                    e.intake.transform_llm_output(session_id=session['sid'],turn_id=turn,response_text='Acknowledged.')
+                    transformed=e.intake.transform_llm_output(session_id=session['sid'],turn_id=turn,response_text=response_text)
+                    answer=transformed if transformed is not None else response_text
+                    if reply and answer!='[SILENT]':
+                        self.deliveries.append({**reply,'t':self.t,'session_key':session['key'],
+                            'profile':session['profile'],'owner_profile':session['profile'],
+                            'text':answer,'turn_id':turn,'prompted':True,'unprompted':False,'terminal_before':False})
                     e.intake.on_session_end(session_id=session['sid'],turn_id=turn,completed=True)
         self.trace.append({'t':self.t,'event':'human','session':name,'drained':drained})
         return turn
@@ -121,7 +124,6 @@ class FakeGateway:
     def command(self,name,text):
         session=self.sessions[name];e=self.engine_for(name)
         with self.bound(session):
-            e.intake.pre_command(surface='gateway',command='pulse',session_key=session['key'],platform=session['platform'])
             result=commands.handle(text,e_runtime(e))
         self.command_log.append({'t':self.t,'session_key':session['key'],'command':text,'result':result})
         return result
@@ -162,9 +164,6 @@ class FakeGateway:
         ref=self.ref_for(profile,wid);step=self.model.verdict(ref,valid)
         with self.bound(session):
             e.intake.pre_llm_call(session_id=sid,turn_id=turn,platform=session['platform'],user_message=item['text'])
-            if step.get('drained_human'):
-                # In-band drain skips admission/dispatch; its history row has the id.
-                turn=self.human(session['name'],step['drained_human'],drained=True,finish=False)
             if step.get('compact'):
                 new=sid+'-compact';self.tips[sid]=new;session['sid']=new;sid=new
             result=self.model.respond(e,sid,step)
@@ -193,6 +192,11 @@ class FakeGateway:
                     'occurrence':occ,'profile':profile,'owner_profile':profile,'prompted':prompted,'unprompted':not prompted,'owner_session_key':w.session_key,'terminal_before':terminal_before})
             e.intake.post_api_request(session_id=sid,turn_id=turn,usage={'input_tokens':self.scenario.get('context_tokens',150000),'output_tokens':0})
             e.intake.on_session_end(session_id=sid,turn_id=turn,completed=True,platform=session['platform'])
+            if step.get('drained_human'):
+                # Hermes drains only after run_conversation finalized the wake.
+                self.human(session['name'],step['drained_human'],drained=True,
+                    response_text=step.get('human_raw','Acknowledged.'),
+                    reply={'wake_id':wid,'ref':ref,'occurrence':occ,'owner_session_key':w.session_key})
         w=e.store.get_wake(wid)
         if w.status_reason.startswith('governor:') and ref not in self.pause_fires:self.pause_fires[ref]=w.fires
 
