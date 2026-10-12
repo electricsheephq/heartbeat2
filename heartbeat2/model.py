@@ -56,6 +56,9 @@ class Wake:
     fires: int = 0
     model_turns: int = 0
     gated_skips: int = 0
+    checks: int = 0
+    no_verdict: int = 0
+    agent_edited: bool = False
     noop_streak: int = 0
     ignored_streak: int = 0
     error_streak: int = 0
@@ -63,6 +66,12 @@ class Wake:
     engaged: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    warm_wakes: int = 0
+    cold_wakes: int = 0
+    cost_microusd: int = 0
+    unpriced_calls: int = 0
     created_at: float = 0
     updated_at: float = 0
     version: int = 0
@@ -90,6 +99,18 @@ class Occurrence:
     tokens_in: int = 0
     tokens_out: int = 0
     error: str = ""
+    created_at: float = 0
+    matched_at: float | None = None
+    held_since: float | None = None
+    held_reason: str = ""
+    held_matches: int = 0
+    api_calls: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    warm_wakes: int = 0
+    cold_wakes: int = 0
+    cost_microusd: int = 0
+    unpriced_calls: int = 0
 
     @property
     def id(self) -> str:
@@ -113,3 +134,8 @@ class Session:
     first_notice_sent: bool = False
     last_wake_turn_at: float | None = None
     limits_fingerprint: str = ""
+    last_cache_touch_at: float | None = None
+    last_route: str = ""
+    last_prompt_tokens: int = 0
+    last_cache_hit_ratio: float = 0
+    last_cache_api_mode: str = ""

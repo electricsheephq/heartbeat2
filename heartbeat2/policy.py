@@ -11,6 +11,18 @@ from .clock import Clock, SystemClock
 from .model import Wake, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, KINDS
 from .schedule import parse_duration, quiet_end
 
+
+def is_owner(wake):
+    return wake.creator == 'user' and not wake.trigger_json.get('builtin') and not wake.agent_edited
+
+
+def is_watcher(wake):
+    return wake.kind in PROBE_KINDS | EVENT_KINDS
+
+
+def one_shot(wake):
+    return wake.kind == 'at'
+
 # Built-in messaging gateways at Hermes 04eb00cef7, gateway/config.py:217.
 # Registered plugin adapters can be admitted explicitly by the Hermes adapter.
 MESSAGING_PLATFORMS = frozenset({"telegram", "discord", "whatsapp", "whatsapp_cloud",
@@ -46,7 +58,7 @@ class Policy:
     max_messages_per_day: int = 6
     max_unanswered: int = 2
     min_interval_minutes: int = 15
-    agent_ungated_floor_minutes: int = 60
+    agent_ungated_floor_minutes: int = 55
     wake_spacing_minutes: int = 10
     probe_floor_seconds: int = 60
     max_active: int = 10
@@ -245,7 +257,7 @@ class Policy:
             floor = max(floor, self.agent_ungated_floor_minutes * 60)
         return floor
 
-    def clamp(self, wake: Wake, *, probe_gated: bool = False) -> ClampedWake:
+    def clamp(self, wake: Wake, *, probe_gated: bool = False, cache_ttl=None) -> ClampedWake:
         if wake.kind not in KINDS:
             raise ValueError("unknown wake kind")
         if wake.babysit and (wake.kind not in {"every", "self"} or wake.created_in != "human_turn"):
@@ -304,6 +316,12 @@ class Policy:
             raise ValueError("max_fires must be positive")
         if wake.babysit:
             change("max_fires", min(wake.max_fires or 24, 24), "max_fires", "babysit_max_fires")
+        from .cache import interval
+        for attr in ('base_interval_s','eff_interval_s'):
+            value=updates.get(attr,getattr(wake,attr))
+            if value is not None:
+                snapped=interval(replace(wake,**updates),value,cache_ttl,floor)
+                if snapped!=value: change(attr,snapped,attr,'prompt_cache')
         return ClampedWake(replace(wake, **updates), clamped)
 
     def quiet_until(self, *, urgent: bool = False, now: float | None = None) -> float | None:
@@ -313,9 +331,8 @@ class Policy:
                          self.resolved_timezone())
 
     def unanswered_gate(self, wake: Wake, unanswered_count: int) -> str | None:
-        owner_wake = wake.creator == "user" and not wake.trigger_json.get('builtin')
-        if unanswered_count >= self.max_unanswered and not owner_wake:
-            return "unanswered"
+        if unanswered_count >= self.max_unanswered and not is_owner(wake):
+            return "held_unanswered" if is_watcher(wake) else "unanswered"
         return None
 
     def command_allowed(self, argv: list[str]) -> bool:

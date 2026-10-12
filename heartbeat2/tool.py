@@ -28,7 +28,8 @@ PARAMETERS['required'] = ['action']
 DESCRIPTION = ('Use create to arm a wake/watcher (note and trigger.kind required); list to inspect; '
                'update to change instructions or trigger; pause to suspend; resume to restart a paused wake; '
                'cancel to end it; off to stop checks for this chat. During a wake turn, use respond to set '
-               'outcome and notify, optionally scratch/next_check. Bounds and clamps are reported. Never type silence markers.')
+               'outcome and notify, optionally scratch/next_check. Bounds and clamps are reported. Never type silence markers. '
+               'Results include a `cache` line; pick intervals the line marks warm.')
 SCHEMA = {'name':'pulse','description':DESCRIPTION,'parameters':PARAMETERS}
 
 
@@ -82,7 +83,7 @@ class Tool:
                 if action == 'respond':
                     return self.respond(args, flight)
                 if action == 'list':
-                    return {'ok':True,'wakes':[asdict(w) for w in e.store.list_wakes(s.session_key)]}
+                    return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w)} for w in e.store.list_wakes(s.session_key)]}
                 if action == 'off':
                     e.store.cas_session(s.session_key, {'enabled':s.enabled}, enabled=False)
                     return {'ok':True,'enabled':False}
@@ -110,7 +111,7 @@ class Tool:
                     w = e.store.create_wake(result.wake)
                     if child_key:
                         e.store.set_meta(child_key,'1')
-                    return {'ok':True,'wake':asdict(w),'clamped':result.clamped}
+                    return {'ok':True,'wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w)}
                 if action not in {'update','pause','resume','cancel'}:
                     return {'error':'unknown_action'}
                 if args.get('id') == 'all':
@@ -124,6 +125,8 @@ class Tool:
                     wakes = [w]
                 results = []
                 for w in wakes:
+                    if action == 'update' and w.trigger_json.get('builtin') and 'trigger' in args:
+                        return {'error':'builtin_settings_owned','detail':'The check-in is controlled in Settings.'}
                     gate = e.policy.mutation_gate(w, action=action, session_key=s.session_key,
                         created_in=created_in, new_kind=(args.get('trigger') or {}).get('kind'),
                         babysit=args.get('babysit'), untrusted_payload=bool(flight and flight.untrusted))
@@ -150,6 +153,10 @@ class Tool:
                                 return {'error':'max_active'}
                         result = self.reschedule(w) if action=='resume' else self.prepare(w,args,reschedule='trigger' in args)
                         candidate, clamps = result.wake, result.clamped
+                        if action == 'update' and w.creator == 'user' and any(
+                            getattr(candidate,k) != getattr(w,k) for k in
+                            ('trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','note')):
+                            candidate = replace(candidate,agent_edited=True)
                         if action == 'resume':
                             candidate = replace(candidate,status='active',status_reason='')
                     else:
@@ -160,7 +167,8 @@ class Tool:
                     if action in {'pause','cancel'}:
                         e.cancel_occurrences(w.id,'paused' if action=='pause' else 'cancelled',preserve_started=True)
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
-                    item={'ok':True,'wake':asdict(e.store.get_wake(w.id)),'clamped':clamps}
+                    w=e.store.get_wake(w.id)
+                    item={'ok':True,'wake':asdict(w),'clamped':clamps,'cache':self.cache_result(w)}
                     results.append(item)
                 return results[0] if args.get('id') != 'all' and results else {'ok':True,'results':results}
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
@@ -168,6 +176,11 @@ class Tool:
         except Exception:
             e.log.warning('pulse tool failed', exc_info=True)
             return {'error':'engine_error'}
+
+    def cache_result(self,w):
+        from .policy import is_watcher
+        seconds = max(0,w.next_due_at-self.engine.clock.now()) if w.kind=='at' and w.next_due_at is not None else w.eff_interval_s
+        return self.engine.cache_line(w,seconds=seconds,watcher=is_watcher(w))
 
     def reschedule(self,w):
         """Shared tool/command resume: preserve stored one-shot due, fresh key."""
@@ -185,6 +198,8 @@ class Tool:
         trigger=dict(args.get('trigger',w.trigger_json))
         if 'trigger' in args and set(trigger) - set(PARAMETERS['properties']['trigger']['properties']):
             raise ValueError('unknown trigger parameter')
+        if w.trigger_json.get('builtin'):
+            trigger['builtin'] = True
         kind=trigger.get('kind',w.kind)
         if kind in {'file','url'} and 'pattern' in trigger:
             pattern=trigger['pattern']
@@ -245,7 +260,8 @@ class Tool:
                     created=None
                 updates['probe_state_json']={'create_time':created}
         if not updates.get('note',w.note): raise ValueError('note is required')
-        result=e.policy.clamp(replace(w,**updates))
+        candidate=replace(w,**updates)
+        result=e.policy.clamp(candidate,cache_ttl=e.timing(candidate)['cache_ttl'])
         w=result.wake
         if reschedule:
             now,tz=e.clock.now(),e.policy.resolved_timezone()
@@ -253,7 +269,7 @@ class Tool:
                 if 'at' not in trigger: raise ValueError('at requires a time')
                 due=parse_at(trigger['at'],now=now,timezone=tz)
             elif kind in {'every','self'}:
-                due=next_every(now,w.eff_interval_s,anchor=trigger.get('at') if kind=='every' else None,timezone=tz)
+                due=next_every(now,w.eff_interval_s,anchor=trigger.get('at') if kind=='every' else None,timezone=tz,**e.timing(w))
             elif kind=='cron':
                 due=next_cron(trigger['cron'],now=now,timezone=tz,minimum_interval_s=w.eff_interval_s or 0)
             elif kind in PROBE_KINDS: due=now
@@ -291,6 +307,8 @@ class Tool:
                 requested=parse_duration(args['next_check'])
                 bounded=max(requested,w.pacing_min_s or e.policy.interval_floor(w))
                 if w.pacing_max_s is not None: bounded=min(bounded,w.pacing_max_s)
+                from .cache import interval
+                bounded=interval(w,bounded,e.timing(w)['cache_ttl'],e.timing(w)['minimum_s'])
                 changes['next_check_s']=bounded
                 if requested!=bounded: clamps['next_check']=f'{requested} → {bounded} (pacing)'
         if not e.store.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=o.attempt,**changes):

@@ -465,23 +465,36 @@ class Intake:
         if delegated_child(kwargs.get('platform','')): return None
         self._follow(session_id)
         key=self.bindings.get(session_id)
-        if key and (not turn_id or not self.turns.get(session_id) or self.turns[session_id]==turn_id):
-            session=s.get_session(key)
-            s.cas_session(key,{'last_activity_at':session.last_activity_at},last_activity_at=e.clock.now())
-        f=self.flights.get(session_id)
-        if not f or f.invalid or turn_id and f.turn_id and turn_id!=f.turn_id: return None
-        o=s.get_occurrence(f.wake_id,f.dedupe_key)
-        if o and o.attempt==f.attempt: s.set_meta('provider_error:'+o.id,'')
-        if usage is None: return None
         def count(*names):
             for name in names:
                 v=usage.get(name) if isinstance(usage,dict) else getattr(usage,name,None)
                 if v is not None: return max(0,int(v))
             return 0
+        from . import cache
+        route=cache.route_key(kwargs.get('provider'),kwargs.get('model'),kwargs.get('base_url'))
+        prompt,read,written=count('prompt_tokens','input_tokens'),count('cache_read_tokens'),count('cache_write_tokens')
+        if key and (not turn_id or not self.turns.get(session_id) or self.turns[session_id]==turn_id):
+            session=s.get_session(key)
+            s.cas_session(key,{'last_activity_at':session.last_activity_at},last_activity_at=e.clock.now())
+            if usage is not None:
+                cache.touch(s,session,started_at=kwargs.get('started_at'),route=route,prompt=prompt,read=read,api_mode=kwargs.get('api_mode',''))
+        f=self.flights.get(session_id)
+        if not f or f.invalid or turn_id and f.turn_id and turn_id!=f.turn_id: return None
+        o=s.get_occurrence(f.wake_id,f.dedupe_key)
+        if o and o.attempt==f.attempt: s.set_meta('provider_error:'+o.id,'')
+        price=None
+        if usage is not None:
+            try: price=cache.cost(route,prompt=prompt,read=read,written=written,out=count('completion_tokens','output_tokens'),ttl=cache.ttl_for_session(s,s.get_session(key))[0])
+            except Exception: pass
         with s.atomic():
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
             if o and o.state=='started':
                 s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=f.attempt,
+                    api_calls=o.api_calls+1,
+                    cache_read_tokens=o.cache_read_tokens+read,cache_write_tokens=o.cache_write_tokens+written,
+                    warm_wakes=o.warm_wakes+int(not o.api_calls and prompt>0 and read/prompt>=.5),
+                    cold_wakes=o.cold_wakes+int(usage is not None and not o.api_calls and (not prompt or read/prompt<.5)),
+                    cost_microusd=o.cost_microusd+(round(price*1e6) if price is not None else 0),unpriced_calls=o.unpriced_calls+int(price is None),
                     tokens_in=o.tokens_in+count('prompt_tokens','input_tokens'),
                     tokens_out=o.tokens_out+count('completion_tokens','output_tokens'))
         return None

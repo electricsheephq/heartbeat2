@@ -97,6 +97,9 @@ def fold(e, mid='m1', text='owner reply'):
 
 
 def end(e, outcome='no_change', notify=False, summary='same', **args):
+    f=e.intake.flights.get('sid')
+    if f and not e.store.get_occurrence(f.wake_id,f.dedupe_key).api_calls:
+        e.intake.post_api_request(session_id='sid',turn_id='turn',usage={})
     assert e.tool.handle(dict(action='respond', outcome=outcome, notify=notify, summary=summary, **args), session_id='sid')['ok']
     result = e.intake.transform_llm_output(response_text='Chatty output', session_id='sid', turn_id='turn')
     e.intake.on_session_end(session_id='sid', turn_id='turn', completed=True, failed=False, interrupted=False)
@@ -237,7 +240,9 @@ def test_I10_daily_caps_and_flood(engine):
     e = engine
     e.policy = replace(e.policy, max_model_wakes_per_day=1, wake_spacing_minutes=0)
     w = arm(e)
-    e.tick(); start(e); end(e, outcome='progress', notify=True)
+    e.tick(); start(e)
+    e.intake.post_api_request(session_id='sid', turn_id='turn', usage={'prompt_tokens':10})
+    end(e, outcome='progress', notify=True)
     arm(e); e.tick()
     assert len(e.ctx.calls) == 1
     assert e.store.list_occurrences()[-1].error == 'daily_model_cap'

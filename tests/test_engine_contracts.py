@@ -123,7 +123,7 @@ def test_probe_stub_injected_results_fingerprint_and_pool(engine):
     w=arm(e,'file',next_due_at=e.clock.now(),trigger_json={'path':'/tmp/fake','check_every':60})
     e.probe_runner=lambda wake: {'fire':False,'state':{'size':1}}
     e.tick()
-    assert not e.ctx.calls and e.store.get_wake(w.id).gated_skips==1
+    assert not e.ctx.calls and e.store.get_wake(w.id).checks==1 and e.store.get_wake(w.id).gated_skips==0
     assert e.store.get_wake(w.id).probe_state_json=={'size':1}
     e.clock.advance(60)
     e.probe_runner=lambda wake: {'fire':True,'identity':'v2','message':'changed','state':{'size':2}}

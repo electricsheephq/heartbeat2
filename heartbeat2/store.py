@@ -22,11 +22,12 @@ from .model import (Wake, Occurrence, Session, KINDS, WAKE_STATUSES,
 from .schedule import local_day
 
 SCHEMA_VERSION = 1
+CACHE_FIELDS = {'cache_read_tokens','cache_write_tokens','warm_wakes','cold_wakes','cost_microusd','unpriced_calls'}
 LEDGER_FIELDS = frozenset({"fires", "gated_skips", "governor_skips", "model_turns",
-    "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals"})
+    "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals", "checks", "no_verdict"} | CACHE_FIELDS)
 _JSON_FIELDS = {"trigger_json", "probe_state_json", "payload_json"}
 _BOOL_FIELDS = {"babysit", "urgent", "cancel_on_reply", "notify", "force_silent",
-                "enabled", "first_notice_sent"}
+                "enabled", "first_notice_sent", "agent_edited"}
 _TRANSITIONS = {
     "pending": { "skipped", "missed", "dead", "orphaned", "superseded"},
     "claimed": {"pending", "started", "dead", "interrupted", "orphaned", "superseded"},
@@ -102,7 +103,8 @@ def _encode(key: str, value: Any) -> Any:
 def _record(cls, row):
     if row is None:
         return None
-    data = dict(row)
+    names = {f.name for f in fields(cls)}
+    data = {k: v for k, v in dict(row).items() if k in names}
     for name in _JSON_FIELDS & data.keys():
         data[name] = json.loads(data[name]) if data[name] is not None else None
     for name in _BOOL_FIELDS & data.keys():
@@ -171,6 +173,22 @@ class Store:
                 columns={row[1] for row in self.connection.execute("PRAGMA table_info(ledger)")}
                 if "provider_deferrals" not in columns:
                     self.connection.execute("ALTER TABLE ledger ADD COLUMN provider_deferrals INTEGER NOT NULL DEFAULT 0")
+                additions = {'wakes': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0',
+                                      'agent_edited':'INTEGER NOT NULL DEFAULT 0'},
+                    'ledger': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0'},
+                    'occurrences': {'created_at':'REAL NOT NULL DEFAULT 0', 'matched_at':'REAL', 'held_since':'REAL',
+                        'held_reason':"TEXT NOT NULL DEFAULT ''", 'held_matches':'INTEGER NOT NULL DEFAULT 0', 'api_calls':'INTEGER NOT NULL DEFAULT 0'}}
+                for table in ('wakes','occurrences','ledger'):
+                    additions[table].update({k:'INTEGER NOT NULL DEFAULT 0' for k in CACHE_FIELDS})
+                additions['sessions'] = {'last_cache_touch_at':'REAL','last_route':"TEXT NOT NULL DEFAULT ''",
+                    'last_prompt_tokens':'INTEGER NOT NULL DEFAULT 0','last_cache_hit_ratio':'REAL NOT NULL DEFAULT 0','last_cache_api_mode':"TEXT NOT NULL DEFAULT ''"}
+                for table, new_columns in additions.items():
+                    existing = {row[1] for row in self.connection.execute(f'PRAGMA table_info({table})')}
+                    for name, definition in new_columns.items():
+                        if name not in existing:
+                            self.connection.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
+                            if table=='occurrences' and name=='api_calls':
+                                self.connection.execute('UPDATE occurrences SET api_calls=1 WHERE tokens_in>0 OR tokens_out>0')
                 self.set_meta("schema_version", str(SCHEMA_VERSION))
         except BaseException:
             self.connection.close()
@@ -279,6 +297,7 @@ class Store:
         payload = [] if payload is None else payload
         self._payload(payload)
         occurrence = Occurrence(wake_id, dedupe_key, payload_json=payload, state=state,
+                                created_at=self.clock.now(), matched_at=self.clock.now() if state == 'pending' else None,
                                 ended_at=self.clock.now() if state != "pending" else None)
         with self.atomic():
             # Do not mask unrelated integrity failures as a successful dedupe.
@@ -385,6 +404,9 @@ class Store:
             occurrence = self.get_occurrence(wake_id, dedupe_key)
             if occurrence is None or occurrence.state != "pending":
                 return False
+            if occurrence.held_since is not None:
+                return self.update_occurrence(wake_id, dedupe_key, 'pending', payload_json=payload,
+                    held_matches=occurrence.held_matches+1)
             try:
                 encoded = self._payload(occurrence.payload_json + payload)
             except ValueError:

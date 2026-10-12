@@ -85,11 +85,15 @@ def parse_at(value: str, *, now: float, timezone: str | tzinfo) -> float:
 
 
 def next_every(now: float, interval_s: float, *, jitter_unit: float = 0,
-               anchor: str | None = None, timezone: str | tzinfo = "UTC") -> float:
+               anchor: str | None = None, timezone: str | tzinfo = "UTC", cache_ttl=None, minimum_s=0) -> float:
     interval_s = parse_duration(interval_s)
     if not math.isfinite(jitter_unit) or not -1 <= jitter_unit <= 1:
         raise ValueError("jitter_unit must be between -1 and 1")
     if anchor is None:
+        if cache_ttl and interval_s <= 1.25*cache_ttl:
+            edge=cache_ttl-max(30,.05*cache_ttl)
+            if interval_s>edge and edge>=minimum_s: interval_s=edge
+            return now+max(minimum_s,interval_s*(1-.1*abs(jitter_unit)))
         return now + interval_s * (1 + 0.1 * jitter_unit)
     hour, minute = _hm(anchor)
     tz = zone(timezone)
@@ -160,7 +164,7 @@ class DueTime:
 
 
 def time_due(wake: Wake, *, now: float, catch_up_s: float,
-             timezone: str | tzinfo = "UTC", jitter_unit: float = 0) -> DueTime | None:
+             timezone: str | tzinfo = "UTC", jitter_unit: float = 0, cache_ttl=None, minimum_s=0) -> DueTime | None:
     due = wake.next_due_at
     if wake.status != "active" or wake.kind not in {"at", "every", "self", "cron"} or due is None or due > now:
         return None
@@ -173,5 +177,6 @@ def time_due(wake: Wake, *, now: float, catch_up_s: float,
     elif wake.kind == "every" and wake.trigger_json.get("at"):
         next_due = next_every(now, wake.eff_interval_s, anchor=wake.trigger_json["at"], timezone=timezone)
     else:
-        next_due = next_every(now, wake.eff_interval_s, jitter_unit=jitter_unit)
+        next_due = next_every(now, wake.eff_interval_s, jitter_unit=jitter_unit,
+            cache_ttl=cache_ttl if wake.creator=='agent' else None,minimum_s=minimum_s)
     return DueTime("pending", key, due, next_due)

@@ -10,9 +10,18 @@ background job, pending review, or an explicitly requested silence check-in.
 Never arm a wake "to stay in touch". Never invent ongoing obligations.
 
 A wake is a normal model turn in that conversation, billed like one; its size
-is your conversation's context size. `/pulse ledger` shows ≈tokens per wake,
-and `/pulse status` shows "Today … ≈tokens" to track the running cost.
-These are reported token totals, not a monetary bill.
+is your conversation's context size. `/pulse ledger` and `/pulse status` show
+warm/cold wake counts and estimated cost, or in/cached/written/out tokens.
+These estimates are not a monetary bill.
+
+## Prompt cache
+Results include a `cache` line; choose intervals it marks warm, respecting floors.
+Claude marker routes follow Hermes' 5m/1h/auto TTL; GPT-5.6+/GPT-6.x on OpenAI API routes use 30m.
+The Codex OAuth route is reported as unknown until learned.
+Other routes learn from warm/cold gaps; an unknown TTL is not a guarantee.
+An interval just over the TTL rewrites the prefix every time and costs the most per hour.
+Cold becomes cheaper again at roughly 16h on Claude 1h, about 5h on GPT-6.x.
+Owner wakes, cron and anchored repeats are never snapped; show their cache effect.
 
 - **Wake:** the time itself matters. Use `at` for a single follow-up; `every`,
   `cron`, or `self` for bounded recurring work. Include a self-contained note.

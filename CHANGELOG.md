@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 — 2026-10-13
+
+- Agent watchers hold and merge under unanswered mute; all watchers hold at daily caps until capacity frees. Wakes you armed bypass mute, and your unedited one-shot reminders bypass daily caps. Agent edits revoke that exemption; the built-in check-in's trigger is Settings-owned. Held expiry and the last ten occurrences are visible in `/pulse why`.
+- Count probe checks separately from gate skips, missing verdicts, model turns (refunding only zero-call provider failures), and cache reads/writes with price estimates.
+- Cache-aware agent timing and governor backoff preserve warm intervals; the default agent timer floor is 55 minutes. Owner timing stays explicit.
+
+**Upgrade:** restart the gateway right after updating, before opening other Hermes sessions on that profile. Downgrading to an earlier version needs the profile's `plugin-data/heartbeat2` folder removed; this discards stored wakes and history. v0.1.0 and v0.1.1 cannot read the migrated database.
+
 ## 0.1.1 — 2026-10-13
 
 - Command watchers sanitize an allowlisted environment with Hermes' helper,

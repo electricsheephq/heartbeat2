@@ -15,7 +15,7 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS
-from .policy import MESSAGING_PLATFORMS
+from .policy import MESSAGING_PLATFORMS, is_owner, is_watcher, one_shot
 from .schedule import time_due, local_day, parse_duration, next_every
 from . import governor
 
@@ -154,6 +154,12 @@ class Poller:
     def ledger(self,wake,**counts):
         self.store.add_ledger(local_day(self.clock.now(),self.policy.resolved_timezone()),wake.id,**counts)
 
+    def timing(self,w):
+        from .cache import ttl_for_session
+        ttl=ttl_for_session(self.store,self.store.get_session(w.session_key))[0]
+        return {'cache_ttl':ttl if w.creator=='agent' and w.kind in {'every','self'} and not w.trigger_json.get('at') else None,
+                'minimum_s':max(self.policy.interval_floor(w),w.pacing_min_s or 0)}
+
     def daily(self,key):
         day=local_day(self.clock.now(),self.policy.resolved_timezone())
         totals={'model_turns':0,'delivered':0}
@@ -169,10 +175,15 @@ class Poller:
 
     def cancel_occurrences(self,wid,reason,*,preserve_started=False):
         for o in self.store.list_occurrences(wid):
+            if reason=='paused' and o.state=='pending' and o.held_since is not None:
+                self.store.update_occurrence(wid,o.dedupe_key,'pending',error='held_paused',held_reason='held_paused')
+                self.store.set_meta('not_before:'+o.id,'')
+                continue
             if o.state=='started' and (preserve_started or reason=='owner_replied'): continue
             if o.state in {'pending','claimed','started'}:
                 self.store.cas_occurrence(wid,o.dedupe_key,o.state,'superseded',
-                    attempt=o.attempt if o.state!='pending' else None,force_silent=True,error=reason)
+                    attempt=o.attempt if o.state!='pending' else None,force_silent=True,
+                    error='expired_held' if o.state=='pending' and o.held_since is not None and reason in {'expired','max_fires','max_lifetime_changed'} else reason)
 
     def evaluate(self,w,fn):
         """One wake's invalid stored data cannot roll back healthy siblings."""
@@ -221,11 +232,13 @@ class Poller:
                 for w in s.list_wakes(): self.terminal_one_shot(w)
                 self.times()
                 self.silence()
-                for o in s.list_occurrences(state='pending'):
-                    self.evaluate(s.get_wake(o.wake_id),lambda o=o:self.dispatch(o))
                 if now-float(s.get_meta('last_gc_at') or 0)>=3600:
                     s.gc(ledger_days=self.policy.ledger_days,timezone=self.policy.resolved_timezone())
                 s.set_meta('last_error','')
+            for o in s.list_occurrences(state='pending'):
+                w=s.get_wake(o.wake_id)
+                cache_line=self.cache_line(w)  # Pricing may fetch metadata; never hold the write lock.
+                self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
         except Exception as exc:
             self.log.warning('heartbeat2 tick failed',exc_info=True)
             try: self.store.set_meta('last_error',type(exc).__name__)
@@ -325,6 +338,9 @@ class Poller:
         # The prepared wake version is the probe generation. Any concurrent
         # mutation discards the result, including A -> B -> A retargets.
         if w.version!=original.version or w.kind!=original.kind or w.trigger_json!=original.trigger_json: return
+        s.cas_wake(w.id,'active',expected_version=w.version,checks=w.checks+1)
+        self.ledger(w,checks=1)
+        w=s.get_wake(w.id)
         if result.get('error'):
             governor.error(self,w)
             return
@@ -340,11 +356,10 @@ class Poller:
             if (coalesced or s.add_occurrence(w.id,'e:'+digest,payload=payload)) and 'state' in result:
                 s.cas_wake(w.id,'active',expected_version=w.version,probe_state_json=result['state'])
         else:
-            updates={'gated_skips':w.gated_skips+1}
+            updates={}
             # Change-mode commands also commit their first successful baseline.
             if 'state' in result and (w.kind!='command' or result.get('baseline') and not w.probe_state_json): updates['probe_state_json']=result['state']
-            s.cas_wake(w.id,'active',expected_version=w.version,**updates)
-            self.ledger(w,gated_skips=1)
+            if updates: s.cas_wake(w.id,'active',expected_version=w.version,**updates)
 
     def _safe_probe(self,w):
         try: return self.probe_runner(w)
@@ -369,14 +384,14 @@ class Poller:
                 self.cancel_occurrences(w.id,'max_lifetime_changed')
                 return
             if w.kind in RECURRING_KINDS:
-                clamped=self.policy.clamp(w).wake
+                clamped=self.policy.clamp(w,cache_ttl=self.timing(w)['cache_ttl']).wake
                 changes={k:getattr(clamped,k) for k in ('base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','expires_at','max_fires') if getattr(clamped,k)!=getattr(w,k)}
                 if changes:
                     s.cas_wake(w.id,'active',expected_version=w.version,**changes)
                     w=s.get_wake(w.id)
             if w.kind in TIME_KINDS:
                 due=time_due(w,now=now,catch_up_s=self.policy.catch_up_hours*3600,
-                             timezone=self.policy.resolved_timezone(),jitter_unit=self.jitter())
+                             timezone=self.policy.resolved_timezone(),jitter_unit=self.jitter(),**self.timing(w))
                 if due:
                     if not (w.kind in RECURRING_KINDS and due.state=='pending' and s.list_occurrences(w.id,state='pending')):
                         s.add_occurrence(w.id,due.dedupe_key,state=due.state)
@@ -432,15 +447,19 @@ class Poller:
 
     def gate(self,w,o,s):
         now=self.clock.now()
+        if o.state=='pending' and o.held_since is not None and o.error.startswith('held_'):
+            self.store.set_meta('not_before:'+o.id,'')
         if w.kind=='owner_silent' and o.dedupe_key.startswith('s:') and (s is None or o.dedupe_key!='s:'+(s.episode_id or '')):
             return 'episode_ended',False,None
         if w.trigger_json.get('builtin'):
             if not self.policy.owner_silent_checkin: return 'setting_off',True,None
             after=self.policy.checkin_after_hours*3600*(2 if w.ignored_streak else 1)
             if s and s.last_human_at is not None and now-s.last_human_at<after: return 'checkin_not_due',True,None
-        if w.status!='active': return 'expired' if w.status=='expired' else 'wake_inactive',False,None
+        held_paused=o.state=='pending' and o.held_since is not None and w.status=='paused'
+        if w.status!='active' and not held_paused: return 'expired' if w.status=='expired' else 'wake_inactive',False,None
         if w.expires_at is not None and now>=w.expires_at: return 'expired',False,None
         if w.max_fires is not None and w.fires>=w.max_fires: return 'max_fires',False,None
+        if held_paused: return 'held_paused',True,None
         if w.cancel_on_reply and s and s.last_human_at is not None and s.last_human_at>w.created_at: return 'cancel_on_reply',False,None
         if s is None: return 'missing_session',False,None
         if not s.enabled: return 'session_off',False,None
@@ -461,10 +480,13 @@ class Poller:
         quiet=quiet_until(self,s.session_key,urgent=w.urgent)
         if quiet is not None: return 'quiet_hours',w.kind not in RECURRING_KINDS,quiet
         mute=self.policy.unanswered_gate(w,s.unanswered_count)
-        if mute: return mute,False,None
+        if mute: return mute,mute=='held_unanswered',None
         totals=self.daily(s.session_key)
-        if totals['model_turns']>=self.policy.max_model_wakes_per_day: return 'daily_model_cap',False,None
-        if totals['delivered']>=self.policy.max_messages_per_day: return 'daily_message_cap',False,None
+        cap='daily_model_cap' if totals['model_turns']>=self.policy.max_model_wakes_per_day else 'daily_message_cap' if totals['delivered']>=self.policy.max_messages_per_day else ''
+        if cap and not (is_owner(w) and one_shot(w)):
+            if is_watcher(w):
+                return 'held_daily_cap',True,None
+            return cap,False,None
         flood=json.loads(self.store.get_meta('injections') or '[]')
         if sum(now-t<60 for t in flood)>=5: return 'global_flood',True,None
         if now<float(self.store.get_meta('not_before:'+o.id) or 0): return 'not_before',True,None
@@ -475,7 +497,7 @@ class Poller:
         if not self.injection_allowed(): return 'injection_disabled',True,None
         return '',False,None
 
-    def dispatch(self,o):
+    def dispatch(self,o,*,cache_line=None):
         s=self.store
         w=s.get_wake(o.wake_id)
         session=s.get_session(w.session_key)
@@ -483,12 +505,23 @@ class Poller:
         if reason:
             if defer:
                 first=o.error!=reason
-                s.update_occurrence(w.id,o.dedupe_key,'pending',error=reason)
+                if reason.startswith('held_'):
+                    existing=next((x for x in s.list_occurrences(w.id,state='pending') if x.id!=o.id and x.held_since is not None),None)
+                    if existing:
+                        s.update_occurrence(w.id,existing.dedupe_key,'pending',payload_json=o.payload_json[-1:],held_matches=existing.held_matches+max(1,len(o.payload_json)))
+                        s.cas_occurrence(w.id,o.dedupe_key,'pending','superseded',error='held_merged')
+                        return
+                held={'held_since':o.held_since if o.held_since is not None else self.clock.now(),
+                      'held_reason':reason,'held_matches':o.held_matches or max(1,len(o.payload_json)),
+                      'payload_json':o.payload_json[-1:]} if reason.startswith('held_') else {}
+                s.update_occurrence(w.id,o.dedupe_key,'pending',error=reason,**held)
                 if reason=='provider_unavailable':
                     if first: self.ledger(w,provider_deferrals=1)
                 elif until: s.set_meta('not_before:'+o.id,str(until))
             else:
-                s.cas_occurrence(w.id,o.dedupe_key,'pending','skipped',error=reason)
+                s.cas_occurrence(w.id,o.dedupe_key,'pending','skipped',error='expired_held' if o.held_since is not None and reason in {'expired','max_fires'} else reason)
+                s.cas_wake(w.id,w.status,expected_version=w.version,gated_skips=w.gated_skips+1)
+                w=s.get_wake(w.id)
                 if reason=='cancel_on_reply' and w.status=='active':
                     s.cas_wake(w.id,'active',expected_version=w.version,status='cancelled',status_reason='owner_replied')
                     self.cancel_occurrences(w.id,'owner_replied')
@@ -504,6 +537,8 @@ class Poller:
             self.terminal_one_shot(s.get_wake(w.id))
             governor.error(self,s.get_wake(w.id))
             return
+        if cache_line is None:
+            cache_line='' if s.connection.in_transaction else self.cache_line(w)
         held_by=o.error  # Claim clears the stored deferral; retain it for this prompt.
         if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
         o=s.get_occurrence(w.id,o.dedupe_key)
@@ -520,7 +555,7 @@ class Poller:
         text=render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-1,
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
-             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by)
+             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,cache_line=cache_line)
         try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
         except Exception: accepted=False
         if accepted:
@@ -541,7 +576,7 @@ class Poller:
             else: s.refund(w.id,o.dedupe_key,attempt=o.attempt,error='inject_failed')
 
     def terminal_one_shot(self,w):
-        if w.kind!='at' or w.status!='active' or w.next_due_at is not None: return
+        if not one_shot(w) or w.status!='active' or w.next_due_at is not None: return
         occurrences=[o for o in self.store.list_occurrences(w.id) if o.state!='superseded']
         if not occurrences or any(o.state in {'pending','claimed','started'} for o in occurrences): return
         o=occurrences[-1]
@@ -559,9 +594,12 @@ class Poller:
             provider=s.get_meta('provider_error:'+o.id)
             error='provider_error:'+provider if provider else cause
             if not s.cas_occurrence(o.wake_id,o.dedupe_key,o.state,'interrupted',attempt=o.attempt,error=error,force_silent=True): return False
+            if provider and o.api_calls == 0:
+                self.refund_model_count(o)
             w=s.get_wake(o.wake_id)
-            s.cas_wake(w.id,w.status,expected_version=w.version,tokens_in=w.tokens_in+o.tokens_in,tokens_out=w.tokens_out+o.tokens_out)
-            self.ledger(w,tokens_in=o.tokens_in,tokens_out=o.tokens_out)
+            counts=self.usage_counts(o)
+            s.cas_wake(w.id,w.status,expected_version=w.version,**{k:getattr(w,k)+v for k,v in counts.items()})
+            self.ledger(w,**counts)
             self.terminal_one_shot(s.get_wake(w.id))
             if count_error or provider: governor.error(self,s.get_wake(w.id))
             self.end_max_fires(s.get_wake(w.id))
@@ -569,6 +607,25 @@ class Poller:
             session=s.get_session(w.session_key)
             if session: s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
             return True
+
+    @staticmethod
+    def usage_counts(o):
+        from .store import CACHE_FIELDS
+        return {**{k:getattr(o,k) for k in CACHE_FIELDS | {'tokens_in','tokens_out'}},'no_verdict':int(o.outcome in {None,'unreported'})}
+
+    def refund_model_count(self,o):
+        if o.api_calls or o.started_at is None or self.store.get_meta('model_refunded:'+o.id): return
+        w=self.store.get_wake(o.wake_id)
+        self.store.cas_wake(w.id,w.status,expected_version=w.version,model_turns=max(0,w.model_turns-1))
+        day=local_day(o.started_at,self.policy.resolved_timezone())
+        self.store.connection.execute('UPDATE ledger SET model_turns=MAX(0,model_turns-1) WHERE day=? AND wake_id=?',(day,w.id))
+        self.store.set_meta('model_refunded:'+o.id,'1')
+
+    def cache_line(self,w,*,seconds=None,watcher=False):
+        from .cache import line
+        return line(self.store,self.store.get_session(w.session_key),self.clock.now(),seconds=seconds,
+                    floor=max(self.policy.interval_floor(w),w.pacing_min_s or 0),watcher=watcher,
+                    pricing=not self.store.connection.in_transaction)
 
     def end_max_fires(self,w):
         """Retire a spent cap once the last running turn has settled."""

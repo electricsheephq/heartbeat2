@@ -24,7 +24,8 @@ def pause(engine,wake,rule):
         return
     if s.cas_wake(current.id,current.status,expected_version=current.version,
                   status='paused',status_reason=f'governor:{rule}'):
-        s.set_meta('card:'+current.id,rule)
+        cache_line=engine.cache_line(current,seconds=current.eff_interval_s)
+        s.set_meta('card:'+current.id,rule+(' · '+cache_line if cache_line else ''))
         for o in s.list_occurrences(current.id,state='started'):
             if o.outcome is None:
                 s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=o.attempt,force_silent=True)
@@ -48,11 +49,13 @@ def owner_answer(engine,wake,answer):
         else:
             interval*=2
             if w.pacing_max_s is not None: interval=min(interval,w.pacing_max_s)
+            from .cache import interval as snap
+            interval=snap(w,interval,engine.timing(w)['cache_ttl'],engine.timing(w)['minimum_s'])
             updates['base_interval_s']=max(w.base_interval_s or p.interval_floor(w),interval)
         if w.kind in RECURRING_KINDS:
             updates['eff_interval_s']=interval
             updates['next_due_at']=(next_cron(w.trigger_json['cron'],now=engine.clock.now(),timezone=p.resolved_timezone(),minimum_interval_s=interval)
-                if w.kind=='cron' else next_every(engine.clock.now(),interval,anchor=w.trigger_json.get('at') if w.kind=='every' else None,timezone=p.resolved_timezone()))
+                if w.kind=='cron' else next_every(engine.clock.now(),interval,anchor=w.trigger_json.get('at') if w.kind=='every' else None,timezone=p.resolved_timezone(),**engine.timing(w)))
         if answer=='slow' and w.kind in PROBE_KINDS:
             interval=max(p.probe_floor_seconds,parse_duration(w.trigger_json.get('check_every',p.probe_floor_seconds)))
             interval=max(interval,min(interval*2,p.noop_max_backoff_hours*3600,w.pacing_max_s or float('inf')))
@@ -61,7 +64,7 @@ def owner_answer(engine,wake,answer):
         if answer=='keep': s.set_meta('ratio_since:'+w.id,str(engine.clock.now()))
         s.set_meta('card:'+w.id,'')
         engine.signal()
-        return {'ok':True,'cadence_s':interval} if answer=='slow' else {'ok':True}
+        return {'ok':True,'cadence_s':interval,'cache':engine.cache_line(w,seconds=interval)} if answer=='slow' else {'ok':True}
 
 
 def apply(engine,wake,*,next_check=None):
@@ -77,12 +80,17 @@ def apply(engine,wake,*,next_check=None):
         # cannot overflow the scheduling math.
         backoff=min(ceiling,(w.base_interval_s or floor)*p.noop_backoff_factor**min(k,32))
         backoff=max(floor,backoff)
+        ttl=engine.timing(w)['cache_ttl']
+        edge=ttl-max(30,.05*ttl) if ttl else None
+        if edge is not None and floor<=edge and (w.base_interval_s or floor)<=edge: backoff=min(backoff,edge)
         eff=backoff
         if w.kind=='self' and next_check is not None:
             eff=max(next_check,backoff) if k else max(next_check,floor)
             eff=min(eff,w.pacing_max_s or float('inf'))
         elif next_check is not None and w.kind!='cron':
             eff=min(max(next_check,backoff),w.pacing_max_s or float('inf'))
+        from .cache import interval
+        eff=interval(w,eff,ttl,floor)
         updates['eff_interval_s']=eff
         if w.kind=='cron':
             due=next_cron(w.trigger_json['cron'],now=engine.clock.now(),timezone=p.resolved_timezone(),
@@ -102,7 +110,7 @@ def apply(engine,wake,*,next_check=None):
         else:
             updates['next_due_at']=next_every(engine.clock.now(),eff,
                 anchor=w.trigger_json.get('at') if w.kind=='every' else None,
-                timezone=p.resolved_timezone(),jitter_unit=0 if w.trigger_json.get('at') else engine.jitter())
+                timezone=p.resolved_timezone(),jitter_unit=0 if w.trigger_json.get('at') else engine.jitter(),**engine.timing(w))
     if updates:
         s.cas_wake(w.id,w.status,expected_version=w.version,**updates)
         w=s.get_wake(w.id)
@@ -125,9 +133,9 @@ def finish(engine,wake,occurrence):
         s.cas_wake(w.id,w.status,expected_version=w.version,
             noop_streak=0 if useful else w.noop_streak+1,
             error_streak=0,delivered=w.delivered+int(occurrence.delivered),
-            tokens_in=w.tokens_in+occurrence.tokens_in,tokens_out=w.tokens_out+occurrence.tokens_out)
+            **{k:getattr(w,k)+v for k,v in engine.usage_counts(occurrence).items()})
         engine.ledger(w,noops=1-useful,valuable=useful,delivered=int(occurrence.delivered),
-                      tokens_in=occurrence.tokens_in,tokens_out=occurrence.tokens_out)
+                      **engine.usage_counts(occurrence))
         w=s.get_wake(w.id)
         if engine.end_max_fires(w): return
         apply(engine,w,next_check=occurrence.next_check_s)

@@ -1,5 +1,5 @@
 name: heartbeat2
-version: "0.1.1"
+version: "0.1.2"
 description: >-
   HeartBeat 2.0: bounded wakes and watchers in the conversation that armed them. Disclosure — wakes and watchers run full turns on the conversation's own model,
   billed like any message; command probes run allowlisted read-only commands without
@@ -73,7 +73,7 @@ config_schema:
     type: int
     default: 2
     label: "Unanswered messages before mute"
-    description: "After this many unprompted messages with no reply, the agent's wakes and check-ins pause until you write. Wakes you armed still fire."
+    description: "Wakes you armed always fire; agent watchers wait for your reply; agent reminders are dropped."
   min_interval_minutes:
     type: int
     default: 15
@@ -81,7 +81,7 @@ config_schema:
     description: "Floor for every recurring time wake."
   agent_ungated_floor_minutes:
     type: int
-    default: 60
+    default: 55
     label: "Shortest agent timer without a watcher (minutes)"
     description: "Floor for recurring timers the agent arms without a watcher."
   wake_spacing_minutes:
