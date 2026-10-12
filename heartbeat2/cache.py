@@ -100,7 +100,7 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
         state = 'warm' if gap < ttl else 'cold'
         price = f' (~${(warm if state=="warm" else cold):.2f}) · cold ~${cold:.2f}' if warm is not None and cold is not None else ''
         edge = ttl-max(30,.05*ttl)
-        next_hint = 'floor ≥ TTL: wakes cold' if floor>=edge else f'next warm ≤{edge/60:g}m'
+        next_hint = 'floor ≥ TTL: wakes cold' if floor>edge else f'next warm ≤{edge/60:g}m'
         text = f'{label} · {"this wake" if seconds is None else str(seconds/60)+"m"} {state}{price} · {next_hint}'
         return text[:220] if len(text.split())<=40 else ''
     except Exception:

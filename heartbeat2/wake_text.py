@@ -62,7 +62,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
         lines.append(f"Scratch: {escape_text(wake.scratch)}")
     if occurrence.held_since is not None:
         since=datetime.fromtimestamp(occurrence.held_since,zone(timezone))
-        reason="you hadn't replied" if occurrence.held_reason=='held_unanswered' else 'daily cap'
+        reason={'held_unanswered':"you hadn't replied",'held_daily_cap':'daily cap','held_paused':'wake was paused'}.get(occurrence.held_reason,'held')
         lines.append(f'Held since {since:%H:%M} ({reason}); {occurrence.held_matches} matches merged.')
     recent = ", ".join(list(recent_outcomes)[-3:]) or "none"
     lines.append(f"Recent outcomes: {recent} · unprompted messages today: {messages_today} of {max_messages}")

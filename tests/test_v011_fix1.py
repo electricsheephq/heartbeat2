@@ -210,14 +210,31 @@ def test_N3_released_started_expiry_keeps_normal_reason(engine):
     assert result.state == 'superseded' and result.error == 'expired'
 
 
-@pytest.mark.parametrize('floor', [3420, 3600])
-def test_N4_cache_line_floor_at_edge_says_wakes_cold(engine, hermes_helpers, monkeypatch, floor):
+@pytest.mark.parametrize('floor,cold', [(3420, False), (3421, True), (3600, True)])
+def test_N4_cache_line_floor_at_edge_says_wakes_cold(engine, hermes_helpers, monkeypatch, floor, cold):
+    # A floor exactly at the snap edge (T-m) still snaps warm, matching cache.interval.
     monkeypatch.setattr(cache, 'cost', lambda *a, **k: None)
     cache.touch(engine.store, engine.store.get_session(KEY), started_at=engine.clock.now(),
                 route='anthropic|claude-opus-5.5|api.anthropic.com', prompt=100, read=100, api_mode='anthropic_messages')
     w = arm(engine, 'every', pacing_min_s=floor)
     text = engine.cache_line(w, seconds=3600)
-    assert 'floor ≥ TTL: wakes cold' in text and 'next warm' not in text
+    if cold:
+        assert 'floor ≥ TTL: wakes cold' in text and 'next warm' not in text
+    else:
+        assert 'next warm ≤57m' in text and 'wakes cold' not in text
+
+
+@pytest.mark.parametrize('reason,label', [('held_unanswered', "you hadn't replied"), ('held_daily_cap', 'daily cap'),
+                                          ('held_paused', 'wake was paused')])
+def test_released_hold_text_names_its_reason(engine, reason, label):
+    from heartbeat2.wake_text import render_wake
+    w = arm(engine, 'subagent_done')
+    o = pending(engine, w, 'e:x')
+    engine.store.update_occurrence(w.id, o.dedupe_key, 'pending', held_since=engine.clock.now(), held_reason=reason, held_matches=1)
+    o = engine.store.get_occurrence(w.id, o.dedupe_key)
+    text = render_wake(w, o, engine.store.get_session(KEY), clock=engine.clock, timezone='UTC', recent_outcomes=[],
+                       messages_today=0, max_messages=6)
+    assert f'({label})' in text
 
 
 def test_N5_pricing_outside_transactions_intake_dispatch_and_pause(engine, hermes_helpers, monkeypatch):
