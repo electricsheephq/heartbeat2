@@ -140,6 +140,8 @@ Watchers available to the agent:
 | `command` | A read-only allowlisted command's output changes, it succeeds or fails, or it prints `{"fire": true, …}` |
 | Hermes events | A kanban task completes or blocks, a worker exits, a subagent finishes, the API errors, or someone reacts to or edits a message |
 
+Hermes events are selected by `trigger.kind`: `kanban_completed`, `kanban_blocked`, `kanban_worker_exited`, `subagent_done`, `api_error`, `reaction` (with an optional `emojis` filter) and `message_edited`.
+
 Any watcher can carry a `deadline`, so "nothing happened by Friday" fires once, too.
 
 ## Settings
