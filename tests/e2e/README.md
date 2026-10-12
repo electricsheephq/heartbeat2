@@ -3,7 +3,7 @@
 These opt-in tests run the shipping Hermes gateway and Telegram adapter against
 Hermes's loopback Bot API stand-in and scripted OpenAI-compatible model. No
 Telegram account, real token, model spend, or live profile is used. The default
-unit run skips all 15 cells (E2 has two display variants).
+unit run skips all 18 cells (E2 has two display variants).
 
 Use a separate read-only checkout for each exact Hermes commit:
 
@@ -92,6 +92,14 @@ Both xfails require the named signature; unrelated failures still fail the run.
 Passing this suite establishes **local-e2e-proof against these pins**. It does
 not prove real Telegram server/client rendering, notification delivery, live
 model quality/cost, long-running reliability, or customer readiness.
+
+E15 arms two agent nudges and a file watcher in one owner turn. After two
+unanswered deliveries, two observed file matches coalesce into one held pending
+occurrence retaining the latest match. An owner reply releases it once, with
+the hold reason in the model's wake text and one visible delivery. E16 checks
+real prompt-usage route/cache touches, the create tool's cache line, and exactly
+one bounded `Cache:` line in the injected wake text. The fake route has unknown
+TTL; neither test establishes real cache warmth or price.
 
 `test_upstream.py` separately reproduces automatic background review after a
 stock plugin injects a turn. It disables heartbeat2, enables memory/skill tools,

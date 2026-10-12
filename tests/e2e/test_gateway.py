@@ -1,4 +1,5 @@
 """Acceptance scenarios against a real gateway and real Telegram adapter."""
+import json
 import re
 import threading
 import time
@@ -329,3 +330,105 @@ def test_api_error_watcher_no_self_loop(make_rig):
     assert watcher_rows[0]["state"] == "pending" and watcher_rows[0]["error"] == "provider_unavailable"
     assert any(r["key"] == "api_cooldown:" + watcher and float(r["value"]) > 0 for r in rig.rows("meta"))
     assert sum(r["fires"] for r in rig.rows("ledger")) == 1
+
+
+def test_mute_holds_watcher_until_reply(make_rig):
+    from tests.fakes.fake_llm_provider import Text, ToolCall
+
+    rig = make_rig()
+    watched = rig.gateway.home / "watched.log"
+    watched.write_text("baseline\n")
+    # One owner turn arms both nudges and the watcher, without clearing the
+    # unanswered count between deliveries. The file belongs to this rig only.
+    rig.director.script("watcher-mute", *[
+        ToolCall("pulse", {"action": "create", "note": f"watcher-mute-{i}",
+                           "trigger": {"kind": "at", "at": f"in {10+15*i}s"}})
+        for i in range(2)],
+        ToolCall("pulse", {"action": "create", "note": "watch held file matches",
+                           "trigger": {"kind": "file", "path": str(watched),
+                                       "pattern": "MATCH-", "check_every": "1s"}}),
+        Text("WATCHER-MUTE-ARMED"))
+    rig.owner("arm nudges and file watcher [in:watcher-mute]", "WATCHER-MUTE-ARMED")
+    wakes = rig.rows("wakes")
+    assert len(wakes) == 3 and all(w["creator"] == "agent" for w in wakes), wakes
+    watcher = next(w["id"] for w in wakes if w["kind"] == "file")
+    nudges = sorted((w for w in wakes if w["kind"] == "at"), key=lambda w: w["next_due_at"])
+    for wake in nudges:
+        assert rig.settled(wake["id"])["delivered"] == 1
+    assert rig.session()["unanswered_count"] == 2
+    assert sum("WAKE-DELIVERED" in t for t in rig.texts()) == 2
+    rig.wait(lambda: next(w for w in rig.rows("wakes") if w["id"] == watcher)["probe_state_json"],
+             "file probe baseline", 20)
+    before = rig.visible_ids()
+    starts, openers = len(rig.director.wake_starts), len(rig.wake_openers())
+
+    # Observe each change on a real probe tick so two observed matches (rather
+    # than two writes seen as one) must coalesce while the mute is still set.
+    with watched.open("a") as stream:
+        stream.write("MATCH-FIRST\n")
+    first = rig.wait(lambda: (o if (o := rig.occurrence(watcher)) and o["error"] else None),
+                     "first file match gated", 20)
+    assert first["state"] == "pending" and first["held_reason"] == "held_unanswered", first
+    assert first["held_since"] is not None and first["held_matches"] == 1, first
+    assert json.loads(first["payload_json"]) == [{"message": "MATCH-FIRST"}], first
+    with watched.open("a") as stream:
+        stream.write("MATCH-LATEST\n")
+    rig.wait(lambda: json.loads(next(w for w in rig.rows("wakes")
+                                    if w["id"] == watcher)["probe_state_json"])["generation"] == 2,
+             "second file match observed", 20)
+    rig.tick_barrier()
+    held = rig.rows("occurrences", "WHERE wake_id=?", (watcher,))
+    assert len(held) == 1, held
+    row = held[0]
+    assert row["state"] == "pending" and row["held_reason"] == "held_unanswered", row
+    assert row["held_since"] == first["held_since"] and row["held_matches"] == 2, row
+    assert row["dedupe_key"] == first["dedupe_key"], row
+    assert json.loads(row["payload_json"]) == [{"message": "MATCH-LATEST"}], row
+    assert len(rig.director.wake_starts) == starts == 2
+    assert len(rig.wake_openers()) == openers == 2
+    assert rig.new_visible(before) == [], rig.new_visible(before)
+
+    rig.owner("I am back [in:watcher-returned]", "reply to watcher-returned")
+    done = rig.settled(watcher)
+    rig.tick_barrier()
+    assert done["state"] == "done" and done["delivered"] == 1 and done["attempt"] == 1, done
+    assert len(rig.rows("occurrences", "WHERE wake_id=?", (watcher,))) == 1
+    assert len(rig.director.wake_starts) == starts + 1
+    released = rig.wake_openers()[openers:]
+    assert len(released) == 1, released
+    text = rig.director._text(released[0]["messages"][-1])
+    assert f"watcher {watcher}" in text and "you hadn't replied" in text, text
+    assert "MATCH-LATEST" in text and "MATCH-FIRST" not in text, text
+    assert sum("WAKE-DELIVERED" in t for t in rig.new_visible(before)) == 1
+    rig.assert_tools_ok()
+
+
+def test_wake_text_carries_cache_line(make_rig):
+    rig = make_rig()
+    before = rig.session()["last_cache_touch_at"]
+    wid = rig.agent_arm("cache-line", {"kind": "at", "at": "in 10s"})
+    # FakeLLMServer reports prompt usage for both tool calls and text. Verify
+    # the real post-request hook stored a route and a new touch for this turn.
+    session = rig.session()
+    assert session["last_route"] and session["last_prompt_tokens"] > 0, session
+    assert session["last_cache_touch_at"] is not None and session["last_cache_touch_at"] > before, session
+    requests = rig.director.requests["cache-line"]
+    usage = [r["usage"] for r in rig.llm.requests
+             if r["kind"] == "main" and any(r["body"] is body for body in requests)]
+    assert usage and all(u["prompt_tokens"] > 0 for u in usage), usage
+    results = [json.loads(m["content"]) for body in requests
+               for m in body["messages"] if m.get("role") == "tool"]
+    created = [r for r in results if r.get("wake", {}).get("id") == wid]
+    assert len(created) == 1, created
+    cache_lines = [line for line in created[0]["cache"].splitlines() if line.startswith("Cache:")]
+    assert len(cache_lines) == 1 and len(cache_lines[0]) <= 220, created
+    provider = session["last_route"].split("|")[0]
+    assert cache_lines[0].startswith(f"Cache: {provider} TTL unknown"), cache_lines
+
+    row = rig.settled(wid)
+    assert row["delivered"] == 1 and len(rig.wake_openers()) == 1, row
+    text = rig.director._text(rig.wake_openers()[0]["messages"][-1])
+    lines = [line for line in text.splitlines() if line.startswith("Cache:")]
+    assert len(lines) == 1 and len(lines[0]) <= 220, text
+    assert lines[0].startswith(f"Cache: {provider} TTL unknown"), lines
+    rig.assert_tools_ok()
