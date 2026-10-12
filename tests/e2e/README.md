@@ -42,6 +42,9 @@ floors, disables streaming, and restricts tools to `heartbeat2`. Tool Search is
 explicitly off so the scripted direct `pulse` calls are offered and executed.
 E2's default Telegram display keeps tool progress/reasoning off; its second cell
 sets `display.platforms.telegram.tool_progress: new` and `show_reasoning: true`.
+That cell allows Hermes' own `⚙️ pulse` progress bubble, which appears depending
+on timing (README: silence covers the final reply), and fails on any reply or
+reasoning text.
 The gateway still uses its real streaming provider client.
 
 Helpers are imported from the selected checkout, never vendored. The gateway's

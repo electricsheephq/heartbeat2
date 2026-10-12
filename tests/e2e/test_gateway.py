@@ -1,4 +1,5 @@
 """Acceptance scenarios against a real gateway and real Telegram adapter."""
+import re
 import threading
 import time
 
@@ -7,6 +8,10 @@ import pytest
 
 class Finding(AssertionError):
     """Only a reproduced named product defect may satisfy an expected-failure gate."""
+
+
+# One Hermes tool-progress bubble for the pulse tool, nothing else.
+PROGRESS_BUBBLE = re.compile(r"⚙️ pulse(?:\.\.\.|: [^\n]*)?")
 
 
 def busy_case(make_rig, *, mode="queue", command=False, photo=False):
@@ -55,6 +60,11 @@ def test_silent_verdict_shows_nothing(make_rig, loud):
     assert row["state"] == "done" and row["outcome"] == "no_change", row
     assert row["notify"] == 0 and row["delivered"] == 0, row
     shown = [t for t in rig.new_visible(before) if "HeartBeat 2.0:" not in t]
+    if loud:
+        # README "Silence covers the final reply": with tool progress on, Hermes may
+        # post its own progress bubble for the wake's pulse call (timing-dependent;
+        # upstream NousResearch/hermes-agent#136825). No reply or reasoning text may show.
+        shown = [t for t in shown if not PROGRESS_BUBBLE.fullmatch(t)]
     assert shown == [], shown
 
 
