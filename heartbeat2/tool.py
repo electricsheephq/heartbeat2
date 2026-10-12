@@ -155,7 +155,7 @@ class Tool:
                         candidate, clamps = result.wake, result.clamped
                         if action == 'update' and w.creator == 'user' and any(
                             getattr(candidate,k) != getattr(w,k) for k in
-                            ('trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','note')):
+                            ('trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','note','expires_at','max_fires','babysit')):
                             candidate = replace(candidate,agent_edited=True)
                         if action == 'resume':
                             candidate = replace(candidate,status='active',status_reason='')

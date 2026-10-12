@@ -103,6 +103,8 @@ exact-marker match after transformation. Never treat fake-injector acceptance
 as proof of delivery. Enabled/settings/source gates, quiet hours, caps, busy
 checks, estop, unanswered mute and the no-op governor bound the engine's work.
 A deadline reports that nothing happened; it does not assert success.
+Hermes may auto-resume a wake turn interrupted by a crash; heartbeat2 keeps the
+replay silent, never counts it as a fire or delivery, and counts its model spend.
 
 ## Reporting
 

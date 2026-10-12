@@ -338,7 +338,7 @@ class Poller:
         # The prepared wake version is the probe generation. Any concurrent
         # mutation discards the result, including A -> B -> A retargets.
         if w.version!=original.version or w.kind!=original.kind or w.trigger_json!=original.trigger_json: return
-        s.cas_wake(w.id,'active',expected_version=w.version,checks=w.checks+1)
+        if not s.cas_wake(w.id,'active',expected_version=w.version,checks=w.checks+1): return
         self.ledger(w,checks=1)
         w=s.get_wake(w.id)
         if result.get('error'):
@@ -623,9 +623,12 @@ class Poller:
 
     def cache_line(self,w,*,seconds=None,watcher=False):
         from .cache import line
+        first=w.creator=='user' and w.created_in=='command' and not w.fires
+        if first and seconds is None and w.next_due_at is not None:
+            seconds=max(0,w.next_due_at-self.clock.now())
         return line(self.store,self.store.get_session(w.session_key),self.clock.now(),seconds=seconds,
                     floor=max(self.policy.interval_floor(w),w.pacing_min_s or 0),watcher=watcher,
-                    pricing=not self.store.connection.in_transaction)
+                    pricing=not self.store.connection.in_transaction,first_wake=first)
 
     def end_max_fires(self,w):
         """Retire a spent cap once the last running turn has settled."""

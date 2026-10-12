@@ -177,8 +177,6 @@ def test_midturn_compaction_carrier(make_rig):
     assert row["delivered"] == 0 and not any("WAKE-DELIVERED" in t for t in rig.new_visible(before)), "false fold"
 
 
-@pytest.mark.xfail(strict=True, raises=Finding,
-                   reason="Hermes native startup resume replays a wake already recorded as interrupted")
 def test_restart_with_pending_wake(make_rig):
     from tests.fakes.fake_llm_provider import Hang
 
@@ -203,6 +201,7 @@ def test_restart_with_pending_wake(make_rig):
     assert arrived.wait(30), "second wake never reached provider"
     assert rig.occurrence(second)["state"] == "started"
     rig.crash()
+    visible_before = rig.visible_ids()
     rig.gateway.start(timeout=50)
     # A status command here can supersede Hermes's queued native auto-resume and
     # hide the replay. Observe recovery without any inbound control/model traffic.
@@ -210,9 +209,11 @@ def test_restart_with_pending_wake(make_rig):
                    "crashed wake recovers as interrupted", 30)
     rig.tick_barrier(seconds=20)
     assert row["attempt"] == 1 and len(rig.director.wake_starts) == 2
-    replayed = [r for r in rig.wake_openers() if f"o:{second}/" in str(r["messages"][-1]["content"])]
-    if len(replayed) > 1 and any("previous turn was interrupted" in str(r) for r in replayed):
-        raise Finding("native auto-resume sent the interrupted wake marker to the model again")
+    # Hermes may replay at the model (NousResearch/hermes-agent#137358).
+    # heartbeat2 must silence the turn without adopting/delivering the occurrence.
+    assert not rig.new_visible(visible_before), "crash-resumed turn emitted visible text"
+    assert rig.occurrence(second)["delivered"] == 0
+    assert next(w for w in rig.rows("wakes") if w["id"] == second)["status_reason"] == "resumed_after_restart"
     assert sum("WAKE-DELIVERED" in t for t in rig.texts()) == 1
 
 

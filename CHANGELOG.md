@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 — draft (undated)
+
+- Silence crash-resumed wake replays, reject stale responses, and count their model spend without another fire or delivery.
+- Revoke owner-wake privileges when agent tools edit lifetime limits or babysit.
+- Correct empty-usage accounting, call-route pricing TTL, transactional learned routes, owner first-wake cache age, and failed probe CAS handling.
+- Provider-exhaustion settlement (#27) remains blocked upstream; its strict expected failure is unchanged.
+
 ## 0.1.2 — 2026-10-13
 
 - Agent watchers hold and merge under unanswered mute; all watchers hold at daily caps until capacity frees. Wakes you armed bypass mute, and your unedited one-shot reminders bypass daily caps. Agent edits revoke that exemption; the built-in check-in's trigger is Settings-owned. Held expiry and the last ten occurrences are visible in `/pulse why`.

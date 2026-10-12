@@ -38,16 +38,17 @@ def touch(store, session, *, started_at, route, prompt, read, api_mode=''):
     if started_at is None: return
     ratio = read/prompt if prompt else 0
     if session.last_cache_touch_at is not None and started_at <= session.last_cache_touch_at: return
-    if session.last_route == route and session.last_cache_touch_at is not None and prompt:
-        gap = min(started_at-session.last_cache_touch_at, 30*86400)
-        routes = json.loads(store.get_meta('cache_routes') or '{}')
-        row = routes.pop(route, {})
-        if ratio >= .5: row['max_warm_gap'] = max(row.get('max_warm_gap',0), gap)
-        elif ratio < .1: row['min_cold_gap'] = min(row.get('min_cold_gap',float('inf')), gap)
-        routes[route] = row
-        store.set_meta('cache_routes',json.dumps(dict(list(routes.items())[-32:])))
-    store.cas_session(session.session_key, {'last_cache_touch_at':session.last_cache_touch_at},
-        last_cache_touch_at=started_at, last_route=route, last_prompt_tokens=prompt, last_cache_hit_ratio=ratio, last_cache_api_mode=api_mode)
+    with store.atomic():
+        if not store.cas_session(session.session_key, {'last_cache_touch_at':session.last_cache_touch_at},
+            last_cache_touch_at=started_at, last_route=route, last_prompt_tokens=prompt, last_cache_hit_ratio=ratio, last_cache_api_mode=api_mode): return
+        if session.last_route == route and session.last_cache_touch_at is not None and prompt:
+            gap = min(started_at-session.last_cache_touch_at, 30*86400)
+            routes = json.loads(store.get_meta('cache_routes') or '{}')
+            row = routes.pop(route, {})
+            if ratio >= .5: row['max_warm_gap'] = max(row.get('max_warm_gap',0), gap)
+            elif ratio < .1: row['min_cold_gap'] = min(row.get('min_cold_gap',float('inf')), gap)
+            routes[route] = row
+            store.set_meta('cache_routes',json.dumps(dict(list(routes.items())[-32:])))
 
 
 def ttl_for_session(store, session):
@@ -80,7 +81,7 @@ def cost(route, *, prompt=0, read=0, written=0, out=0, ttl=None):
     return float(amount)+correction
 
 
-def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=True):
+def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=True, first_wake=False):
     try:
         if not session or not session.last_route: return ''
         ttl, source = ttl_for_session(store,session)
@@ -97,6 +98,7 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
         warm = cost(session.last_route,prompt=prefix,read=prefix,ttl=ttl) if pricing else None
         cold = cost(session.last_route,prompt=prefix,written=prefix,ttl=ttl) if pricing else None
         gap = age*60 if seconds is None else seconds
+        if first_wake and seconds is not None: gap += age*60
         state = 'warm' if gap < ttl else 'cold'
         price = f' (~${(warm if state=="warm" else cold):.2f}) · cold ~${cold:.2f}' if warm is not None and cold is not None else ''
         edge = ttl-max(30,.05*ttl)
