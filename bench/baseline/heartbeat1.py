@@ -85,10 +85,6 @@ class Heartbeat1:
         self.turns.append({'t':self.gateway.t,'inject_t':self.gateway.t,'due_t':due,'session_key':owner['key'],
                            'wake_id':'b_'+ref,'ref':ref,'occurrence':occurrence,'valid':True,'outcome':step['outcome'],
                            'lateness_s':max(0,self.gateway.t-due),'deferred_s':0})
-        if step.get('drained_human'):
-            # Same mid-turn human event in both arms. Engine output, not policy,
-            # determines promptedness; the naive arm lacks that distinction.
-            self.gateway.human(task.get('session','owner'),step['drained_human'],drained=True)
         raw=self.model.raw(step)
         text='' if raw.strip().casefold()=='heartbeat_ok' else raw
         identity=(ref,occurrence)
@@ -97,6 +93,15 @@ class Heartbeat1:
               'profile':destination['profile'],'owner_profile':owner['profile'],'prompted':False,'unprompted':True,
               'terminal_before':identity in self.delivered}
         self.send(item,step['outcome'])
+        if step.get('drained_human'):
+            # Same real drain order as HB2: finish the wake before the owner turn.
+            before=len(self.gateway.deliveries)
+            self.gateway.human(task.get('session','owner'),step['drained_human'],drained=True,
+                response_text=step.get('human_raw','Acknowledged.'),
+                reply={'wake_id':'b_'+ref,'ref':ref,'occurrence':occurrence,'owner_session_key':owner['key']})
+            answers=self.gateway.deliveries[before:]
+            self.deliveries.extend(answers)
+            self.message_attempts.extend({**answer,'retry':False,'accepted':True} for answer in answers)
 
     def send(self,item,outcome,*,retry=False):
         """Uncapped resends of the same model output, without another turn.

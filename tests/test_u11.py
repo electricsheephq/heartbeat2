@@ -105,7 +105,9 @@ def test_redirect_and_steer_fold(engine,kind,mids,admitted,redacted):
     folded={'role':'user','content':text,'api_content':'scaffold'}
     if kind=='steer':
         folded={'role':'user','content':'[OUT-OF-BAND USER MESSAGE — respond]\n'+text+'\n[/OUT-OF-BAND USER MESSAGE]','display_kind':'steer'}
-    history=[{'role':'user','content':origin('old')},row,{'role':'assistant','content':''},
+    baseline=[{'role':'user','content':origin('old')},row]
+    e.intake.pre_llm_call(session_id='sid',turn_id='wake',user_message=row['content'],conversation_history=baseline)
+    history=baseline+[{'role':'assistant','content':''},
              {'role':'tool','content':'result'},folded]
     for _ in range(2):
         e.intake.pre_api_request(session_id='sid',turn_id='wake',conversation_history=history,
@@ -252,6 +254,8 @@ def test_fold_scope(engine,case):
         elif case=='snapshot': history=[row,{'role':'user','content':'snapshot'}]
         elif case=='last_marker': history=[row]+history+[row]
         elif case=='earlier': history+= [row]
+    if case in {'earlier','no_marker','last_marker'}:
+        e.intake.pre_llm_call(session_id='sid',turn_id='wake',user_message=row['content'],conversation_history=history)
     e.intake.pre_api_request(session_id='sid',turn_id=turn,conversation_history=history)
     count(e)
     if case!='no_flight': assert not e.intake.flights['sid'].owner_replied
@@ -284,11 +288,11 @@ def test_builtin_checkin_lifetime(runtime,age,route):
         assert 'expires' not in result.get('clamped',{})
     elif route=='command': assert not commands.handle('resume '+w.id,runtime).startswith('Error')
     else:
-        e.intake.human(KEY,folded=False); e.clock.advance(86400); e.intake.human(KEY,folded=False); e.tick()
+        e.intake.human(KEY); e.clock.advance(86400); e.intake.human(KEY); e.tick()
     current=e.store.get_wake(w.id)
     assert current.status=='active' and current.expires_at is None
     for _ in range(30):
-        e.clock.advance(86400); e.intake.human(KEY,folded=False); e.tick()
+        e.clock.advance(86400); e.intake.human(KEY); e.tick()
     current=e.store.get_wake(w.id)
     assert current.status=='active' and current.expires_at is None
 
@@ -302,7 +306,8 @@ def test_human_dedupe_still_marks_fold(engine):
     e=engine; w,row=wake(e)
     e.intake.pre_gateway_dispatch(event=event())
     assert not e.intake.flights['sid'].owner_replied
-    e.intake.human(KEY,dedupe=KEY+':101')
+    e.intake.pre_api_request(session_id='sid',turn_id='wake',
+        conversation_history=[row,{'role':'user','content':origin('101')}])
     assert e.intake.flights['sid'].owner_replied
     count(e,'101')
 

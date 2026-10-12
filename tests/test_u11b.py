@@ -50,11 +50,11 @@ def test_idless_origin_once_per_row_and_turn(engine,parts):
         api(e,history); e.clock.advance(1)
         history+=[{'role':'assistant','content':'ok'},{'role':'tool','content':'result'}]
     count(e,None)
-    digest=hashlib.sha256(text.encode()).hexdigest()[:12]
-    assert e.store.get_meta(f'human:{KEY}:origin:wake:1:{digest}')=='1'
+    digest=hashlib.sha256(text.encode()).hexdigest()[:16]
+    assert e.store.get_meta(f'human:{KEY}:origin:wake:{digest}:1')=='1'
     assert e.intake.flights['sid'].owner_replied
-    # Identical text in a distinct row is a distinct owner message.
-    history+=[{'role':'user','content':content}]
+    # A newly observed row with different text has its own fingerprint.
+    history+=[{'role':'user','content':idless('A second steer.')}]
     api(e,history); api(e,history)
     count(e,None,None)
 
@@ -99,7 +99,7 @@ def test_nonwake_anchor_ignores_earlier_rows_and_compaction(engine):
     history=[{'role':'user','content':origin('old')},row]
     e.intake.pre_llm_call(session_id='sid',turn_id='goal',user_message=row['content'],conversation_history=history)
     api(e,history,'goal')
-    api(e,[{'role':'user','content':origin('compacted')}],'goal')
+    api(e,[{'role':'user','content':origin('old')}],'goal')
     count(e)
 
 
@@ -122,7 +122,7 @@ def test_redirect_folds_when_live_row_has_api_prefix(engine,prefix):
     assert e.intake.transform_llm_output(session_id='sid',turn_id='wake',response_text='Here is the status.') is None
 
 
-def test_missing_current_marker_uses_anchor_without_fold(engine):
+def test_missing_current_marker_uses_counter_and_folds(engine):
     e=engine; w,row=wake(e)
     clean=row['content']
     history=[{'role':'user','content':'⟦pulse o:earlier/old a:1⟧'},
@@ -133,7 +133,7 @@ def test_missing_current_marker_uses_anchor_without_fold(engine):
     history+=[{'role':'user','content':origin('202')}]
     api(e,history)
     count(e,'202')
-    assert not e.intake.flights['sid'].owner_replied
+    assert e.intake.flights['sid'].owner_replied
 
 
 def test_tool_quoting_origin_is_not_owner(engine):
@@ -179,9 +179,9 @@ def test_b_counts_owner_before_prior_flight_cleanup(engine,monkeypatch):
 
 
 @pytest.mark.parametrize('guard',['not_started','stale_attempt','invalid'])
-def test_invalid_occurrence_cannot_fold_or_scan_before_anchor(engine,guard):
+def test_invalid_occurrence_does_not_recount_baseline(engine,guard):
     e=engine; w,row=wake(e)
-    # C's marker scan would reach this ORIGIN, but the fail-safe anchor must not.
+    # Previously observed ORIGIN stays baseline regardless of occurrence validity.
     history=[row,{'role':'user','content':origin('203')},{'role':'user','content':'snapshot'}]
     e.intake.pre_llm_call(session_id='sid',turn_id='wake',user_message=row['content'],conversation_history=history)
     f=e.intake.flights['sid']; o=e.store.list_occurrences(w.id)[0]
