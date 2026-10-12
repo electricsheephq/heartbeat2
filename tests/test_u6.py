@@ -189,8 +189,8 @@ def test_R6_E15_command_no_shell_and_deadline(tmp_path,monkeypatch):
 def test_R6_E7_E13_url_wall_deadline(engine,monkeypatch,phase):
     def connect(sock,address):
         assert address[0]=='127.0.0.1'; return _CONNECT(sock,address)
-    def dns(host,*args):
-        assert host=='127.0.0.1'; return _DNS(host,*args)
+    def dns(host,*args,**kwargs):
+        assert host=='127.0.0.1'; return _DNS(host,*args,**kwargs)
     monkeypatch.setattr(socket.socket,'connect',connect)
     monkeypatch.setattr(socket,'getaddrinfo',dns)
     monkeypatch.setattr(socket,'create_connection',_CREATE)
@@ -210,7 +210,8 @@ def test_R6_E7_E13_url_wall_deadline(engine,monkeypatch,phase):
             except OSError:pass
     thread=threading.Thread(target=serve,daemon=True); thread.start()
     monkeypatch.setattr(probes,'URL_DEADLINE_S',.25)
-    e=engine; w=arm(e,'url',trigger_json={'url':f'http://127.0.0.1:{listener.getsockname()[1]}/'})
+    e=engine; e.policy=replace(e.policy,url_allow_private=True)
+    w=arm(e,'url',trigger_json={'url':f'http://127.0.0.1:{listener.getsockname()[1]}/'})
     arm(e)
     before=time.monotonic()
     try:

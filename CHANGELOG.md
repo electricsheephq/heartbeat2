@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.1 — 2026-10-13
+
+- Command watchers sanitize an allowlisted environment with Hermes' helper,
+  never pass GH_TOKEN/GITHUB_TOKEN, and refuse gh output-shaping flags
+  (`--jq`/`-q`, `--template`/`-t`, including attached and bundled spellings).
+- URL watchers reuse Hermes URL safety: cloud metadata is always blocked;
+  private/local addresses require `url_allow_private` (default false). Every
+  hop checks every resolved address at connect time and dials a vetted IP.
+- File watchers honor Hermes read blocks at arm/update, before each open and
+  after rotation, and reject device/inode changes between stat and open.
+- Pool probes and URL workers retain the watcher's profile home scope.
+
+**Upgrade:** existing watchers using `--jq`/`--template`, a private URL or a
+blocked path will error and then pause after 5 errors (the default). Re-arm them
+with an allowed command/path, or enable `url_allow_private` for private URLs.
+Cloud metadata remains blocked with that setting enabled.
+
 ## 0.1.0 — 2026-10-12
 
 First release. Requires Hermes ≥ 0.21.6. Delivers to messaging-gateway DMs.

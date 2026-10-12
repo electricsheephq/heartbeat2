@@ -138,7 +138,9 @@ class Poller:
 
     def _probe(self,wake):
         from .probes import check
-        return check(wake,policy=self.policy,home=self.ctx._manager.home_path)
+        from .registration import home_scope
+        with home_scope(self.ctx._manager.home_path):
+            return check(wake,policy=self.policy,home=self.ctx._manager.home_path)
 
     @staticmethod
     def child_key(flight):

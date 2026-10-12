@@ -12,6 +12,7 @@ from test_commands import runtime
 from test_r3 import _CONNECT, _DNS, _CREATE
 from heartbeat2 import commands, probes
 from heartbeat2.poller import Poller
+from heartbeat2.policy import Policy
 from heartbeat2.store import Store
 from heartbeat2.schedule import local_day
 from bench.run import load_scenarios
@@ -265,8 +266,8 @@ def test_R8_F11_slow_never_shortens_watcher(runtime,interval,cap,expected):
 def test_R8_F5_url_timeout_reaps_worker(monkeypatch,phase):
     def connect(sock,address):
         assert address[0]=='127.0.0.1'; return _CONNECT(sock,address)
-    def dns(host,*args):
-        assert host=='127.0.0.1'; return _DNS(host,*args)
+    def dns(host,*args,**kwargs):
+        assert host=='127.0.0.1'; return _DNS(host,*args,**kwargs)
     monkeypatch.setattr(socket.socket,'connect',connect)
     monkeypatch.setattr(socket,'getaddrinfo',dns)
     monkeypatch.setattr(socket,'create_connection',_CREATE)
@@ -283,7 +284,7 @@ def test_R8_F5_url_timeout_reaps_worker(monkeypatch,phase):
     monkeypatch.setattr(probes,'URL_DEADLINE_S',.2)
     w=SimpleNamespace(kind='url',trigger_json={'url':f'http://127.0.0.1:{listener.getsockname()[1]}/'},probe_state_json={},id='x')
     try:
-        assert probes.check(w)['error']=='TimeoutError'
+        assert probes.check(w,policy=Policy(url_allow_private=True))['error']=='TimeoutError'
         end=time.monotonic()+1
         while time.monotonic()<end and any(x.name=='pulse-url' for x in threading.enumerate()): time.sleep(.02)
         assert not any(x.name=='pulse-url' for x in threading.enumerate())
