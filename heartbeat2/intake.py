@@ -367,12 +367,14 @@ class Intake:
                     w,o=s.get_wake(wid),s.get_occurrence(wid,dedupe)
                     # Startup replay can reach this hook before this process's poller
                     # reconciles, so the crashed attempt may still read claimed/started.
-                    # It is live only if a poller in this process claimed it.
-                    live=o is not None and o.state in {'claimed','started'} and o.epoch in LOCAL_EPOCHS
-                    if w and w.session_key==key and w.armed_session_id==session_id and o and o.attempt==attempt and not live:
+                    # It is live only if a poller in this process claimed it. Recovery may
+                    # also have refunded and re-claimed the occurrence as a newer attempt;
+                    # the replayed older attempt is then stale and the newer one untouched.
+                    live=o is not None and o.attempt==attempt and o.state in {'claimed','started'} and o.epoch in LOCAL_EPOCHS
+                    if w and w.session_key==key and w.armed_session_id==session_id and o and o.attempt>=attempt and not live:
                         # Apply restart recovery's own fenced settlement now, so either
                         # order ends in the same state; a claimed attempt stays for its refund.
-                        if o.state=='started':
+                        if o.attempt==attempt and o.state=='started':
                             e.interrupt(o,'restart')
                             w=s.get_wake(wid)
                             s.cas_session(key,{'busy_since':None},busy_since=now)  # this replay turn is running

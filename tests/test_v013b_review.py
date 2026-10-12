@@ -150,3 +150,19 @@ def test_output_tokens_count_without_prompt_counts(engine, usage, out):
     engine.intake.post_api_request(session_id='sid', turn_id='turn', usage=usage, provider='openai', model='gpt-6.1-sol')
     o, = engine.store.list_occurrences(w.id)
     assert (o.tokens_out, o.unpriced_calls, o.warm_wakes, o.cold_wakes, o.cost_microusd) == (out, 1, 0, 0, 0)
+
+
+def test_replay_of_an_attempt_recovery_already_reclaimed(engine):
+    w, o = crashed(engine, state='claimed')
+    reconcile(engine)  # Refunds the crashed claim.
+    engine.clock.advance(601)
+    engine.tick()  # Re-claims the same occurrence as a newer attempt, before the resume hook.
+    newer = engine.store.get_occurrence(w.id, o.dedupe_key)
+    assert (newer.state, newer.attempt) == ('claimed', o.attempt + 1)
+    replay(engine, w, o)
+    assert engine.intake.transform_llm_output(session_id='sid', turn_id='resumed', response_text='Restored') == '[SILENT]'
+    assert engine.store.get_occurrence(w.id, o.dedupe_key) == newer
+    assert engine.store.get_wake(w.id).model_turns == w.model_turns + 1
+    engine.intake.on_session_end(session_id='sid', turn_id='resumed', completed=True)
+    start(engine)  # The queued newer injection then runs as a normal wake turn.
+    assert engine.store.get_occurrence(w.id, o.dedupe_key).state == 'started'
