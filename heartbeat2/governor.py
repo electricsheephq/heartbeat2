@@ -128,7 +128,6 @@ def finish(engine,wake,occurrence):
     with s.atomic():
         if s.get_meta('governed:'+occurrence.id): return
         s.set_meta('governed:'+occurrence.id,'1')
-        engine.refund_model_count(occurrence)
         w=s.get_wake(wake.id)
         useful=value(engine,occurrence)
         s.cas_wake(w.id,w.status,expected_version=w.version,

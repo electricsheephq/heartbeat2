@@ -16,7 +16,8 @@ These estimates are not a monetary bill.
 
 ## Prompt cache
 Results include a `cache` line; choose intervals it marks warm, respecting floors.
-Claude marker routes follow Hermes' 5m/1h/auto TTL; GPT-5.6+/GPT-6.x use 30m.
+Claude marker routes follow Hermes' 5m/1h/auto TTL; GPT-5.6+/GPT-6.x on OpenAI API routes use 30m.
+The Codex OAuth route is reported as unknown until learned.
 Other routes learn from warm/cold gaps; an unknown TTL is not a guarantee.
 An interval just over the TTL rewrites the prefix every time and costs the most per hour.
 Cold becomes cheaper again at roughly 16h on Claude 1h, about 5h on GPT-6.x.

@@ -12,8 +12,12 @@ from .model import Wake, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, KINDS
 from .schedule import parse_duration, quiet_end
 
 
-def wake_class(wake):
-    return 'watcher' if wake.kind in PROBE_KINDS | EVENT_KINDS else 'owner' if wake.creator == 'user' and not wake.trigger_json.get('builtin') else 'nudge'
+def is_owner(wake):
+    return wake.creator == 'user' and not wake.trigger_json.get('builtin') and not wake.agent_edited
+
+
+def is_watcher(wake):
+    return wake.kind in PROBE_KINDS | EVENT_KINDS
 
 
 def one_shot(wake):
@@ -327,9 +331,8 @@ class Policy:
                          self.resolved_timezone())
 
     def unanswered_gate(self, wake: Wake, unanswered_count: int) -> str | None:
-        owner_wake = wake_class(wake) == 'owner'
-        if unanswered_count >= self.max_unanswered and not owner_wake:
-            return "held_unanswered" if wake_class(wake) == 'watcher' else "unanswered"
+        if unanswered_count >= self.max_unanswered and not is_owner(wake):
+            return "held_unanswered" if is_watcher(wake) else "unanswered"
         return None
 
     def command_allowed(self, argv: list[str]) -> bool:

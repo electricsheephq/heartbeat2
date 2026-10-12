@@ -36,7 +36,7 @@ def hermes_helpers(monkeypatch):
 
 @pytest.mark.parametrize('creator', ['agent', 'user'])
 def test_mute_holds_watchers(engine, creator):
-    w = arm(engine, 'subagent_done', creator=creator)
+    w = arm(engine, 'subagent_done', creator=creator, agent_edited=creator=='user')
     session(engine, unanswered_count=2)
     o = pending(engine, w, 'e:match')
     assert engine.gate(w, o, engine.store.get_session(KEY))[:2] == ('held_unanswered', True)
@@ -71,16 +71,16 @@ def test_caps_owner_at_bypasses_agent_at_drops(engine, creator, expected):
 @pytest.mark.parametrize('cap', ['max_model_wakes_per_day', 'max_messages_per_day'])
 def test_watcher_cap_holds_to_local_day_dst(engine, date, hours, cap):
     engine.clock.wall = datetime.fromisoformat(date).replace(tzinfo=ZoneInfo('America/New_York')).timestamp()
-    engine.policy = replace(engine.policy, timezone='America/New_York', **{cap:0})
+    engine.policy = replace(engine.policy, timezone='America/New_York', **{cap:1})
     w = arm(engine, 'subagent_done')
+    engine.ledger(w, **{'model_turns' if cap=='max_model_wakes_per_day' else 'delivered':1})
     o = pending(engine, w, 'e:match')
     reason, defer, until = engine.gate(w, o, engine.store.get_session(KEY))
     assert (reason, defer) == ('held_daily_cap', True)
-    assert until - engine.clock.now() == hours*3600
+    assert until is None
     engine.dispatch(o)
-    assert float(engine.store.get_meta('not_before:'+o.id)) == until
+    assert not engine.store.get_meta('not_before:'+o.id)
     engine.clock.advance(hours*3600-1)
-    engine.policy = replace(engine.policy, **{cap:24})
     engine.dispatch(engine.store.get_occurrence(w.id, o.dedupe_key))
     assert not engine.ctx.calls
     engine.clock.advance(1)
@@ -125,19 +125,22 @@ def test_expired_held_preserves_match(engine, ending):
 
 
 @pytest.mark.parametrize('failed,api_calls', [(False,0), (True,0), (True,2), (False,2)])
-def test_no_verdict_and_model_cap_only_completed_api_calls(engine, failed, api_calls):
+def test_no_verdict_and_model_cap_refunds_only_zero_call_provider_failure(engine, failed, api_calls):
     w = arm(engine)
     engine.tick()
     start(engine)
     for _ in range(api_calls):
         engine.intake.post_api_request(session_id='sid',turn_id='turn',usage={'prompt_tokens':10})
+    if failed:
+        engine.intake.api_request_error(session_id='sid',turn_id='turn',reason='server_error',status_code=503)
     engine.intake.on_session_end(session_id='sid',turn_id='turn',completed=not failed,failed=failed)
-    assert engine.daily(KEY)['model_turns'] == int(api_calls > 0)
-    assert engine.store.get_wake(w.id).model_turns == int(api_calls > 0)
+    counted = int(not failed or api_calls > 0)
+    assert engine.daily(KEY)['model_turns'] == counted
+    assert engine.store.get_wake(w.id).model_turns == counted
     assert engine.store.get_wake(w.id).no_verdict == 1
     row = engine.store.get_ledger(local_day(engine.clock.now(),'UTC'),w.id)
     assert row['no_verdict'] == 1
-    assert row['model_turns'] == int(api_calls > 0)
+    assert row['model_turns'] == counted
     engine.intake.on_session_end(session_id='sid',turn_id='turn',completed=True)
     assert engine.store.get_wake(w.id).no_verdict == 1
 

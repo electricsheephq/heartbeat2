@@ -102,7 +102,7 @@ Restart the messaging gateway and send `/pulse` in your DM. It shows:
 - whether the scheduler is running;
 - whether injection is allowed, with the exact YAML if it isn't;
 - your local time and quiet hours;
-- today's wakes, messages and estimated tokens.
+- today's wakes, messages, cache counts and estimated cost (or token splits).
 
 All other settings are in **Settings ▸ Plugins** in Hermes Desktop or in `config.yaml`.
 
@@ -116,7 +116,7 @@ All other settings are in **Settings ▸ Plugins** in Hermes Desktop or in `conf
 | `/pulse add every 1d at 09:00 plan my day` | A recurring wake at a fixed time |
 | `/pulse add when silent 24h ask how the trip went` | Once per silence of that length |
 | `/pulse list` · `/pulse why <id>` | Everything armed in this chat; why lists the last 10 trigger keys, states, reasons, matched/created and held-since times, and delivered yes/no |
-| `/pulse ledger [7d]` | Totals over the range: fires, checks, model turns, messages, replies and estimated tokens |
+| `/pulse ledger [7d]` | Totals over the range: fires, checks, model turns, messages, replies, cache/cost and token splits |
 | `/pulse pause <id\|all> [for 3d]` · `resume` · `cancel` | Control one item or all of them |
 | `/pulse quiet 22:00-07:30` · `quiet for 3h` · `quiet off` · `quiet default` | Quiet hours for this chat; `default` goes back to your settings |
 | `/pulse ok <id>` | Approve a wake the agent proposed (when *Agent can arm wakes* is `ask_first`) |
@@ -157,7 +157,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Urgent wakes ignore quiet hours | `quiet_hours_urgent` | off | Let wakes marked urgent through quiet hours. |
 | Wake turns per day | `max_model_wakes_per_day` | 24 | Per chat, local day. Each wake turn is a full model turn. |
 | Unprompted messages per day | `max_messages_per_day` | 6 | Per chat, local day. |
-| Unanswered messages before mute | `max_unanswered` | 2 | After this many unprompted messages with no reply, the agent's wakes and check-ins pause until you write. Wakes you armed still fire. |
+| Unanswered messages before mute | `max_unanswered` | 2 | Wakes you armed always fire; agent watchers wait for your reply; agent reminders are dropped. Agent edits revoke the owner exemption. |
 | Shortest repeat (minutes) | `min_interval_minutes` | 15 | Floor for every recurring time wake. |
 | Shortest agent timer without a watcher (minutes) | `agent_ungated_floor_minutes` | 55 | Floor for recurring timers the agent arms without a watcher. |
 | Minutes between wake turns | `wake_spacing_minutes` | 10 | Per chat. |
@@ -191,8 +191,8 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 Every guardrail is configurable:
 - Recurring timers repeat at most every 15 minutes, or every 55 minutes when the agent arms one without a watcher. Watchers check at most once a minute.
 - Every wake expires after 14 days at most.
-- Daily caps hold watchers until the next local day; owner one-shot reminders bypass both caps.
-- After 2 unanswered messages, watchers hold until you write; agent timers and built-in check-ins drop their occurrence. Owner time wakes still fire. Held matches merge, keeping the latest payload; expiry is visible in `/pulse why`.
+- Daily caps hold watchers until capacity frees, including on a new local day; your unedited one-shot reminders bypass both caps.
+- After 2 unanswered messages, agent watchers hold until you write; agent timers and built-in check-ins drop their occurrence. Wakes you armed still fire unless the agent edited their trigger, timing or note. Held matches merge, keeping the latest payload; pauses preserve them and expiry is visible in `/pulse why`.
 - A wake turn that carries untrusted data, such as a log line or a web page, cannot arm new recurring work.
 - Hermes' emergency stop halts every wake.
 - `/pulse off` stops everything in that chat, and only you can turn it back on.
@@ -201,7 +201,8 @@ Every guardrail is configurable:
 A wake turn is an ordinary model turn in that conversation. It is billed like a message, and its size is your conversation's context size: on a long-running agent that can be 100–200k input tokens per wake. Watchers, gates and skipped wakes cost nothing. `/pulse status` and `/pulse ledger` show warm/cold wake counts and estimated cost when priced, otherwise the in/cached/written/out split. The ledger also counts `no_verdict` turns. Start with watchers and long intervals.
 
 ## Prompt cache
-Claude marker routes use Hermes' 5m/1h/auto setting; OpenAI GPT-5.6+ and GPT-6.x use 30m.
+Claude marker routes use Hermes' 5m/1h/auto setting; GPT-5.6+ and GPT-6.x on OpenAI API routes use 30m.
+The Codex OAuth route is reported as unknown until learned.
 Other routes learn a conservative TTL only after both warm and cold gaps are observed.
 Agent recurring intervals near the TTL snap below it with downward jitter, respecting floors.
 Owner wakes, cron and anchored repeats retain their timing. Cache lines show the effect and warm interval.

@@ -27,7 +27,7 @@ LEDGER_FIELDS = frozenset({"fires", "gated_skips", "governor_skips", "model_turn
     "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals", "checks", "no_verdict"} | CACHE_FIELDS)
 _JSON_FIELDS = {"trigger_json", "probe_state_json", "payload_json"}
 _BOOL_FIELDS = {"babysit", "urgent", "cancel_on_reply", "notify", "force_silent",
-                "enabled", "first_notice_sent"}
+                "enabled", "first_notice_sent", "agent_edited"}
 _TRANSITIONS = {
     "pending": { "skipped", "missed", "dead", "orphaned", "superseded"},
     "claimed": {"pending", "started", "dead", "interrupted", "orphaned", "superseded"},
@@ -103,7 +103,8 @@ def _encode(key: str, value: Any) -> Any:
 def _record(cls, row):
     if row is None:
         return None
-    data = dict(row)
+    names = {f.name for f in fields(cls)}
+    data = {k: v for k, v in dict(row).items() if k in names}
     for name in _JSON_FIELDS & data.keys():
         data[name] = json.loads(data[name]) if data[name] is not None else None
     for name in _BOOL_FIELDS & data.keys():
@@ -172,7 +173,8 @@ class Store:
                 columns={row[1] for row in self.connection.execute("PRAGMA table_info(ledger)")}
                 if "provider_deferrals" not in columns:
                     self.connection.execute("ALTER TABLE ledger ADD COLUMN provider_deferrals INTEGER NOT NULL DEFAULT 0")
-                additions = {'wakes': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0'},
+                additions = {'wakes': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0',
+                                      'agent_edited':'INTEGER NOT NULL DEFAULT 0'},
                     'ledger': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0'},
                     'occurrences': {'created_at':'REAL NOT NULL DEFAULT 0', 'matched_at':'REAL', 'held_since':'REAL',
                         'held_reason':"TEXT NOT NULL DEFAULT ''", 'held_matches':'INTEGER NOT NULL DEFAULT 0', 'api_calls':'INTEGER NOT NULL DEFAULT 0'}}

@@ -73,7 +73,7 @@ config_schema:
     type: int
     default: 2
     label: "Unanswered messages before mute"
-    description: "After this many unprompted messages with no reply, the agent's wakes and check-ins pause until you write. Wakes you armed still fire."
+    description: "Wakes you armed always fire; agent watchers wait for your reply; agent reminders are dropped."
   min_interval_minutes:
     type: int
     default: 15

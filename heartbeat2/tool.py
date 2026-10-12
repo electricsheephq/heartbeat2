@@ -83,7 +83,7 @@ class Tool:
                 if action == 'respond':
                     return self.respond(args, flight)
                 if action == 'list':
-                    return {'ok':True,'wakes':[{**asdict(w),'cache':e.cache_line(w,seconds=w.eff_interval_s)} for w in e.store.list_wakes(s.session_key)]}
+                    return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w)} for w in e.store.list_wakes(s.session_key)]}
                 if action == 'off':
                     e.store.cas_session(s.session_key, {'enabled':s.enabled}, enabled=False)
                     return {'ok':True,'enabled':False}
@@ -111,7 +111,7 @@ class Tool:
                     w = e.store.create_wake(result.wake)
                     if child_key:
                         e.store.set_meta(child_key,'1')
-                    return {'ok':True,'wake':asdict(w),'clamped':result.clamped,'cache':e.cache_line(w,seconds=w.eff_interval_s)}
+                    return {'ok':True,'wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w)}
                 if action not in {'update','pause','resume','cancel'}:
                     return {'error':'unknown_action'}
                 if args.get('id') == 'all':
@@ -125,6 +125,8 @@ class Tool:
                     wakes = [w]
                 results = []
                 for w in wakes:
+                    if action == 'update' and w.trigger_json.get('builtin') and 'trigger' in args:
+                        return {'error':'builtin_settings_owned','detail':'The check-in is controlled in Settings.'}
                     gate = e.policy.mutation_gate(w, action=action, session_key=s.session_key,
                         created_in=created_in, new_kind=(args.get('trigger') or {}).get('kind'),
                         babysit=args.get('babysit'), untrusted_payload=bool(flight and flight.untrusted))
@@ -151,6 +153,10 @@ class Tool:
                                 return {'error':'max_active'}
                         result = self.reschedule(w) if action=='resume' else self.prepare(w,args,reschedule='trigger' in args)
                         candidate, clamps = result.wake, result.clamped
+                        if action == 'update' and w.creator == 'user' and any(
+                            getattr(candidate,k) != getattr(w,k) for k in
+                            ('trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','note')):
+                            candidate = replace(candidate,agent_edited=True)
                         if action == 'resume':
                             candidate = replace(candidate,status='active',status_reason='')
                     else:
@@ -162,7 +168,7 @@ class Tool:
                         e.cancel_occurrences(w.id,'paused' if action=='pause' else 'cancelled',preserve_started=True)
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
                     w=e.store.get_wake(w.id)
-                    item={'ok':True,'wake':asdict(w),'clamped':clamps,'cache':e.cache_line(w,seconds=w.eff_interval_s)}
+                    item={'ok':True,'wake':asdict(w),'clamped':clamps,'cache':self.cache_result(w)}
                     results.append(item)
                 return results[0] if args.get('id') != 'all' and results else {'ok':True,'results':results}
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
@@ -170,6 +176,11 @@ class Tool:
         except Exception:
             e.log.warning('pulse tool failed', exc_info=True)
             return {'error':'engine_error'}
+
+    def cache_result(self,w):
+        from .policy import is_watcher
+        seconds = max(0,w.next_due_at-self.engine.clock.now()) if w.kind=='at' and w.next_due_at is not None else w.eff_interval_s
+        return self.engine.cache_line(w,seconds=seconds,watcher=is_watcher(w))
 
     def reschedule(self,w):
         """Shared tool/command resume: preserve stored one-shot due, fresh key."""
@@ -187,6 +198,8 @@ class Tool:
         trigger=dict(args.get('trigger',w.trigger_json))
         if 'trigger' in args and set(trigger) - set(PARAMETERS['properties']['trigger']['properties']):
             raise ValueError('unknown trigger parameter')
+        if w.trigger_json.get('builtin'):
+            trigger['builtin'] = True
         kind=trigger.get('kind',w.kind)
         if kind in {'file','url'} and 'pattern' in trigger:
             pattern=trigger['pattern']

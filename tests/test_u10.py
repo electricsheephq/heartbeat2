@@ -286,7 +286,7 @@ def test_R10_A5_builtin_resume_keeps_system_trigger(runtime, route):
     current = e.store.get_wake(w.id)
     assert current.status == 'active' and current.trigger_json['builtin'] is True
     bad = e.tool.handle({'action':'update','id':w.id,'trigger':{'kind':'owner_silent','builtin':True}})
-    assert bad.get('error') == 'invalid_request' and 'unknown trigger' in bad['detail']
+    assert bad.get('error') == 'builtin_settings_owned' and 'Settings' in bad['detail']
 
 
 @pytest.mark.parametrize('route', ['command', 'tool', 'session_pause', 'missing_session'])
