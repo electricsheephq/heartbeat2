@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.2 — draft (undated)
+## 0.1.2 — 2026-10-13
 
 - Agent watchers hold and merge under unanswered mute; all watchers hold at daily caps until capacity frees. Wakes you armed bypass mute, and your unedited one-shot reminders bypass daily caps. Agent edits revoke that exemption; the built-in check-in's trigger is Settings-owned. Held expiry and the last ten occurrences are visible in `/pulse why`.
 - Count probe checks separately from gate skips, missing verdicts, model turns (refunding only zero-call provider failures), and cache reads/writes with price estimates.
