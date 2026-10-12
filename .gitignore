@@ -1,4 +1,5 @@
 .venv/
+.e2e-venvs/
 __pycache__/
 *.pyc
 .pytest_cache/
