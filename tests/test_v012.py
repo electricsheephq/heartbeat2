@@ -1,11 +1,10 @@
 """v0.1.2 acceptance: deterministic gateway/storage proof, no model or network."""
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
-import importlib.util
 import json
-import subprocess
 import sys
 import types
 import pytest
@@ -303,21 +302,11 @@ def test_store_additive_migration_from_v010(tmp_path, clock):
     from dataclasses import fields
     from heartbeat2.model import Occurrence, Session
     from heartbeat2.store import Store, CACHE_FIELDS
-    package=tmp_path/'v010'; package.mkdir()
-    (package/'__init__.py').write_text('')
-    for name in ('store','model','schedule','clock'):
-        (package/(name+'.py')).write_bytes(subprocess.check_output(['git','show',f'06c188b:heartbeat2/{name}.py']))
-    spec=importlib.util.spec_from_file_location('v012_old_fixture',package/'__init__.py',submodule_search_locations=[str(package)])
-    module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
-    oldstore=__import__(spec.name+'.store',fromlist=['Store'])
-    oldmodel=__import__(spec.name+'.model',fromlist=['Wake'])
+    import sqlite3
     path=tmp_path/'old.db'
-    with oldstore.Store(path,clock) as old:
-        w=old.create_wake(oldmodel.Wake('unit','old note','at'))
-        old.add_occurrence(w.id,'old:match');old.upsert_session(oldmodel.Session('unit'))
-        old.claim(w.id,'old:match',epoch='v010',pid=1);old.start(w.id,'old:match',attempt=1)
-        old.finish(w.id,'old:match',attempt=1,tokens_in=100)
-        old.add_ledger('2026-10-13',w.id,tokens_in=100,fires=1)
+    dump=(Path(__file__).parent/'fixtures'/'pulse-v0.1.0.sql').read_text()
+    old=sqlite3.connect(path); old.executescript(dump); old.close()
+    w=SimpleNamespace(id='w_v010')
     with Store(path,clock) as upgraded:
         for table,cls in (('wakes',Wake),('occurrences',Occurrence),('sessions',Session)):
             columns={r[1] for r in upgraded.connection.execute(f'PRAGMA table_info({table})')}
