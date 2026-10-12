@@ -89,3 +89,12 @@ Both xfails require the named signature; unrelated failures still fail the run.
 Passing this suite establishes **local-e2e-proof against these pins**. It does
 not prove real Telegram server/client rendering, notification delivery, live
 model quality/cost, long-running reliability, or customer readiness.
+
+`test_upstream.py` separately reproduces automatic background review after a
+stock plugin injects a turn. It disables heartbeat2, enables memory/skill tools,
+sets both nudge intervals to one, and leaves background review at its default.
+An owner-text control proves the detector against the selected pin's own review
+prompts. Only the named `Finding` is expected to fail; no review within the
+30-second window is a strict XPASS. Run this file serially with the matching
+pin/venv. `HEARTBEAT2_E2E_RESULTS` receives `requests.json` (bodies and timing,
+without headers/auth) and `summary.json` with hook metadata and review sizes.

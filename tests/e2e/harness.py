@@ -110,11 +110,13 @@ class WakeDirector(Director):
 
 
 class PulseRig:
-    def __init__(self, name, pin, *, busy="queue", loud=False, barrier=False, config=None):
+    def __init__(self, name, pin, *, busy="queue", loud=False, barrier=False, config=None,
+                 heartbeat2=True, director=None, poke=False):
         self.name, self.pin, self.busy = name, pin, busy
+        self.heartbeat2 = heartbeat2
         self.root = Path(tempfile.mkdtemp(prefix="hb-e2e-"))
         self.driver = TelegramDriver()
-        self.director = WakeDirector()
+        self.director = director or WakeDirector()
         self.llm = FakeLLMServer(self.director, aux=self.director.auxiliary)
         self.driver.start()
         self.llm.start()
@@ -138,6 +140,8 @@ class PulseRig:
             "agent": {"api_max_retries": 1, "max_turns": 12},
         })
         cfg = _deep_merge(cfg, config or {})
+        if not heartbeat2:
+            cfg["plugins"] = {"enabled": [], "entries": {}}
         env = {**self.driver.gateway_env(), "PYTHONDONTWRITEBYTECODE": "1",
                "PYTHONPATH_PREPEND": str(Path(__file__).parent),
                "HEARTBEAT2_E2E_CHILD": "1", "HERMES_GATEWAY_EXTERNAL_SUPERVISOR": "1"}
@@ -145,8 +149,9 @@ class PulseRig:
                                         env=env, ready=self.driver.connected)
         self.gateway.standin = self.driver.standin
         plugin = self.gateway.hermes_home / "plugins/heartbeat2"
-        plugin.mkdir(parents=True)
-        for part in ("plugin.yaml", "__init__.py", "heartbeat2", "skills"):
+        if heartbeat2:
+            plugin.mkdir(parents=True)
+        for part in (("plugin.yaml", "__init__.py", "heartbeat2", "skills") if heartbeat2 else ()):
             src = ROOT / part
             if src.is_dir():
                 shutil.copytree(src, plugin / part, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -155,6 +160,25 @@ class PulseRig:
         self.pulse_db = self.gateway.hermes_home / "plugin-data/heartbeat2/pulse.db"
         if barrier:
             self.install_barrier()
+        if poke:
+            self.install_poke()
+
+    def install_poke(self):
+        plugin = self.gateway.hermes_home / "plugins/e2e-poke"
+        plugin.mkdir(parents=True)
+        shutil.copyfile(Path(__file__).parent / "poke_plugin.py", plugin / "__init__.py")
+        (plugin / "plugin.yaml").write_text(
+            "name: e2e-poke\nversion: 0.0.1\nmanifest_version: 2\napi_version: 1\n"
+            "kind: standalone\ndescription: Test-only stock injection\n"
+            "provides_hooks: [pre_gateway_dispatch]\n")
+        import hermes_yaml as yaml
+
+        path = self.gateway.hermes_home / "config.yaml"
+        cfg = yaml.safe_load(path.read_text())
+        cfg["plugins"]["enabled"].append("e2e-poke")
+        cfg["plugins"]["entries"]["e2e-poke"] = {
+            "enabled": True, "allow_gateway_injection": True}
+        path.write_text(yaml.safe_dump(cfg, sort_keys=False))
 
     def install_barrier(self):
         plugin = self.gateway.hermes_home / "plugins/e2e-barrier"
@@ -180,7 +204,8 @@ class PulseRig:
         assert helper.REPO_ROOT.resolve() == self.pin
         self.gateway._env["PWD"] = str(self.gateway.home)
         self.gateway.start(timeout=50)
-        self.wait(lambda: self.pulse_db.exists(), "plugin database created", 20)
+        if self.heartbeat2:
+            self.wait(lambda: self.pulse_db.exists(), "plugin database created", 20)
         self.owner("hello [in:bootstrap]", "reply to bootstrap")
 
     def ctx(self):
