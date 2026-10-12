@@ -348,13 +348,17 @@ class Intake:
         with s.atomic():
             session=s.get_session(key)
             s.cas_session(key,{'current_session_id':session.current_session_id},current_session_id=session_id,busy_since=now,last_activity_at=now)
-            if not parsed and not owner_seen and RESUME_NOTE.fullmatch(user_message.strip()):
+            if not parsed and not owner_seen and isinstance(user_message,str) and RESUME_NOTE.fullmatch(user_message.strip()):
                 history=list(conversation_history or [])
+                internal=False
                 # pre_llm_call receives a separate trailing recovery USER row;
                 # the API sanitizer later merges it into the marker USER row.
                 while history and isinstance(history[-1],dict) and history[-1].get('role')=='user' and RESUME_NOTE.fullmatch(row_text(history[-1].get('content','')).strip()):
+                    # Hermes marks only internal events this way; an owner's note-only row never is.
+                    internal=internal or history[-1].get('display_kind')=='internal_notification'
                     history.pop()
                 row=history[-1] if history else None
+                if not internal: row=None
                 replay=marker(row_text(row.get('content',''))) if isinstance(row,dict) and row.get('role')=='user' else None
                 if replay:
                     wid,dedupe,attempt=replay
@@ -362,7 +366,10 @@ class Intake:
                     if w and w.session_key==key and w.armed_session_id==session_id and o and o.attempt==attempt and o.state not in {'claimed','started'}:
                         self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,invalid=True)
                         stamp='resumed_turn:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
-                        if not s.get_meta(stamp) and s.cas_wake(w.id,w.status,expected_version=w.version,model_turns=w.model_turns+1,status_reason='resumed_after_restart'):
+                        updates={'model_turns':w.model_turns+1}
+                        if w.status!='paused' and (not w.status_reason or w.status in {'failed','done'}):
+                            updates['status_reason']='resumed_after_restart'
+                        if not s.get_meta(stamp) and s.cas_wake(w.id,w.status,expected_version=w.version,**updates):
                             e.ledger(w,model_turns=1)
                             s.set_meta(stamp,'1')
                         return None

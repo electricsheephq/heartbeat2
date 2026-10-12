@@ -153,9 +153,12 @@ class Tool:
                                 return {'error':'max_active'}
                         result = self.reschedule(w) if action=='resume' else self.prepare(w,args,reschedule='trigger' in args)
                         candidate, clamps = result.wake, result.clamped
+                        until = args.get('until') if isinstance(args.get('until'),dict) else {}
+                        edited = ['trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','note']
+                        # Lifetime fields revoke only when the agent set them, never via a policy re-clamp.
+                        edited += [f for f,present in (('expires_at','expires' in until),('max_fires','max_fires' in until),('babysit','babysit' in args)) if present]
                         if action == 'update' and w.creator == 'user' and any(
-                            getattr(candidate,k) != getattr(w,k) for k in
-                            ('trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','note','expires_at','max_fires','babysit')):
+                            getattr(candidate,k) != getattr(w,k) for k in edited):
                             candidate = replace(candidate,agent_edited=True)
                         if action == 'resume':
                             candidate = replace(candidate,status='active',status_reason='')

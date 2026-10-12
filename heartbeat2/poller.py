@@ -624,8 +624,6 @@ class Poller:
     def cache_line(self,w,*,seconds=None,watcher=False):
         from .cache import line
         first=w.creator=='user' and w.created_in=='command' and not w.fires
-        if first and seconds is None and w.next_due_at is not None:
-            seconds=max(0,w.next_due_at-self.clock.now())
         return line(self.store,self.store.get_session(w.session_key),self.clock.now(),seconds=seconds,
                     floor=max(self.policy.interval_floor(w),w.pacing_min_s or 0),watcher=watcher,
                     pricing=not self.store.connection.in_transaction,first_wake=first)
