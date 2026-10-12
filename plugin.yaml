@@ -193,7 +193,7 @@ config_schema:
     type: bool
     default: false
     label: "Let URL watchers reach private and local addresses"
-    description: "Allow private and local URL targets. Cloud metadata stays blocked."
+    description: "Allow private and local URL targets (loopback, private ranges). Cloud metadata and the IPv4 link-local range 169.254.0.0/16 stay blocked."
   source_command:
     type: bool
     default: true
