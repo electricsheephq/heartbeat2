@@ -81,7 +81,7 @@ config_schema:
     description: "Floor for every recurring time wake."
   agent_ungated_floor_minutes:
     type: int
-    default: 60
+    default: 55
     label: "Shortest agent timer without a watcher (minutes)"
     description: "Floor for recurring timers the agent arms without a watcher."
   wake_spacing_minutes:

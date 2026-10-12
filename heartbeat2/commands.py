@@ -5,6 +5,7 @@ import re
 
 from .model import Wake, Session
 from . import governor
+from . import cache
 from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS
 from .schedule import parse_duration, quiet_end, local_day
 from .tool import session_env
@@ -64,9 +65,18 @@ def _item(engine, wake):
     return f'{wake.id} {wake.status} · {wake.title or wake.note[:60]} · {wake.kind} · {due}' + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
+def _occurrences(engine, wake):
+    reasons={'held_unanswered':'held: waiting for your reply', 'held_daily_cap':'held: waiting for the next local day',
+        'unanswered':'dropped: unanswered mute', 'daily_model_cap':f'dropped: daily model cap ({engine.policy.max_model_wakes_per_day})',
+        'daily_message_cap':f'dropped: daily message cap ({engine.policy.max_messages_per_day})', 'expired_held':'expired while held'}
+    return '\n'.join(f'{o.dedupe_key} · {o.state} · {reasons.get(o.error,o.error.replace("_"," ") or o.outcome or "none")} · '
+        f'matched/created {_time(engine,o.matched_at if o.matched_at is not None else o.created_at)} · held-since {_time(engine,o.held_since)} · delivered {"yes" if o.delivered else "no"}'
+        for o in engine.store.list_occurrences(wake.id)[-10:])
+
+
 def _ledger(engine, key, days):
     today = datetime.fromisoformat(local_day(engine.clock.now(), engine.policy.resolved_timezone())).date()
-    lines = [f'Ledger {days}d: fires · checks · model wakes · messages · engaged · ≈tokens · provider deferrals · verdict']
+    lines = [f'Ledger {days}d: fires · checks · model wakes · messages · engaged · cache/cost · provider deferrals · no_verdict · verdict']
     for wake in engine.store.list_wakes(key):
         counts = {}
         for n in range(days):
@@ -76,9 +86,9 @@ def _ledger(engine, key, days):
         fires, skips = counts.get('fires',0), counts.get('gated_skips',0)
         valuable, turns = counts.get('valuable',0), counts.get('model_turns',0)
         verdict = 'useful' if valuable else 'no value yet' if turns else 'waiting'
-        lines.append(f'{wake.id} {wake.title or wake.note[:40]}: {fires} · {fires+skips} · {turns} · '
+        lines.append(f'{wake.id} {wake.title or wake.note[:40]}: {fires} · {counts.get("checks",0)} · {turns} · '
                      f'{counts.get("delivered",0)} · {counts.get("engaged",0)} · '
-                     f'{counts.get("tokens_in",0)+counts.get("tokens_out",0)} · {counts.get("provider_deferrals",0)} · {verdict}')
+                     f'{cache.display(counts)} · {counts.get("provider_deferrals",0)} · {counts.get("no_verdict",0)} · {verdict}')
     return '\n'.join(lines)
 
 
@@ -111,7 +121,7 @@ def _add(engine, session, text):
     _activation(engine,session,wake)
     result = engine.tool.prepare(wake, {'trigger':trigger})
     created = engine.store.create_wake(result.wake)
-    return _item(engine, created)+_clamps(result.clamped)
+    return _item(engine, created)+_clamps(result.clamped)+'\n'+engine.cache_line(created,seconds=created.eff_interval_s)
 
 
 def _clamps(clamped):
@@ -157,8 +167,12 @@ def handle(raw_args, runtime):
                          + (f' ({status["reason"]})' if status.get('reason') else ''),
                          f'allow_gateway_injection: {str(engine.injection_allowed()).lower()}',
                          f'Local time: {_time(engine,engine.clock.now())} · quiet: {quiet_label}',
-                         f'Today: fires {counts.get("fires",0)} · checks {counts.get("fires",0)+counts.get("gated_skips",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {daily["delivered"]}/{engine.policy.max_messages_per_day} · engaged {counts.get("engaged",0)} · ≈tokens {counts.get("tokens_in",0)+counts.get("tokens_out",0)}',
+                         f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {daily["delivered"]}/{engine.policy.max_messages_per_day} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
                          f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
+                held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
+                if held: lines.append(f'Held items: {held}')
+                if cache.ttl_for_session(engine.store,session)==(300,'hermes'):
+                    lines.append('your Claude cache lasts 5 min, so every wake is cold; set `prompt_caching: {cache_ttl: auto}` (1h for chat) in config.yaml')
                 health=json.loads(engine.store.get_meta('provider_health') or '{}')
                 if health:
                     lines.append(f'Provider gate: provider_unavailable ({health["class"]}) · next recovery attempt: {_time(engine,health["until"])}; any successful model call clears it.')
@@ -215,7 +229,7 @@ def handle(raw_args, runtime):
             for wake in wakes:
                 if action == 'why':
                     reason=wake.reason or ('you asked (via /pulse add)' if wake.creator=='user' else 'the named task')
-                    return f'{_item(engine,wake)}\nWhy: {reason}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\nFires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}'
+                    return f'{_item(engine,wake)}\nWhy: {reason}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\nFires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}\n'+_occurrences(engine,wake)
                 try:
                     with engine.store.atomic():
                         lines.append(_transition(engine,session,wake,action,seconds))
@@ -239,7 +253,7 @@ def _transition(engine,session,wake,action,seconds):
         _activation(engine,session,wake)
         result=governor.owner_answer(engine,wake,action)
         if not result.get('ok'): raise ValueError(result.get('error','owner answer failed'))
-        return _item(engine,engine.store.get_wake(wake.id)) + (f'\nNew cadence: {result["cadence_s"]:g} seconds.' if action=='slow' else '')
+        return _item(engine,engine.store.get_wake(wake.id)) + (f'\nNew cadence: {result["cadence_s"]:g} seconds.\n{result.get("cache","")}' if action=='slow' else '')
     if wake.status=='proposed' and action not in {'ok','cancel','stop'}:
         raise ValueError('proposed item: approve with /pulse ok or cancel')
     if action=='pause' and wake.status!='active': raise ValueError('pause needs an active item')

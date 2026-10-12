@@ -74,7 +74,7 @@ def test_R7_L5_owner_obeys_other_gates(engine, gate):
         session(e, last_wake_turn_at=e.clock.now())
     else:
         e.provider_failure('rate_limit')
-    w = arm(e, creator='user')
+    w = arm(e, 'every' if gate.startswith('daily_') else 'at', creator='user')
     e.tick()
     o, = e.store.list_occurrences(w.id)
     assert o.error == gate and not e.ctx.calls
@@ -178,6 +178,9 @@ def test_R7_COST_full_context_disclosure(path):
     text = (Path(__file__).resolve().parents[1] / path).read_text()
     for phrase in ('normal model turn', "conversation's context size", 'billed like one',
                    '≈tokens', '/pulse ledger', '/pulse status', 'running cost'):
+        if path == 'skills/heartbeat2-usage/SKILL.md' and phrase in {'≈tokens','running cost'}:
+            assert 'warm/cold wake counts and estimated cost' in text and 'in/cached/written/out' in text
+            continue
         assert phrase in text, (path, phrase)
 
 
@@ -188,9 +191,9 @@ def test_R7_COST_ledger_tokens_per_wake(runtime):
     for w, tokens in zip(wakes, [110000, 209000]):
         e.store.add_ledger(day, w.id, tokens_in=tokens, tokens_out=50)
     out = commands.handle('ledger', runtime)
-    assert '≈tokens' in out
+    assert 'in / cached / written / out' in out
     for w, tokens in zip(wakes, [110000, 209000]):
         line, = [line for line in out.splitlines() if line.startswith(w.id)]
-        assert str(tokens + 50) in line
+        assert f'{tokens} / 0 / 0 / 50' in line
     status = commands.handle('status', runtime)
-    assert 'Today' in status and '≈tokens 319100' in status
+    assert 'Today' in status and '319000 / 0 / 0 / 100' in status

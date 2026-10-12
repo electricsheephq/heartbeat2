@@ -39,7 +39,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
                 timezone="UTC", recent_outcomes=(), messages_today: int = 0,
                 max_messages: int = 6, payload=None, governor_hint: str = "",
                 late_by_s: float | None = None, trigger_summary: str = "", after_restart: bool = False,
-                held_by: str = "") -> str:
+                held_by: str = "", cache_line: str = "") -> str:
     now = clock.now()
     local = datetime.fromtimestamp(now, zone(timezone))
     label = "wake" if wake.kind in TIME_KINDS else "watcher"
@@ -60,6 +60,10 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
     ]
     if wake.scratch:
         lines.append(f"Scratch: {escape_text(wake.scratch)}")
+    if occurrence.held_since is not None:
+        since=datetime.fromtimestamp(occurrence.held_since,zone(timezone))
+        reason="you hadn't replied" if occurrence.held_reason=='held_unanswered' else 'daily cap'
+        lines.append(f'Held since {since:%H:%M} ({reason}); {occurrence.held_matches} matches merged.')
     recent = ", ".join(list(recent_outcomes)[-3:]) or "none"
     lines.append(f"Recent outcomes: {recent} · unprompted messages today: {messages_today} of {max_messages}")
     if governor_hint:
@@ -82,4 +86,5 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
     ]
     if not session.first_notice_sent or wake.trigger_json.get('builtin'):
         lines.append('If you notify, end with one line saying they can say "stop checking in" or use /pulse off.')
+    if cache_line: lines.append(escape_text(cache_line))
     return "\n".join(lines)

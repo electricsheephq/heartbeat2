@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 — draft (undated)
+
+- Watchers hold and merge under unanswered mute or daily caps; owner one-shot reminders bypass daily caps. Held expiry and the last ten occurrences are visible in `/pulse why`.
+- Count probe checks separately from gate skips, missing verdicts, real-call daily capacity, and cache reads/writes with price estimates.
+- Cache-aware agent timing and governor backoff preserve warm intervals; the default agent timer floor is 55 minutes. Owner timing stays explicit.
+
 ## 0.1.1 — 2026-10-13
 
 - Command watchers sanitize an allowlisted environment with Hermes' helper,

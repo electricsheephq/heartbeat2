@@ -26,7 +26,7 @@ def test_defaults_are_frozen_and_settings_untouched(clock):
     defaults = Policy.from_settings({}, clock=clock)
     assert (defaults.max_model_wakes_per_day, defaults.max_messages_per_day,
             defaults.min_interval_minutes, defaults.agent_ungated_floor_minutes,
-            defaults.noop_pause_after, defaults.ledger_days) == (24, 6, 15, 60, 6, 30)
+            defaults.noop_pause_after, defaults.ledger_days) == (24, 6, 15, 55, 6, 30)
 
 
 @pytest.mark.parametrize("key", ["agent_can_create", "timezone", "quiet_hours", "probe_commands"])
@@ -93,10 +93,10 @@ def test_deescalation_and_item_ownership(clock):
 
 
 @pytest.mark.parametrize("wake,interval,expiry,max_fires", [
-    (make_wake(), 3600, 7 * 86400, None),
+    (make_wake(), 3300, 7 * 86400, None),
     (make_wake(creator="user"), 900, 14 * 86400, None),
     (make_wake(babysit=True, expires_at=10**12, max_fires=100), 900, 4 * 3600, 24),
-    (make_wake(expires_at=10**12), 3600, 14 * 86400, None),
+    (make_wake(expires_at=10**12), 3300, 14 * 86400, None),
 ])
 def test_I18_interval_lifetime_babysit_clamps(wake, interval, expiry, max_fires, clock):
     result = Policy.from_settings({}, clock=clock).clamp(wake)
@@ -112,7 +112,7 @@ def test_all_length_pacing_probe_and_babysit_clamps(clock):
     result = p.clamp(make_wake(title="x" * 81, note="n" * 2001, reason="r" * 281,
                               scratch="s" * 4001, pacing_min_s=1, pacing_max_s=2))
     assert [len(getattr(result.wake, k)) for k in ("title", "note", "reason", "scratch")] == [80, 2000, 280, 4000]
-    assert result.wake.pacing_min_s == result.wake.pacing_max_s == 3600
+    assert result.wake.pacing_min_s == result.wake.pacing_max_s == 3300
     assert p.clamp(make_wake(), probe_gated=True).wake.base_interval_s == 900
     assert {"title", "note", "reason", "scratch", "pacing.min", "pacing.max"} <= result.clamped.keys()
     probe = p.clamp(make_wake(kind="file", trigger_json={"check_every": 1}))
@@ -165,5 +165,5 @@ def test_pacing_min_max_and_cron_floor_are_reported(clock):
     assert result.wake.base_interval_s == result.wake.eff_interval_s == 7200
     assert "pacing_max" in result.clamped["every"]
     cron = p.clamp(make_wake(kind="cron", base_interval_s=None, trigger_json={"cron": "* * * * *"}))
-    assert cron.wake.base_interval_s == cron.wake.eff_interval_s == 3600
+    assert cron.wake.base_interval_s == cron.wake.eff_interval_s == 3300
     assert "cron" in cron.clamped

@@ -28,7 +28,8 @@ PARAMETERS['required'] = ['action']
 DESCRIPTION = ('Use create to arm a wake/watcher (note and trigger.kind required); list to inspect; '
                'update to change instructions or trigger; pause to suspend; resume to restart a paused wake; '
                'cancel to end it; off to stop checks for this chat. During a wake turn, use respond to set '
-               'outcome and notify, optionally scratch/next_check. Bounds and clamps are reported. Never type silence markers.')
+               'outcome and notify, optionally scratch/next_check. Bounds and clamps are reported. Never type silence markers. '
+               'Results include a `cache` line; pick intervals the line marks warm.')
 SCHEMA = {'name':'pulse','description':DESCRIPTION,'parameters':PARAMETERS}
 
 
@@ -82,7 +83,7 @@ class Tool:
                 if action == 'respond':
                     return self.respond(args, flight)
                 if action == 'list':
-                    return {'ok':True,'wakes':[asdict(w) for w in e.store.list_wakes(s.session_key)]}
+                    return {'ok':True,'wakes':[{**asdict(w),'cache':e.cache_line(w,seconds=w.eff_interval_s)} for w in e.store.list_wakes(s.session_key)]}
                 if action == 'off':
                     e.store.cas_session(s.session_key, {'enabled':s.enabled}, enabled=False)
                     return {'ok':True,'enabled':False}
@@ -110,7 +111,7 @@ class Tool:
                     w = e.store.create_wake(result.wake)
                     if child_key:
                         e.store.set_meta(child_key,'1')
-                    return {'ok':True,'wake':asdict(w),'clamped':result.clamped}
+                    return {'ok':True,'wake':asdict(w),'clamped':result.clamped,'cache':e.cache_line(w,seconds=w.eff_interval_s)}
                 if action not in {'update','pause','resume','cancel'}:
                     return {'error':'unknown_action'}
                 if args.get('id') == 'all':
@@ -160,7 +161,8 @@ class Tool:
                     if action in {'pause','cancel'}:
                         e.cancel_occurrences(w.id,'paused' if action=='pause' else 'cancelled',preserve_started=True)
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
-                    item={'ok':True,'wake':asdict(e.store.get_wake(w.id)),'clamped':clamps}
+                    w=e.store.get_wake(w.id)
+                    item={'ok':True,'wake':asdict(w),'clamped':clamps,'cache':e.cache_line(w,seconds=w.eff_interval_s)}
                     results.append(item)
                 return results[0] if args.get('id') != 'all' and results else {'ok':True,'results':results}
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
@@ -245,7 +247,8 @@ class Tool:
                     created=None
                 updates['probe_state_json']={'create_time':created}
         if not updates.get('note',w.note): raise ValueError('note is required')
-        result=e.policy.clamp(replace(w,**updates))
+        candidate=replace(w,**updates)
+        result=e.policy.clamp(candidate,cache_ttl=e.timing(candidate)['cache_ttl'])
         w=result.wake
         if reschedule:
             now,tz=e.clock.now(),e.policy.resolved_timezone()
@@ -253,7 +256,7 @@ class Tool:
                 if 'at' not in trigger: raise ValueError('at requires a time')
                 due=parse_at(trigger['at'],now=now,timezone=tz)
             elif kind in {'every','self'}:
-                due=next_every(now,w.eff_interval_s,anchor=trigger.get('at') if kind=='every' else None,timezone=tz)
+                due=next_every(now,w.eff_interval_s,anchor=trigger.get('at') if kind=='every' else None,timezone=tz,**e.timing(w))
             elif kind=='cron':
                 due=next_cron(trigger['cron'],now=now,timezone=tz,minimum_interval_s=w.eff_interval_s or 0)
             elif kind in PROBE_KINDS: due=now
@@ -291,6 +294,8 @@ class Tool:
                 requested=parse_duration(args['next_check'])
                 bounded=max(requested,w.pacing_min_s or e.policy.interval_floor(w))
                 if w.pacing_max_s is not None: bounded=min(bounded,w.pacing_max_s)
+                from .cache import interval
+                bounded=interval(w,bounded,e.timing(w)['cache_ttl'],e.timing(w)['minimum_s'])
                 changes['next_check_s']=bounded
                 if requested!=bounded: clamps['next_check']=f'{requested} → {bounded} (pacing)'
         if not e.store.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=o.attempt,**changes):

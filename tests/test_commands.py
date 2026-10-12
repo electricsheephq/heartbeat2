@@ -59,7 +59,7 @@ def test_status_injection_yaml_quiet_ledger_why(runtime):
     assert INJECTION_CONFIG in out and 'not running' in out and 'UTC' in out and 'quiet' in out.lower()
     assert 'CI is pending' in commands.handle(f'why {w.id}',runtime)
     e.ctx.allowed=True
-    for field in ('fires','checks','model wakes','messages','engaged','≈tokens','verdict'):
+    for field in ('fires','checks','model wakes','messages','engaged','cache/cost','verdict'):
         assert field in commands.handle('ledger 7d',runtime).lower()
 
 

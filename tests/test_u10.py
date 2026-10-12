@@ -16,7 +16,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from test_engine import engine, arm, session, start, end, KEY
+from test_engine import engine, admit, arm, session, start, end, KEY
 from test_commands import runtime
 from heartbeat2 import commands, probes
 from heartbeat2.wake_text import render_wake
@@ -344,6 +344,7 @@ def test_R10_A8_overnight_watcher_matches_coalesce(engine, tmp_path):
     assert not e.ctx.calls
     e.clock.wall = stamp('2025-10-13T08:00:00')
     for n in range(3):
+        if n == 2: admit(e, text='Continue the remaining batch')
         e.tick(); start(e); end(e, 'progress', True, f'Batch {n}')
         e.clock.advance(660)
     assert len(e.ctx.calls) == 3 and not e.store.list_occurrences(w.id, state='pending')
