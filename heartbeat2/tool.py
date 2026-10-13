@@ -2,7 +2,7 @@
 from dataclasses import asdict, replace
 import re
 
-from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS
+from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS
 from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS
 from .schedule import parse_at, parse_duration, next_every, next_cron
 
@@ -160,13 +160,23 @@ class Tool:
                         result = self.reschedule(w) if action=='resume' else self.prepare(w,args,reschedule='trigger' in args)
                         candidate, clamps = result.wake, result.clamped
                         until = args.get('until') if isinstance(args.get('until'),dict) else {}
-                        edited = ['trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','note']
+                        timing = ('trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s')
+                        edited = [*timing,'note']
                         # Lifetime fields revoke only when the agent set them, never via a policy re-clamp.
                         edited += [f for f,present in (('expires_at','expires' in until),('max_fires','max_fires' in until),
                                                         ('cancel_on_reply','owner_replies' in until),('babysit','babysit' in args)) if present]
-                        if action == 'update' and w.creator == 'user' and any(
-                            getattr(candidate,k) != getattr(w,k) for k in edited):
-                            candidate = replace(candidate,agent_edited=True)
+                        if action == 'update':
+                            changed = {k for k in edited if getattr(candidate,k) != getattr(w,k)}
+                            watch_conversion = (w.status_reason == 'watch_requested'
+                                and candidate.kind in PROBE_KINDS | EVENT_KINDS and changed <= set(timing)
+                                and all(getattr(candidate,k) == getattr(w,k) for k in ('title','reason','urgent')))
+                            if w.creator == 'user' and changed and not watch_conversion:
+                                candidate = replace(candidate,agent_edited=True)
+                                result = self.prepare(candidate,{},reschedule='trigger' in args)
+                                candidate = result.wake
+                                clamps.update(result.clamped)
+                            if w.status_reason == 'watch_requested':
+                                candidate = replace(candidate,status_reason='')
                         if action == 'resume':
                             candidate = replace(candidate,status='active',status_reason='')
                     else:

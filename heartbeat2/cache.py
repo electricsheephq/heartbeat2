@@ -3,6 +3,7 @@ import json
 import re
 from types import SimpleNamespace
 from urllib.parse import urlsplit
+from .model import agent_authored
 
 
 def route_key(provider='', model='', base_url=''):
@@ -69,7 +70,7 @@ def ttl_for_session(store, session):
 
 def interval(wake, seconds, ttl, floor=0):
     floor = max(floor, wake.pacing_min_s or 0)
-    if wake.creator == 'agent' and wake.kind in {'every','self'} and not wake.trigger_json.get('at') and ttl:
+    if agent_authored(wake) and wake.kind in {'every','self'} and not wake.trigger_json.get('at') and ttl:
         edge = ttl-max(30,.05*ttl)
         if edge < seconds <= 1.25*ttl and edge >= floor: return edge
     return seconds

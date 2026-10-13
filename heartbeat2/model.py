@@ -16,6 +16,11 @@ TERMINAL_OCCURRENCE_STATES = frozenset({"done", "skipped", "missed", "dead",
                                       "interrupted", "orphaned", "superseded"})
 
 
+def agent_authored(wake) -> bool:
+    """The agent chose this wake's timing: it created it, or it edited an owner wake."""
+    return wake.creator == "agent" or wake.agent_edited
+
+
 def new_wake_id() -> str:
     return "w_" + base64.b32encode(secrets.token_bytes(5)).decode().lower()
 
