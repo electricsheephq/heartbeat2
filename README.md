@@ -105,6 +105,9 @@ Restart the messaging gateway and send `/pulse` in your DM. It shows:
 - today's wakes, messages, cache counts and estimated cost (or token splits).
 
 All other settings are in **Settings ▸ Plugins** in Hermes Desktop or in `config.yaml`.
+Invalid settings are reported by `/pulse status` and the `pulse` tool. Startup
+uses defaults for rejected keys; live refresh keeps the last good policy until
+the settings are corrected.
 
 ## Using it
 **You**, in the chat:
@@ -211,6 +214,7 @@ Owner wakes, cron and anchored repeats retain their timing. Cache lines show the
 Disclosure — wakes and watchers run full turns on the conversation's own model, billed like any message; command watchers run allowlisted read-only commands without an approval prompt; URL watchers make the GET requests you configured; state stays in the profile's plugin-data; no telemetry. Command environments use Hermes' sanitizer on an allowlisted base and carry no provider, bot or GitHub tokens; gh uses its own hosts.yml or keyring. URL watchers always block cloud metadata, and block private/local addresses unless `url_allow_private` is enabled, checking every hop at connect time. File watchers honor Hermes read blocks at arm/update and every check, including rotation. Helpers run in the watcher's profile scope.
 
 Command watchers:
+- use an allowlisted environment that does not pass proxy or custom-CA variables yet;
 - run only argv prefixes from your allowlist. The default is `gh pr view/checks`, `gh run view/list`, `git ls-remote/status/log`;
 - run with no shell and no terminal;
 - refuse output, config, editor, browser and mutating flags and verbs, including gh `--jq`/`-q` and `--template`/`-t`;

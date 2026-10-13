@@ -67,6 +67,12 @@ class Tool:
         return s
 
     def handle(self, args, *, session_id='', **kwargs):
+        result=self._handle(args,session_id=session_id,**kwargs)
+        notice=self.engine.settings_notice()
+        if notice: result['settings_error']=notice
+        return result
+
+    def _handle(self, args, *, session_id='', **kwargs):
         e = self.engine
         try:
             e.refresh()
@@ -184,7 +190,7 @@ class Tool:
     def cache_result(self,w):
         from .policy import is_watcher
         seconds = max(0,w.next_due_at-self.engine.clock.now()) if w.kind=='at' and w.next_due_at is not None else w.eff_interval_s
-        return self.engine.cache_line(w,seconds=seconds,watcher=is_watcher(w))
+        return self.engine.cache_line(w,seconds=seconds,watcher=is_watcher(w) or w.kind=='owner_silent')
 
     def reschedule(self,w):
         """Shared tool/command resume: preserve stored one-shot due, fresh key."""
