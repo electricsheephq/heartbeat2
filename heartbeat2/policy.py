@@ -132,6 +132,20 @@ class Policy:
                      "noop_max_backoff_hours", "ledger_days"):
             if getattr(result, name) < 1:
                 raise ValueError(f"{name} must be positive")
+        # Readable upper bounds, each far inside the value where date, float
+        # or SQLite arithmetic downstream would overflow (with 10% jitter).
+        for name, maximum in {
+            "ledger_days": 36500,
+            "min_interval_minutes": 525600,
+            "agent_ungated_floor_minutes": 525600,
+            "noop_backoff_factor": 100,
+            "noop_max_backoff_hours": 8760,
+            "probe_floor_seconds": 604800,
+            "max_lifetime_days": 3650,
+            "checkin_after_hours": 8760,
+        }.items():
+            if getattr(result, name) > maximum:
+                raise ValueError(f"{name} exceeds maximum {maximum:g}")
         # Validate configured boundaries without consulting the real wall clock.
         if result.timezone:
             try:

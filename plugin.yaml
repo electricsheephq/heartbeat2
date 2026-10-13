@@ -78,12 +78,12 @@ config_schema:
     type: int
     default: 15
     label: "Shortest repeat (minutes)"
-    description: "Floor for every recurring time wake."
+    description: "Floor for every recurring time wake. Maximum 525600 (one year)."
   agent_ungated_floor_minutes:
     type: int
     default: 55
     label: "Shortest agent timer without a watcher (minutes)"
-    description: "Floor for recurring timers the agent arms without a watcher."
+    description: "Floor for recurring timers the agent arms without a watcher. Maximum 525600 (one year)."
   wake_spacing_minutes:
     type: int
     default: 10
@@ -93,7 +93,7 @@ config_schema:
     type: int
     default: 60
     label: "Fastest watcher check (seconds)"
-    description: "Watchers never check more often than this."
+    description: "Watchers never check more often than this. Maximum 604800 (one week)."
   max_active:
     type: int
     default: 10
@@ -103,7 +103,7 @@ config_schema:
     type: int
     default: 14
     label: "Longest lifetime (days)"
-    description: "Every wake expires by then; agent recurring wakes default to 7 days."
+    description: "Every wake expires by then; agent recurring wakes default to 7 days. Maximum 3650 (ten years)."
   owner_silent_checkin:
     type: bool
     default: false
@@ -113,7 +113,7 @@ config_schema:
     type: int
     default: 24
     label: "Silence before a check-in (hours)"
-    description: "Doubles for the next silence if a check-in is ignored."
+    description: "Doubles for the next silence if a check-in is ignored. Maximum 8760 (one year)."
   max_rearm_chain:
     type: int
     default: 2
@@ -128,12 +128,12 @@ config_schema:
     type: int
     default: 2
     label: "Slow-down multiplier"
-    description: "How much each slow-down stretches the interval."
+    description: "How much each slow-down stretches the interval. Maximum 100."
   noop_max_backoff_hours:
     type: int
     default: 24
     label: "Longest slowed interval (hours)"
-    description: "Slowing down stops at this interval."
+    description: "Slowing down stops at this interval. Maximum 8760 (one year)."
   suggest_gate_after:
     type: int
     default: 4
@@ -213,6 +213,6 @@ config_schema:
     type: int
     default: 30
     label: "Ledger history (days)"
-    description: "Keep daily wake counts and cost history for this many days."
+    description: "Keep daily wake counts and cost history for this many days. Maximum 36500 (100 years)."
 provides_tools: [pulse]
 provides_hooks: [pre_gateway_dispatch, gateway_platform_event, pre_llm_call, pre_api_request, post_api_request, transform_llm_output, on_session_end, agent_loop_stopped, on_session_reset, kanban_task_completed, kanban_task_blocked, on_kanban_worker_exited, subagent_stop, api_request_error]
