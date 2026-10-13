@@ -15,6 +15,17 @@ class Finding(AssertionError):
 PROGRESS_BUBBLE = re.compile(r"⚙️ pulse(?:\.\.\.|: [^\n]*)?")
 
 
+def record_latency(rig, due_at, wall_offset):
+    """Stand-in Call.at is monotonic; DB due/matched_at is wall time."""
+    received = min(c.at for c in rig.driver.sends(rig.driver.user_id)
+                   if c.at >= due_at-wall_offset and
+                   'WAKE-DELIVERED' in str(c.params.get('text', '')).replace('\\', ''))
+    row = {'cell': rig.name, 'due_or_match_at': due_at,
+           'visible_at': received+wall_offset, 'raw_due_to_visible_s': received-(due_at-wall_offset)}
+    print('E2E_LATENCY '+json.dumps(row, sort_keys=True))
+    return row
+
+
 def busy_case(make_rig, *, mode="queue", command=False, photo=False):
     rig = make_rig(busy=mode)
     # Queue mode makes a later owner turn; steer/redirect fold the owner into the
@@ -38,7 +49,9 @@ def busy_case(make_rig, *, mode="queue", command=False, photo=False):
 
 def test_owner_at_wake_delivers_once(make_rig):
     rig = make_rig()
+    wall_offset = time.time()-time.monotonic()
     wid = rig.arm()
+    due_at = next(w['next_due_at'] for w in rig.rows('wakes') if w['id'] == wid)
     before = rig.visible_ids()
     row = rig.settled(wid)
     shown = [s for s in rig.new_visible(before) if "HeartBeat 2.0:" not in s]
@@ -46,6 +59,7 @@ def test_owner_at_wake_delivers_once(make_rig):
     assert row["state"] == "done" and row["delivered"] == 1, row
     assert len(rig.director.wake_starts) == 1
     assert len(rig.wake_openers()) == 1
+    record_latency(rig, due_at, wall_offset)
     rig.assert_tools_ok()
 
 
@@ -379,6 +393,7 @@ def test_mute_holds_watcher_until_reply(make_rig):
     from tests.fakes.fake_llm_provider import Text, ToolCall
 
     rig = make_rig()
+    wall_offset = time.time()-time.monotonic()
     watched = rig.gateway.home / "watched.log"
     watched.write_text("baseline\n")
     # One owner turn arms both nudges and the watcher, without clearing the
@@ -443,6 +458,7 @@ def test_mute_holds_watcher_until_reply(make_rig):
     assert f"watcher {watcher}" in text and "you hadn't replied" in text, text
     assert "MATCH-LATEST" in text and "MATCH-FIRST" not in text, text
     assert sum("WAKE-DELIVERED" in t for t in rig.new_visible(before)) == 1
+    record_latency(rig, first['matched_at'], wall_offset)
     rig.assert_tools_ok()
 
 

@@ -109,6 +109,12 @@ real prompt-usage route/cache touches, the create tool's cache line, and exactly
 one bounded `Cache:` line in the injected wake text. The fake route has unknown
 TTL; neither test establishes real cache warmth or price.
 
+The owner-at and muted-watcher cells print `E2E_LATENCY` JSON with raw
+due/match-to-visible seconds from the stand-in's receiving timestamp. A sampled
+wall/monotonic offset relates its clock to the DB timestamp. Watcher timing starts
+at the first observed match; designed gate holds are included. No latency
+threshold gates these cells yet; retain stdout to collect the samples.
+
 `test_upstream.py` separately reproduces automatic background review after a
 stock plugin injects a turn. It disables heartbeat2, enables memory/skill tools,
 sets both nudge intervals to one, and leaves background review at its default.

@@ -21,6 +21,7 @@ from heartbeat2.store import Store
 from .clock import FakeClock
 from .injector import FakeInjector
 from .model import ScriptedModel
+from .metrics import TokenModel
 
 
 class Context:
@@ -38,12 +39,13 @@ class FakeGateway:
         self.clock=FakeClock(scenario.get('epoch',1791806400.0))
         self.origin=self.clock.now()
         self.model=ScriptedModel(scenario['model_policy'])
+        self.tokens=TokenModel(scenario)
         self.current_key=''
         self.engines={}; self.injectors={}; self.contexts={}; self.standbys={}
         self.sessions={}; self.refs={}; self.tips={}; self.stopped=False
         self.deliveries=[]; self.turns=[]; self.humans=[]; self.cards=[]; self.command_log=[]; self.trace=[]
         self.pause_fires={}; self.counter=0
-        self.occ_seen={}; self.holds={}; self.lock_violations=[]; self.claim_violations=[]; self.stop_windows=[]
+        self.occ_seen={}; self.holds={}; self.gate_reasons={}; self.lock_violations=[]; self.claim_violations=[]; self.stop_windows=[]
         profiles={x.get('profile','main') for x in scenario.get('sessions',[{'name':'owner'}])}
         for profile in sorted(profiles):
             self.injectors[profile]=FakeInjector(self,profile)
@@ -66,6 +68,7 @@ class FakeGateway:
         ctx=self.contexts[profile]
         store=Store(ctx._manager.home_path/'plugin-data/heartbeat2/pulse.db',self.clock)
         settings={'quiet_hours':'','timezone':'UTC',**self.scenario.get('settings',{})}
+        settings={k:self.expand(v) if isinstance(v,str) else v for k,v in settings.items()}
         settings.update(self.scenario.get('profile_settings',{}).get(profile,{}))
         engine=Poller(ctx,store,Policy.from_settings(settings,clock=self.clock),self.clock,
                       session_key_fn=lambda:self.current_key,paused=lambda:self.stopped,jitter=lambda:0,
@@ -75,6 +78,9 @@ class FakeGateway:
             identity=(profile,w.id,o.dedupe_key)
             self.occ_seen.setdefault(identity,self.t)
             reason,defer,until=real_gate(w,o,s)
+            if self.gate_reasons.get(identity)!=reason:
+                self.trace.append({'t':self.t,'event':'gate','ref':self.ref_for(profile,w.id),'reason':reason})
+                self.gate_reasons[identity]=reason
             holds=self.holds.setdefault(identity,[])
             if defer and reason in {'quiet_hours','busy','wake_spacing','provider_unavailable','session_paused','global_flood'}:
                 if not holds or holds[-1][1] is not None: holds.append([self.t,None])
@@ -105,6 +111,7 @@ class FakeGateway:
                 source=SimpleNamespace(platform=SimpleNamespace(value=session['platform']),chat_type=session['chat_type'],chat_id=session['chat_id'],message_id=mid,is_bot=False)
                 e.intake.pre_gateway_dispatch(event=SimpleNamespace(internal=False,source=source,message_id=mid,text=text))
             if not mid_turn:
+                self.tokens.touch((session['profile'],session['key']),self.t)
                 context=e.intake.pre_llm_call(session_id=session['sid'],turn_id=turn,platform=session['platform'],user_message=text,
                     conversation_history=[{'role':'user','content':text,'platform_message_id':mid}])
                 if context:
@@ -128,10 +135,15 @@ class FakeGateway:
         self.command_log.append({'t':self.t,'session_key':session['key'],'command':text,'result':result})
         return result
 
+    def expand(self,text):
+        return text.replace('$FIXTURES',str(Path(__file__).resolve().parents[1]/'fixtures'))
+
     def arm(self,action):
         name=action.get('session','owner');session=self.sessions[name]; e=self.engine_for(name)
         ref=action['ref']
         if ref in self.refs:raise ValueError('duplicate wake ref')
+        if action.get('owner_turn'):
+            turn=self.human(name,'Please schedule this one-time reminder.',finish=False)
         if 'command' in action:
             before={w.id for w in e.store.list_wakes()}
             result=self.command(name,action['command'])
@@ -140,8 +152,11 @@ class FakeGateway:
             wid=after[0].id
         else:
             args={'action':'create',**action['args']}
-            args=json.loads(json.dumps(args).replace('$HOME',str(e.ctx._manager.home_path)))
+            args=json.loads(self.expand(json.dumps(args)).replace('$HOME',str(e.ctx._manager.home_path)))
             with self.bound(session):result=e.tool.handle(args,session_id=session['sid'])
+            self.trace.append({'t':self.t,'event':'arm_result','ref':ref,'error':result.get('error',''),'detail':result.get('detail','')})
+            if action.get('owner_turn'):e.intake.on_session_end(session_id=session['sid'],turn_id=turn,completed=True)
+            if 'expect_error' in action and not result.get('ok'):return
             if not result.get('ok'):raise ValueError('tool arming failed: '+str(result))
             wid=result['wake']['id']
         self.refs[ref]=(session['profile'],wid)
@@ -162,6 +177,7 @@ class FakeGateway:
         terminal_before=o.state in TERMINAL_OCCURRENCE_STATES
         valid=not terminal_before and o.attempt==attempt and o.state in {'claimed','started'}
         ref=self.ref_for(profile,wid);step=self.model.verdict(ref,valid)
+        tokens=self.tokens.turn((profile,session['key']),self.t)
         with self.bound(session):
             e.intake.pre_llm_call(session_id=sid,turn_id=turn,platform=session['platform'],user_message=item['text'])
             if step.get('compact'):
@@ -186,11 +202,15 @@ class FakeGateway:
             self.turns.append({'t':self.t,'inject_t':item['t'],'session_key':session['key'],'profile':profile,'wake_id':wid,
                               'ref':ref,'occurrence':occ,'attempt':attempt,'valid':valid,'outcome':step['outcome'] if result.get('ok') else 'unreported',
                               'respond':result,'due_t':due,'gates_opened_t':opened,
-                              'lateness_s':max(0,inj-due-held),'deferred_s':held})
+                              'lateness_s':max(0,inj-due-held),'deferred_s':held,'tokens':tokens})
             if text!='[SILENT]':
                 self.deliveries.append({'t':self.t,'session_key':session['key'],'text':text,'wake_id':wid,'ref':ref,
                     'occurrence':occ,'profile':profile,'owner_profile':profile,'prompted':prompted,'wake_message':not prompted,'owner_session_key':w.session_key,'terminal_before':terminal_before})
-            e.intake.post_api_request(session_id=sid,turn_id=turn,usage={'input_tokens':self.scenario.get('context_tokens',150000),'output_tokens':0})
+            for call in range(self.tokens.calls):
+                written=self.tokens.context if call==0 and tokens['est_cache_write_tokens'] else 0
+                e.intake.post_api_request(session_id=sid,turn_id=turn,provider='bench',model='fixture',started_at=self.clock.now(),
+                    usage={'input_tokens':self.tokens.context,'cache_read_tokens':self.tokens.context-written,
+                           'cache_write_tokens':written,'output_tokens':self.tokens.output})
             e.intake.on_session_end(session_id=sid,turn_id=turn,completed=True,platform=session['platform'])
             if step.get('drained_human'):
                 # Hermes drains only after run_conversation finalized the wake.
@@ -244,6 +264,9 @@ class FakeGateway:
                         after=e.policy.checkin_after_hours*3600 if w.trigger_json.get('builtin') else parse_duration(w.trigger_json['after'])
                         times.append(s.last_human_at+after-self.origin)
             # With enabled built-in checkins, one initial tick creates the durable wake.
+            for o in e.store.list_occurrences(state='done'):
+                if o.delivered and o.ended_at is not None and not e.store.get_meta('engaged:'+o.id) and not e.store.get_meta('ignored:'+o.id):
+                    times.append(o.ended_at+e.policy.engagement_window_hours*3600+15-self.origin)
             if e.store.list_occurrences(state='pending') or e.store.list_occurrences(state='claimed'):return self.t+15
         for inj in self.injectors.values():times.extend(x['ready'] for x in inj.queue)
         return min((x for x in times if x>self.t),default=float('inf'))
@@ -275,6 +298,18 @@ class FakeGateway:
             elif not event['on'] and self.stopped: self.stop_windows[-1][1]=self.t
             self.stopped=event['on']
         elif kind=='arm':self.arm(event['arm'])
+        elif kind=='session_state':
+            key=self.sessions[name]['key'];s=e.store.get_session(key)
+            values=event['values'];e.store.cas_session(key,{k:getattr(s,k) for k in values},**values)
+        elif kind=='ledger':
+            if event['ref'] in self.refs:
+                _,wid=self.refs[event['ref']];e.ledger(e.store.get_wake(wid),**event['counts'])
+        elif kind=='provider_failure':e.provider_failure('rate_limit')
+        elif kind=='cache':
+            ttl=event['ttl_s'];route='bench|fixture|'
+            e.store.set_meta('cache_routes',json.dumps({route:{'max_warm_gap':ttl,'min_cold_gap':ttl+1}}))
+            key=self.sessions[name]['key'];s=e.store.get_session(key)
+            e.store.cas_session(key,{'last_route':s.last_route},last_route=route,last_cache_touch_at=self.clock.now())
         elif kind=='external_event':
             with self.bound(self.sessions[name]):e.intake.event(event.get('kind','subagent_done'),session_key=self.sessions[name]['key'],task_id=event.get('task_id','task'))
         elif kind=='file':

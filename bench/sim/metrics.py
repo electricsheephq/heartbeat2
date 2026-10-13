@@ -4,6 +4,27 @@ import math
 import re
 
 SENTINELS=('[SILENT]','HEARTBEAT_OK','NO_REPLY','⟦pulse')
+TOKEN_KEYS=('est_tokens','est_input_tokens','est_cache_read_tokens','est_cache_write_tokens','est_output_tokens')
+
+
+class TokenModel:
+    """Wake cost estimate; owner model turns warm cache without adding wake cost."""
+    def __init__(self,scenario):
+        self.context=scenario.get('context_tokens',150000)
+        self.calls=scenario.get('calls_per_turn',2)
+        self.output=scenario.get('output_tokens_per_call',150)
+        self.ttl=scenario.get('cache_ttl_s',300)
+        self.last={}
+
+    def touch(self,session,t):self.last[session]=t
+
+    def turn(self,session,t):
+        previous=self.last.get(session)
+        warm=previous is not None and t-previous<=self.ttl
+        self.touch(session,t)
+        total=self.calls*self.context;written=0 if warm else self.context
+        return dict(est_tokens=total,est_input_tokens=total,est_cache_read_tokens=total-written,
+                    est_cache_write_tokens=written,est_output_tokens=self.calls*self.output)
 
 
 def percentile(values,p):
@@ -18,7 +39,7 @@ def latency_samples(turns):
             [x.get('deferred_s',0) for x in rows])
 
 
-def compute(scenario,log,turns,humans,snapshot,pause_fires,cards,message_attempts=None):
+def compute(scenario,log,turns,humans,snapshot,pause_fires,cards,message_attempts=None,observations=()):
     wake_messages=[d for d in log if d['wake_message']]
     seen=set();duplicates=0
     for delivery in log:
@@ -47,7 +68,7 @@ def compute(scenario,log,turns,humans,snapshot,pause_fires,cards,message_attempt
              'resent_messages':sum(m['retry'] for m in message_attempts or []),
              'msgs_per_silence_episode':max(episodes.values(),default=0),'model_wakes':len(turns),
              'noop_model_wakes':noops,'noop_ratio':noops/len(turns) if turns else 0,
-             'est_tokens':len(turns)*scenario.get('context_tokens',150000),
+             **{key:sum(t['tokens'][key] for t in turns) for key in TOKEN_KEYS},
              'sentinel_leaks':leaks,'wrong_destination':wrong,'max_burst_per_min':burst,
              'lateness_p50_s':percentile(lateness,.5),'lateness_p95_s':percentile(lateness,.95),
              'deferred_p50_s':percentile(deferred,.5),'deferred_p95_s':percentile(deferred,.95),
@@ -71,6 +92,10 @@ def compute(scenario,log,turns,humans,snapshot,pause_fires,cards,message_attempt
                  ('wake_message' not in banned or d['wake_message']==banned['wake_message'])]
         if matches:failures.append(f'forbidden_deliveries {banned}: {len(matches)}')
     wakes=[w for p in snapshot.values() for w in p['wakes']]
+    for observation in expect.get('observations',[]):
+        matches=[x for x in observations if all(x.get(k)==v for k,v in observation.items() if k!='window')
+                 and ('window' not in observation or observation['window'][0]<=x['t']<=observation['window'][1])]
+        if not matches:failures.append(f'missing observation {observation}')
     for ref,bar in expect.get('bars',{}).items():
         rows=[d for d in log if d['ref']==ref and d['wake_message']]
         started=[t for t in turns if t['ref']==ref and t.get('valid',True)]
@@ -81,5 +106,10 @@ def compute(scenario,log,turns,humans,snapshot,pause_fires,cards,message_attempt
         if 'status' in bar:
             found=[w for w in wakes if w.get('ref')==ref]
             if len(found)!=1 or found[0]['status']!=bar['status']:failures.append(f'{ref}: status mismatch (required {bar["status"]})')
+        for field,value in bar.get('wake_fields',{}).items():
+            found=[w for w in wakes if w.get('ref')==ref]
+            if len(found)!=1 or found[0].get(field)!=value:failures.append(f'{ref}: {field} mismatch (required {value})')
+        for field,value in bar.get('turn_fields',{}).items():
+            if not started or any(t.get(field)!=value for t in started):failures.append(f'{ref}: turn {field} mismatch (required {value})')
     if 'cards' in expect and len(cards)!=expect['cards']:failures.append(f'cards={len(cards)} (required {expect["cards"]})')
     return metrics,failures
