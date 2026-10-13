@@ -34,3 +34,7 @@ Round 1 is final as recorded; these changes apply only to later rounds.
   "end or pause" wording. Round 1's scorer counted only cancelled or paused wakes.
 - Blind packets add `evidence`: the wake turn's event payloads and non-pulse tool results. Without it, the judge flagged
   facts that the wake had in fact received (an inbox result, a lookup result) as fabricated.
+- Expected tokens and their alternatives must start at a word boundary, so `CI` does not match "specific".
+- B2-1 and B2-2 are rule bars: a merged verdict can only fail them. B2-3 still needs verdicts.
+- Each cell records `upstream` (`live` or `fake`). Fake cells never count toward completeness, so a fake run leaves every bar PENDING.
+- Quota means two actual 429 responses for one request. A 429 that follows a 5xx retry does not stop the run.

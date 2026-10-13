@@ -39,6 +39,7 @@ class Upstream:
         request.pop('stream_options', None)
         injected = bool(self.fail_plan and self.wake and
                         body.get('model') == self.fail_plan['primary'])
+        rate_limited = 0
         for attempt in range(2):
             started = time.monotonic()
             retry_after = None
@@ -60,17 +61,18 @@ class Upstream:
                         response = {'error': {'message': raw[:500].decode('utf-8', 'replace')}}
                 except (URLError, TimeoutError) as exc:
                     status, response = 502, {'error': {'message': f'upstream unreachable: {type(exc).__name__}'}}
+            rate_limited += status == 429
             with self.lock:
                 row = {'scenario': self.scenario, 'rep': self.rep, 'path': self.path,
                        'request': request, 'response': response, 'status': status,
                        'usage': response.get('usage', {}), 'elapsed': time.monotonic() - started,
                        'wake': self.wake, 'injected': injected,
-                       'run_status': 'QUOTA' if status == 429 and attempt else 'CALL'}
+                       'run_status': 'QUOTA' if rate_limited == 2 else 'CALL'}
                 self.record_path.parent.mkdir(parents=True, exist_ok=True)
                 with self.record_path.open('a') as stream:
                     stream.write(json.dumps(row) + '\n')
                 self.rows.append(row)
-            if status == 429 and attempt:
+            if rate_limited == 2:  # two actual 429s, not a 429 after some other failure
                 self.quota = True
             if injected or attempt or not (status == 429 or status >= 500):
                 return response, status

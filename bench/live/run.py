@@ -45,6 +45,13 @@ def fake_reply(scenario, record):
     return Text(' '.join(token.split('|')[0] for token in scenario['expect']) or 'Nothing new.')
 
 
+def tool_arguments(call):
+    try:
+        return json.loads(call['function']['arguments'])
+    except (TypeError, ValueError):  # malformed model arguments are a finding, not a crash
+        return {'unparsed': str(call['function'].get('arguments'))[:500]}
+
+
 def cell(args, scenario, rep):
     parent = Path(tempfile.mkdtemp(prefix='hb-live-parent-'))
     os.environ.update(HOME=str(parent), HERMES_HOME=str(parent / '.hermes'),
@@ -102,7 +109,7 @@ def cell(args, scenario, rep):
     rig.wait = wait
     result = {'scenario': scenario['id'], 'rep': rep, 'path': args.path,
               'history': scenario['history'], 'wake_note': scenario['arm']['note'],
-              'status': 'PENDING', 'delivered': []}
+              'status': 'PENDING', 'delivered': [], 'upstream': args.upstream if args.upstream == 'fake' else 'live'}
     code = 0
     try:
         # The helper strips conventional secret names; also protect arbitrary key-env names.
@@ -187,7 +194,7 @@ def cell(args, scenario, rep):
             if fake:
                 fake.stop()
         calls = rig.llm.main_requests()
-        pulse = {c['id']: json.loads(c['function']['arguments']) for b in calls
+        pulse = {c['id']: tool_arguments(c) for b in calls
             for m in b.get('messages', []) if m['role'] == 'assistant'
             for c in m.get('tool_calls', []) if c['function']['name'] == 'pulse'}
         result['pulse_calls'] = list(pulse.values())

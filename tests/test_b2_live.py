@@ -73,10 +73,13 @@ def test_forwarder_and_fault_fallback(server, monkeypatch, tmp_path):
     statuses[:] = [503, 200]
     assert up.forward(body)[1] == 200 and len(seen) == 3
     assert seen[-1][2]['model'] == 'up-primary'
+    statuses[:] = [503, 429]  # one 429 after another failure is not quota
+    assert up.forward(body)[1] == 429 and not up.quota
+    assert up.rows[-1]['run_status'] == 'CALL'
     statuses[:] = [429, 429]
     assert up.forward(body)[1] == 429 and up.quota
     assert up.rows[-1]['run_status'] == 'QUOTA'
-    assert up.forward(body)[1] == 429 and len(seen) == 5
+    assert up.forward(body)[1] == 429 and len(seen) == 7
 
 
 def test_director_routes_without_importing_hermes(monkeypatch):
@@ -184,6 +187,8 @@ def test_scoring_files_and_blind_merge(tmp_path):
     with pytest.raises(ValueError):
         merge(score, [verdict | {'stale': 'false'}])
     assert score_results(results[:1], definitions())['paths']['P1']['bars']['B2-1'] == 'PENDING'
+    fake = [r | {'upstream': 'fake'} for r in results]
+    assert all(v == 'PENDING' for k, v in score_results(fake, definitions())['paths']['P1']['bars'].items() if k != 'B2-5')
     results[0]['delivered'].append('Model fallback: primary unavailable')
     rule_score = score_results(results, definitions())['paths']['P1']['bars']
     assert rule_score['B2-1'] == 'PASS' and rule_score['B2-2'] == 'FAIL'
@@ -208,6 +213,10 @@ def test_round2_paraphrase_tokens_and_session_off_stop():
     from bench.live.score import token_present, wake_set_ended
     assert token_present('CI|build', 'The build failed.') and not token_present('CI|build', 'Tests went red.')
     assert token_present('failed|failure|failing', '3 failures, all timeouts')
+    assert not token_present('CI|build', 'a specific failure') and not token_present('42', 'total 142')
+    from bench.live.run import tool_arguments
+    assert tool_arguments({'function': {'arguments': '{"notify": true'}}) == {'unparsed': '{"notify": true'}
+    assert tool_arguments({'function': {'arguments': '{"notify": true}'}}) == {'notify': True}
     assert wake_set_ended([{'status': 'failed', 'status_reason': 'skipped:session_off'}])
     assert wake_set_ended([{'status': 'cancelled'}]) and not wake_set_ended([{'status': 'done'}])
     assert not wake_set_ended([])
