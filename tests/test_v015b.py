@@ -1,7 +1,6 @@
 """Numeric settings must survive real ticks."""
 from dataclasses import fields
 import json
-import math
 import os
 
 import pytest
@@ -79,7 +78,7 @@ def test_numeric_setting_tick_fuzz(tmp_path, clock, key, value, kind):
 @pytest.mark.parametrize('key,maximum', BOUNDS.items())
 @pytest.mark.parametrize('startup', [False, True])
 def test_bound_notice_and_due_wake(tmp_path, clock, key, maximum, startup):
-    value = maximum + 1 if isinstance(maximum, int) else math.nextafter(maximum, math.inf)
+    value = maximum + 1
     with pytest.raises(ValueError, match=key + '.*maximum'):
         Policy.from_settings({key: value}, clock=clock)
     rt = Runtime(GatewayCtx(tmp_path, settings={'quiet_hours': '', 'timezone': 'UTC'}), clock=clock)

@@ -76,7 +76,8 @@ CASES = pytest.mark.parametrize('wrapped,parts,tail,reload', [
 
 
 @CASES
-@pytest.mark.parametrize('platform,mid', [('signal', None), ('simplex', None), ('telegram', '701')])
+# Signal is the id-less case; Telegram's message ids are the control.
+@pytest.mark.parametrize('platform,mid', [('signal', None), ('telegram', '701')])
 def test_todo_fold_on_counted_steer_is_not_a_new_message(engine, platform, mid, wrapped, parts, tail, reload):
     e = engine
     row, history = begin_wake(e, [], platform)

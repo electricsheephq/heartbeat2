@@ -78,6 +78,28 @@ def row_text(content):
     return ''
 
 
+# tools/todo_tool.py TODO_INJECTION_HEADER, identical at v0.21.6, v0.21.7 and main
+# 04eb00c. After a compaction Hermes appends the live task list to the trailing real
+# user row (conversation_compression._fold_todo_snapshot) and strips it again at the
+# next boundary, so the snapshot is never part of what the owner wrote.
+TODO_HEADER='[Your active task list was preserved across context compression]'
+
+
+def owner_text(content):
+    """Row text without a todo snapshot (as Hermes' _strip_stale_todo_snapshot) or trailing space."""
+    if isinstance(content,list):
+        kept=[]
+        for part in content:
+            text=part.get('text') if isinstance(part,dict) and part.get('type')=='text' else None
+            idx=text.find(TODO_HEADER) if isinstance(text,str) else -1
+            if idx==-1: kept.append(part)
+            elif text[:idx].rstrip(): kept.append({**part,'text':text[:idx].rstrip()})
+        content=kept
+    elif isinstance(content,str) and TODO_HEADER in content:
+        content=content[:content.find(TODO_HEADER)]
+    return row_text(content).rstrip()
+
+
 COMPACTION_MARKERS = ('--- END OF CONTEXT SUMMARY', '[STILL IN PROGRESS — this is the active request')
 STEER_COMMAND = re.compile(r'^/(steer|s)(@\S+)?(\s|$)',re.I)
 
@@ -87,7 +109,7 @@ def origin_rows(history):
         if not isinstance(row,dict) or row.get('role')!='user': continue
         # Compaction rewrites carried rows in place; a rewrite is not new owner text.
         if row.get('_compressed_summary'): continue
-        text=row_text(row.get('content',''))
+        text=owner_text(row.get('content',''))
         if ORIGIN in text and not any(m in text for m in COMPACTION_MARKERS):
             yield hashlib.sha256(text.encode()).hexdigest()[:16],text
 
@@ -331,7 +353,7 @@ class Intake:
         if not parsed:
             row=conversation_history[-1] if conversation_history else None
             if isinstance(row,dict) and row.get('role')=='user' and not row.get('display_kind'):
-                text=row_text(row.get('content',''))
+                text=owner_text(row.get('content',''))
                 if not text.startswith(GOAL_PREFIXES) and not pulse_command(text):
                     if ORIGIN in text:
                         owner_seen=True
