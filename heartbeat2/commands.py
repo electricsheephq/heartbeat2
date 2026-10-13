@@ -10,7 +10,7 @@ from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible
 
-DURATIONS = _DURATION.pattern+r'(?:\s*(?:,|and)?\s*'+_DURATION.pattern+r')*'
+DURATIONS = _DURATION.pattern+r'(?:\s*,?\s*(?:and\s*)?'+_DURATION.pattern+r')*'
 HELP = ('/pulse status | list | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
         'pause|resume|cancel <id|all> [for 3d] | off|on | '

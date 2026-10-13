@@ -30,7 +30,7 @@ def test_duration_aliases(units, seconds):
         assert parse_duration(prefix+'2'+space+unit.upper()) == 2*seconds
 
 
-@pytest.mark.parametrize('text', ['1 hour and 30 minutes', '1h, 30m',
+@pytest.mark.parametrize('text', ['1 hour and 30 minutes', '1h, 30m', '1 hour, and 30 minutes', '1h ,and 30m',
     '1 hour 30 minutes', 'in 1 HR AND 30 MINS', '+1hour30minutes'])
 def test_duration_parts(text):
     assert parse_duration(text) == 5400
@@ -119,7 +119,7 @@ def test_duration_consumers_through_tool(engine, trigger, extra, field, seconds)
 
 
 @pytest.mark.parametrize('text,seconds', [('in 10minutes', 600), ('in 10 minutes', 600),
-    ('in 1 hour and 30 minutes', 5400), ('22:22', None)])
+    ('in 1 hour and 30 minutes', 5400), ('in 1 hour, and 30 minutes', 5400), ('22:22', None)])
 def test_command_add_natural_time(engine, command, text, seconds):
     response = command('add '+text+' Check the report.')
     assert not response.startswith('Error:'), response
