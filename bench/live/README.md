@@ -30,7 +30,7 @@ injected P3 faults go directly to Hermes fallback. HTTP timeout is 180 seconds.
 Every cell has its own subprocess, PulseRig, home, stand-in and plugin copy.
 Seeding and arming are scripted; only wakes, their continuations and L8's stop
 turn are forwarded. Relative seconds compress waiting without changing clocks:
-L1 represents the 17:00 reminder with a five-second owner timer; L2 changes a
+L1 is an owner reminder ("call the bank before it closes") on a five-second owner timer; L2 changes a
 file probe from green to red; L3 leaves its file unchanged and fires its deadline;
 L4 arms before seeding resolution; L5 delivers a scripted prior wake without an owner reply;
 L6 has empty facts; L7 inserts a scoped subagent completion inbox event;
