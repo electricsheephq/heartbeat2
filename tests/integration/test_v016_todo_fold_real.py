@@ -75,9 +75,9 @@ def test_real_fold_keeps_counted_steer_once(hermes, engine, wrapped, parts, tail
     assert TODO_HEADER not in str(rows[-2]['content']) and TODO_HEADER in str(rows[-1]['content'])
     api(e, rows)
     # On string content that strip uses rstrip(), so a plain row ending in whitespace
-    # changes and is recounted once (v0.1.5 recounted it at every fold). List content
-    # loses only the snapshot part.
-    assert humans(e) == (3 if tail and not wrapped and not parts else 2)
+    # changes. v0.1.6 recounted it once; the row is now tracked as the same dict, so a
+    # rewrite that adds no ORIGIN block is never a new owner message.
+    assert humans(e) == 2
 
 
 @pytest.mark.parametrize('parts', [False, True], ids=['text', 'parts'])
@@ -144,4 +144,8 @@ def test_real_repair_merging_bare_text_after_a_snapshot_counts(hermes, engine):
     rows, repairs = hermes[2]._merge_consecutive_users(rows)
     assert repairs == 1 and rows[-1]['content'].endswith('and roll back if red')
     api(e, rows)
-    assert humans(e) == 2
+    # On gateway messaging platforms every mid-turn owner message is ORIGIN-wrapped
+    # (all steer and redirect paths pass their event to _steer_text_with_origin). A bare
+    # row merged into a tracked owner row is internal text, like the wake row Hermes
+    # merges into an unanswered owner row, and is not counted.
+    assert humans(e) == 1
