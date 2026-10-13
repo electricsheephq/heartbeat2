@@ -88,7 +88,9 @@ def _parse_at(value: str, *, now: float, timezone: str | tzinfo) -> float:
         hour, minute = _hm(clock[1].zfill(5) if clock else text.split(maxsplit=1)[1])
         date = datetime.fromtimestamp(now, tz).date() + timedelta(days=0 if clock else 1)
         local = datetime(date.year, date.month, date.day, hour, minute)
-        if clock and _local_instant(local, tz) <= now: local += timedelta(days=1)
+        if clock:  # today's first fold, its repeated fold, else tomorrow
+            return next(t for t in (_local_instant(local, tz), _local_instant(local, tz, later=True),
+                                    _local_instant(local + timedelta(days=1), tz)) if t > now)
     else:
         local = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if local.tzinfo is not None:

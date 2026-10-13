@@ -311,12 +311,15 @@ class Tool:
                      (w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind in TIME_KINDS else
                      w.deadline_at if w.deadline_at is not None else w.next_due_at if w.kind in PROBE_KINDS and w.next_due_at is not None else e.clock.now())
                 due=max(due,e.clock.now())
+                skip=w.kind in RECURRING_KINDS  # Poller.gate drops a recurring tick in quiet hours before spacing
+                release=quiet_until(e,w.session_key,urgent=w.urgent,now=due) if skip else None
+                if release and release>due: parts.append(f'Quiet hours skip its ticks until {local(release)}.'); due=release
                 if p.wake_spacing_minutes>0 and s.last_wake_turn_at is not None:
                     spacing=s.last_wake_turn_at+p.wake_spacing_minutes*60
                     if spacing>due: parts.append(f'Wake spacing holds it until {local(spacing)}.')
                     due=max(due,spacing)
                 release=quiet_until(e,w.session_key,urgent=w.urgent,now=due)
-                if release and release>due: parts.append(f'Quiet hours {"skip its ticks" if w.kind in RECURRING_KINDS else "hold it"} until {local(release)}.')
+                if release and release>due: parts.append(f'Quiet hours {"skip its ticks" if skip else "hold it"} until {local(release)}.')
             if not owner_class(w) and s.unanswered_count>=p.max_unanswered:
                 parts.append('Muted: it waits for your reply.' if watcher else 'Muted: it is dropped unless you reply first.')
             if p.wake_spacing_minutes>0 and (w.kind in TIME_KINDS or watcher or w.kind=='owner_silent'):

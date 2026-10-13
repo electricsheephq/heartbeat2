@@ -10,6 +10,7 @@ from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible
 
+DURATIONS = _DURATION.pattern+r'(?:\s*(?:,|and)?\s*'+_DURATION.pattern+r')*'
 HELP = ('/pulse status | list | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
         'pause|resume|cancel <id|all> [for 3d] | off|on | '
@@ -103,15 +104,21 @@ def _ledger(engine, key, days):
 
 
 def _add(engine, session, text):
-    clock = re.fullmatch(r'(\d{1,2}:\d{2})\s+(.+)', text, re.DOTALL)
-    part = _DURATION.pattern
-    match = re.fullmatch(r'in (?P<duration>'+part+r'(?:\s*(?:,|and)?\s*'+part+r')*)\s+(?P<note>.+)', text, re.I|re.DOTALL)
-    if clock or match:
-        trigger, note = ({'kind':'at','at':clock[1]}, clock[2]) if clock else ({'kind':'at','at':'in '+match['duration']}, match['note'])
+    clock = re.fullmatch(r'(\d{1,2}):(\d{2})(?:\s*([ap])\.?m\b\.?)?\s+(.+)', text, re.I|re.DOTALL)
+    match = re.fullmatch(r'in (?P<duration>'+DURATIONS+r')\s+(?P<note>.+)', text, re.I|re.DOTALL)
+    if clock:
+        hour = int(clock[1])
+        if not clock[3] and re.match(r'[ap]\.?m\b', clock[4], re.I): raise ValueError('add a note after the time')
+        if clock[3]:
+            if not 1 <= hour <= 12: raise ValueError('use 1:30pm or 13:30, not both')
+            hour = hour%12+(12 if clock[3].lower()=='p' else 0)
+        trigger, note = {'kind':'at','at':f'{hour:02d}:{clock[2]}'}, clock[4]
+    elif match:
+        trigger, note = {'kind':'at','at':'in '+match['duration']}, match['note']
     else:
-        match = re.fullmatch(r'every (\S+)\s+(.+)', text, re.DOTALL)
+        match = re.fullmatch(r'every (?P<duration>'+DURATIONS+r'|\S+)\s+(?P<note>.+)', text, re.I|re.DOTALL)
         if match:
-            trigger, note = {'kind':'every','every':match[1]}, match[2]
+            trigger, note = {'kind':'every','every':match['duration']}, match['note']
             if re.match(r'at\s+\d',note):
                 anchor=re.fullmatch(r'at\s+(\d{1,2})(?::(\d{2}))?(?:\s*(am|pm)\b)?\s+(.+)',note,re.I|re.DOTALL)
                 if not anchor or anchor[2] is None and anchor[3] is None:
@@ -123,10 +130,10 @@ def _add(engine, session, text):
                 trigger['at']=f'{hour:02d}:{minute:02d}'
                 note=anchor[4]
         else:
-            match = re.fullmatch(r'when silent (\S+) (.+)', text, re.DOTALL)
+            match = re.fullmatch(r'when silent (?P<duration>'+DURATIONS+r'|\S+)\s+(?P<note>.+)', text, re.I|re.DOTALL)
             if not match: raise ValueError('use add in 2h <note>, add 16:30 <note>, every 1d at 09:00 <note>, or when silent 24h <note>')
-            parse_duration(match[1])
-            trigger, note = {'kind':'owner_silent','after':match[1]}, match[2]
+            parse_duration(match['duration'])
+            trigger, note = {'kind':'owner_silent','after':match['duration']}, match['note']
     wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command',
         platform=session.platform, chat_type=session.chat_type, chat_id=session.chat_id,
         armed_session_id=session.current_session_id, title=note[:80])

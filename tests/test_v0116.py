@@ -1,6 +1,6 @@
 """Natural schedules, actionable refusals, and recurring receipt holds."""
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
 import math
@@ -203,23 +203,58 @@ def test_other_malformed_inputs_do_not_leak_python_errors(engine, args):
 
 
 @pytest.mark.parametrize('kind', ['every', 'cron', 'self'])
-@pytest.mark.parametrize('hold', ['spacing', 'quiet', 'neither', 'both'])
-def test_recurring_receipt_names_holds(engine, kind, hold):
-    now = night(engine, 21 if hold in {'quiet','both'} else 8)
-    engine.policy = replace(engine.policy, wake_spacing_minutes=180 if hold in {'spacing','both'} else 10)
-    session(engine, last_wake_turn_at=now if hold in {'spacing','both'} else now-3600)
-    result = create(engine, {'kind':kind, **({'cron':'0 22 * * *' if hold in {'quiet','both'} else '0 9 * * *'}
+@pytest.mark.parametrize('hold,spacing,lines', [
+    ('neither', 10, []), ('spacing', 180, ['spacing']), ('quiet', 10, ['quiet']),
+    # Poller.gate drops a recurring tick in quiet hours before spacing is checked:
+    # spacing that ends inside quiet hours is not named; spacing past them is.
+    ('quiet', 180, ['quiet']), ('quiet', 720, ['quiet', 'spacing'])])
+def test_recurring_receipt_names_holds(engine, kind, hold, spacing, lines):
+    now = night(engine, 21 if hold == 'quiet' else 8)
+    engine.policy = replace(engine.policy, wake_spacing_minutes=spacing)
+    session(engine, last_wake_turn_at=now if spacing > 10 else now-3600)
+    result = create(engine, {'kind':kind, **({'cron':'0 22 * * *' if hold == 'quiet' else '0 9 * * *'}
                     if kind == 'cron' else {'every':'1h'})})
     assert result.get('ok'), result
     text = receipt(result)
-    assert ('Wake spacing holds' in text) is (hold in {'spacing','both'})
-    assert ('Quiet hours skip its ticks' in text) is (hold in {'quiet','both'})
+    found = [x for x, key in (('spacing', 'Wake spacing holds'), ('quiet', 'Quiet hours skip its ticks'))
+             if key in text]
+    assert sorted(found) == sorted(lines), text
     assert 'Quiet hours hold' not in text  # recurring ticks in quiet hours are skipped, not held
-    if hold in {'spacing','both'}:
-        assert f'Wake spacing holds it until {local(engine, now+3*3600)}.' in text
-    if hold in {'quiet','both'}:
+    if 'spacing' in lines:
+        assert f'Wake spacing holds it until {local(engine, now+spacing*60)}.' in text
+    if 'quiet' in lines:
         assert f'Quiet hours skip its ticks until {local(engine, now+11*3600)}.' in text
-    if hold == 'both': assert text.index('Wake spacing holds') < text.index('Quiet hours skip')
+    if len(lines) == 2: assert text.index('Quiet hours skip') < text.index('Wake spacing holds')
+
+
+@pytest.mark.parametrize('now,expected', [
+    ('2025-11-02T01:45:00-04:00', '2025-11-02T01:30:00-05:00'),  # between the two 01:30s
+    ('2025-11-02T01:00:00-05:00', '2025-11-02T01:30:00-05:00'),  # inside the repeated hour
+    ('2025-11-02T01:45:00-05:00', '2025-11-03T01:30:00-05:00'),  # both have passed
+    ('2025-11-02T01:15:00-04:00', '2025-11-02T01:30:00-04:00')])  # before the first
+def test_clock_takes_the_repeated_fold_before_tomorrow(now, expected):
+    assert parse_at('01:30', now=ts(now), timezone='America/New_York') == ts(expected)
+
+
+@pytest.mark.parametrize('text,check', [
+    ('every 2 hours Check CI', lambda w: w.base_interval_s == 7200),
+    ('every 1h, 30m Check CI', lambda w: w.base_interval_s == 5400),
+    ('when silent 1 hour Check in', lambda w: w.trigger_json['after'] == '1 hour'),
+    ('1:30 pm Take medicine', lambda w: datetime.fromtimestamp(w.next_due_at, timezone.utc).strftime('%H:%M') == '13:30'),
+    ('12:05 a.m. Take medicine', lambda w: datetime.fromtimestamp(w.next_due_at, timezone.utc).strftime('%H:%M') == '00:05'),
+    ('9:00 Make tea', lambda w: w.note == 'Make tea'),
+])
+def test_command_add_natural_every_silence_and_meridiem(engine, command, text, check):
+    response = command('add '+text)
+    assert not response.startswith('Error:'), response
+    w, = engine.store.list_wakes(KEY)
+    assert check(w), (response, w)
+
+
+@pytest.mark.parametrize('text', ['13:30 pm Take medicine', '1:30 pm', '0:30 am Take medicine'])
+def test_command_add_refuses_bad_meridiem(engine, command, text):
+    assert command('add '+text).startswith('Error:')
+    assert engine.store.list_wakes(KEY) == []
 
 
 def test_version_changelog_and_skill():
