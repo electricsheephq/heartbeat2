@@ -21,10 +21,18 @@ The bars below are frozen once this file merges. The soak code that runs them co
 - **Frozen during the soak:** the plugin version, the plugin's settings, the model and the gateway's plugin set. A change aborts the run (see Voids).
 - **Scripted owner:** a runner sends from the owner's Telegram account through a user client, so the gateway sees ordinary owner messages.
 - **Hours:** the first send is at 08:30 or later, every due time is at 21:30 or earlier, and every episode window closes by 21:45 (profile timezone). No episode crosses quiet hours (default 22:00–08:00).
-- **Schedule:**
-  - generated once before day 1 from a registered seed;
-  - its SHA-256 is recorded in the run declaration;
-  - episodes never overlap: the next send comes at least 5 minutes after the previous window closes.
+- **Schedule:** deterministic from the registered seed **20261014**.
+  - The generator is code committed to this repository and reviewed before day 1. The run declaration records the generator's commit, the seed, the first day's date and the schedule's SHA-256. The scorer regenerates the schedule and refuses a mismatch.
+  - **Draw order:**
+    - Day `d` (1–7) draws from Python's `random.Random(f"20261014:{d}")`. Global choices draw from `random.Random("20261014:0")`, in this order:
+      - the 4 C-reply days, `sample(range(1, 8), 4)`;
+      - the R kind for days 3 and 6, `choice` per day;
+      - the task order, one `shuffle` of the 14 tasks, each used exactly once by the 14 reminder requests in schedule order.
+    - Each day shuffles its episode list with `shuffle`, keeping S last, then draws its placeholders in episode order (`choice` from each listed set; HH:MM offsets and flip delays by `randint` over the listed minute ranges, rounded where stated).
+  - **Timing:**
+    - The first send is at 08:30. Each later send comes after the previous window's latest close plus a gap drawn by `randint(5, 30)` minutes.
+    - If the day would end after 21:45, the gaps shrink to 5 minutes. If it still does not fit, generation fails; no episode is silently dropped.
+  - **No overlap:** episodes never overlap; the next send comes at least 5 minutes after the previous window's latest close.
   - **Unlike B2, nothing is compressed:** a 60-minute reminder waits 60 real minutes.
 
 ## Evidence the runner keeps
@@ -132,7 +140,7 @@ A delivery is a bot message in the DM, matched to a wake turn:
   - the third M delivery happens with the stored unanswered count ≥ 2.
 - **B3-7 truthful arming:** in all arming replies (judged blind with the turn's `pulse` results and `receipt`):
   - 0 `overpromise`, meaning the reply promises a time or certainty the receipt does not support;
-  - 0 "set" claims after a refused create (rule check as in B2-9).
+  - 0 "set" claims in a turn that ends without a successful matching create (rule check as in B2-9). A refused call followed by a successful matching create in the same turn may truthfully say it is set.
 - **B3-8 content:**
   - every R, M and W delivery contains its task match term;
   - C-silent and S deliveries are judged on whether they perform the requested check-in;
@@ -170,7 +178,7 @@ Rules:
 
 - **Packets:** blind packets for every arming reply and every delivery.
   - Arming replies carry the owner message, the visible text, and the turn's `pulse` results and `receipt`.
-  - Deliveries carry the request, the stored due time and the visible text.
+  - Deliveries carry the request, the stored due time and the visible text. W deliveries also carry the wake turn's file-event payload and the runner's logged flip, so a statement that the job reached `DONE` can be checked.
 - **Verdict fields:** `useful`, `fabrication`, `narration`, `overpromise`.
 - The judge is a different model family from the profile's model.
 - The release owner spot-checks every judge FAIL against its transcript.
