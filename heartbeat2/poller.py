@@ -130,8 +130,8 @@ class Poller:
                     s.set_meta('recovered:'+o.id,'1')
                 elif o.state=='started': self.interrupt(o,'restart')
             for session in s.list_sessions() if self.process_start else []:
-                if session.busy_since is not None and session.busy_since<self.boot_at:
-                    s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
+                if session.busy_since is not None and session.busy_epoch not in LOCAL_EPOCHS:
+                    s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             # Persisted future deadlines remain future. time_due() coalesces
             # genuinely overdue intervals at the next tick without changing them
             # during process admission.
@@ -275,7 +275,7 @@ class Poller:
             self.interrupt(o,'no_session_end')
         for session in s.list_sessions():
             if session.busy_since is not None and now-max(session.busy_since,session.last_activity_at or 0)>=ttl:
-                s.cas_session(session.session_key,{'busy_since':session.busy_since,'last_activity_at':session.last_activity_at},busy_since=None)
+                s.cas_session(session.session_key,{'busy_since':session.busy_since,'last_activity_at':session.last_activity_at},busy_since=None,busy_epoch=None)
         for o in s.list_occurrences(state='claimed'):
             if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
@@ -620,8 +620,8 @@ class Poller:
             self.end_max_fires(s.get_wake(w.id))
             if provider and not s.get_meta('provider_health'): self.provider_failure(provider)
             session=s.get_session(w.session_key)
-            if session and not (cause=='restart' and session.busy_since is not None and session.busy_since>=self.boot_at):
-                s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
+            if session and not (cause=='restart' and session.busy_epoch in LOCAL_EPOCHS):
+                s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             return True
 
     @staticmethod

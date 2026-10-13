@@ -180,7 +180,7 @@ class Store:
                         'held_reason':"TEXT NOT NULL DEFAULT ''", 'held_matches':'INTEGER NOT NULL DEFAULT 0', 'api_calls':'INTEGER NOT NULL DEFAULT 0'}}
                 for table in ('wakes','occurrences','ledger'):
                     additions[table].update({k:'INTEGER NOT NULL DEFAULT 0' for k in CACHE_FIELDS})
-                additions['sessions'] = {'last_cache_touch_at':'REAL','last_route':"TEXT NOT NULL DEFAULT ''",
+                additions['sessions'] = {'busy_epoch':'TEXT','last_cache_touch_at':'REAL','last_route':"TEXT NOT NULL DEFAULT ''",
                     'last_prompt_tokens':'INTEGER NOT NULL DEFAULT 0','last_cache_hit_ratio':'REAL NOT NULL DEFAULT 0','last_cache_api_mode':"TEXT NOT NULL DEFAULT ''"}
                 for table, new_columns in additions.items():
                     existing = {row[1] for row in self.connection.execute(f'PRAGMA table_info({table})')}

@@ -398,7 +398,7 @@ class Intake:
         now=e.clock.now()
         with s.atomic():
             session=s.get_session(key)
-            s.cas_session(key,{'current_session_id':session.current_session_id},current_session_id=session_id,busy_since=now,last_activity_at=now)
+            s.cas_session(key,{'current_session_id':session.current_session_id},current_session_id=session_id,busy_since=now,busy_epoch=e.epoch,last_activity_at=now)
             if not parsed and not owner_seen and isinstance(user_message,str) and RESUME_NOTE.fullmatch(user_message.strip()):
                 history=list(conversation_history or [])
                 internal=False
@@ -427,7 +427,7 @@ class Intake:
                         if o.attempt==attempt and o.state=='started':
                             e.interrupt(o,'restart')
                             w=s.get_wake(wid)
-                            s.cas_session(key,{'busy_since':None},busy_since=now)  # this replay turn is running
+                            s.cas_session(key,{'busy_since':None},busy_since=now,busy_epoch=e.epoch)  # this replay turn is running
                         self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,invalid=True,replay=True)
                         stamp='resumed_turn:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
                         updates={'model_turns':w.model_turns+1}
@@ -661,7 +661,7 @@ class Intake:
         with s.atomic():
             session=s.get_session(key)
             if session:
-                s.cas_session(key,{'busy_since':session.busy_since},busy_since=None)
+                s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             self.flights.pop(session_id,None)
             if f is None or f.invalid: return None
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
@@ -707,7 +707,7 @@ class Intake:
                 if w.trigger_json.get('builtin') and w.armed_session_id==old:
                     s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=new_session_id)
                     session=s.get_session(w.session_key)
-                    if session: s.cas_session(w.session_key,{'current_session_id':session.current_session_id},current_session_id=new_session_id,busy_since=None)
+                    if session: s.cas_session(w.session_key,{'current_session_id':session.current_session_id},current_session_id=new_session_id,busy_since=None,busy_epoch=None)
                     continue
                 if w.armed_session_id==old and w.status in {'active','paused','proposed'}:
                     s.cas_wake(w.id,w.status,status='orphaned',status_reason='session_reset')
@@ -715,7 +715,7 @@ class Intake:
                     keys.add(w.session_key)
             for key in keys:
                 session=s.get_session(key)
-                if session: s.cas_session(key,{'current_session_id':session.current_session_id},current_session_id=new_session_id,busy_since=None)
+                if session: s.cas_session(key,{'current_session_id':session.current_session_id},current_session_id=new_session_id,busy_since=None,busy_epoch=None)
                 e.notice(key,'Wakes from the old conversation were orphaned after /new.')
             for f in self.flights.values():
                 if f.session_id==old: f.invalid=True

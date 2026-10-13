@@ -129,6 +129,7 @@ class Session:
     episode_id: str = ""
     unanswered_count: int = 0
     busy_since: float | None = None
+    busy_epoch: str | None = None
     enabled: bool = True
     paused_until: float | None = None
     first_notice_sent: bool = False

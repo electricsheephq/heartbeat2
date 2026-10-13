@@ -264,7 +264,7 @@ class FakeGateway:
             self.build_standby(profile)
         elif kind=='busy':
             e.acquire()  # This is a live admitted busy window, after crash recovery.
-            s=e.store.get_session(self.sessions[name]['key']);e.store.cas_session(s.session_key,{'busy_since':s.busy_since},busy_since=self.clock.now() if event['on'] else None)
+            s=e.store.get_session(self.sessions[name]['key']);e.store.cas_session(s.session_key,{'busy_since':s.busy_since},busy_since=self.clock.now() if event['on'] else None,busy_epoch=e.epoch if event['on'] else None)
         elif kind=='compact':
             session=self.sessions[name];old=session['sid'];session['sid']=event.get('tip',old+'-compact');self.tips[old]=session['sid']
         elif kind=='new':
