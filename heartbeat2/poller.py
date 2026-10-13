@@ -598,8 +598,10 @@ class Poller:
         if not occurrences or any(o.state in {'pending','claimed','started'} for o in occurrences): return
         o=occurrences[-1]
         if o.state in {'interrupted','dead','missed'} or o.state=='skipped' and o.error in FINAL_SKIP_REASONS:
-            if o.error=='cancel_on_reply':
-                self.store.cas_wake(w.id,'active',expected_version=w.version,status='cancelled',status_reason='owner_replied')
+            # The owner ended these on purpose (a reply, or /pulse off), so they read as cancelled, not failed.
+            if o.error in {'cancel_on_reply','session_off'}:
+                reason='owner_replied' if o.error=='cancel_on_reply' else 'session_off'
+                self.store.cas_wake(w.id,'active',expected_version=w.version,status='cancelled',status_reason=reason)
                 return
             self.store.cas_wake(w.id,w.status,expected_version=w.version,
                 status='failed',status_reason=o.state+(':'+o.error if o.error else ''))
