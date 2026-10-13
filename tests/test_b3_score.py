@@ -2,7 +2,7 @@ from copy import deepcopy
 from datetime import date, datetime
 import json
 import pytest
-from bench.soak.schedule import build
+from bench.soak.schedule import build, digest
 from bench.soak.score import score, attribute, matching
 
 
@@ -14,7 +14,8 @@ def corpus():
     def snap(): return deepcopy(dict(wakes=wakes, occurrences=occurrences, sessions=[session]))
     def emit(kind, e=None, at=None, **kw):
         log.append(dict(t=datetime.fromtimestamp(at or 1).astimezone().isoformat(), kind=kind, episode=e, **deepcopy(kw)))
-    emit('declaration', start=s['start'], tz=s['tz'], schedule_sha256=s['sha256'], seed=s['seed'], frozen={})
+    emit('declaration', start=s['start'], tz=s['tz'], schedule_sha256=s['sha256'], seed=s['seed'], frozen=dict(allow_gateway_injection=True,hermes_version='1.0',hermes_commit='a'*40))
+    emit('baseline_setup', session=session, effective_quiet='22:00-08:00', starting_transcript=[], transcript_sha256=digest([]))
     for e in s['episodes']:
         eid, k = e['id'], e['kind']; start = datetime.fromisoformat(e['sends'][0]['at']).timestamp()
         emit('episode_start', eid, start, schedule=e, session=session, frozen={}, gateway_starts=[])
@@ -57,7 +58,7 @@ def corpus():
             occ = dict(wake_id=w['id'], dedupe_key='one', delivered=1, started_at=due, ended_at=due+5, held_reason='', payload_json=[{'message': 'DONE'}], api_calls=1, tokens_in=10, tokens_out=10, cost_microusd=12, cache_read_tokens=4, cache_write_tokens=3)
             occurrences.append(occ)
             mid += 1; msg = dict(id=mid, date=datetime.fromtimestamp(due+5).astimezone().isoformat(), edit_date=None, out=False, text=text)
-            emit('wake_turn', at=due+5, key=w['id']+'/one', occurrence=occ, final_text=text, rows=[])
+            emit('wake_turn', at=due+5, key=w['id']+'/one', occurrence=occ, final_text=text, rows=[dict(role='assistant', content=text, timestamp=due+5, tool_calls=None)])
             emit('dm', eid, due+30, message=msg)
             verdicts.append(dict(id=f'd-{mid}', useful=True, fabrication=False, narration=False, overpromise=False, why=''))
             if k == 'S':
@@ -105,7 +106,8 @@ def test_each_bar_failure(bar):
             r['message']['edit_date'] = datetime.fromisoformat(r['message']['date']).replace(hour=22).isoformat()
     elif bar == 4:
         e = next(e for e in s['episodes'] if e['kind'] == 'C-reply')
-        next(w for w in log[-2]['snapshot']['wakes'] if w['id'] == e['id']+'-0')['status'] = 'active'
+        t = next(r for r in log if r['kind'] == 'turn' and r['episode'] == e['id'] and r['key'] == 'cancel_reply')
+        next(w for w in t['snapshot']['wakes'] if w['id'] == e['id']+'-0')['status'] = 'active'
     elif bar == 5:
         t = next(r for r in log if r['kind'] == 'turn' and r['key'] == 'stop')
         for w in t['snapshot']['wakes']:

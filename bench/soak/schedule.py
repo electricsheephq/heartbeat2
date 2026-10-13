@@ -56,6 +56,7 @@ def build(start: date, tz: str) -> dict:
     reply_days = global_rng.sample(range(1, 8), 4)
     r_kinds = {d: global_rng.choice(['R-clock', 'R-rel']) for d in (3, 6)}
     tasks = list(TASKS); global_rng.shuffle(tasks)
+    texts = list(N_TEXTS); global_rng.shuffle(texts); texts.append(global_rng.choice(texts))
     task_iter, episodes = iter(tasks), []
     for day in range(1, 8):
         rng = random.Random(f'{SEED}:{day}')
@@ -70,11 +71,12 @@ def build(start: date, tz: str) -> dict:
             e = dict(id=f'd{day}-e{index}', day=day, kind=kind, sends=[], due=[], tasks=[])
             send = lambda text, at=cursor: e['sends'].append({'at': at.isoformat(), 'text': text})
             if kind.startswith('R') or kind == 'M':
-                offsets = [20, 40, 60] if kind == 'M' else [rng.choice([15, 30, 45, 60]) if kind == 'R-rel' else 5 * round(rng.randint(20, 90)/5)]
+                offsets = [20, 40, 60] if kind == 'M' else [rng.choice([15, 30, 45, 60]) if kind == 'R-rel' else rng.randint(20, 90)]
                 for n, offset in enumerate(offsets):
                     task, term = next(task_iter)
                     sent = cursor + timedelta(minutes=n)
                     due = sent + timedelta(minutes=offset)
+                    if kind == 'R-clock': due += timedelta(minutes=(-due.minute)%5)
                     text = (f'remind me at {due:%H:%M} to {task}' if kind == 'R-clock' else
                             f'in {offset} minutes, remind me to {task}' if kind == 'R-rel' else
                             f'remind me in {offset} minutes to {task}')
@@ -95,7 +97,7 @@ def build(start: date, tz: str) -> dict:
             elif kind == 'S':
                 send('check on me every hour today'); close = cursor + timedelta(minutes=245)
             else:
-                send(rng.choice(N_TEXTS)); close = cursor + timedelta(minutes=10)
+                send(texts[day-1]); close = cursor + timedelta(minutes=10)
             e['latest_close'] = close.isoformat(); daily.append(e)
             gap = rng.randint(MIN_GAP, MAX_GAP) if index < len(kinds) else MIN_GAP
             gaps.append(gap); cursor = close + timedelta(minutes=gap)

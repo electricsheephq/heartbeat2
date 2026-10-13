@@ -22,6 +22,7 @@ class FakeClient:
     def __init__(self, clock, store, state, episode, directory):
         self.clock, self.store, self.state, self.e, self.directory = clock, store, state, episode, directory
         self.sent, self.messages, self.pending, self.deliveries = [], [], [], []
+        self.sid = 's'
         self.mid, self.request_no, self.failed, self.no_delivery, self.stop_off = 0, 0, False, False, False
     def message(self, text, out, at=None):
         self.mid += 1
@@ -30,12 +31,17 @@ class FakeClient:
     def row(self, role, text, at, mid=None, calls=None, cid=None):
         with sqlite3.connect(self.state) as db:
             db.execute('INSERT INTO messages (session_id,role,content,timestamp,tool_calls,tool_name,tool_call_id,platform_message_id) VALUES (?,?,?,?,?,?,?,?)',
-                       ('s', role, text, at, json.dumps(calls) if calls else None, 'pulse' if role == 'tool' else None, cid, str(mid) if mid else None))
+                       (self.sid, role, text, at, json.dumps(calls) if calls else None, 'pulse' if role == 'tool' else None, cid, str(mid) if mid else None))
     def send(self, text):
         if self.failed == 'send': raise ClientError('fake')
         now = self.clock.now(); m = self.message(text, True); self.sent.append((now, text))
         self.row('user', text, now, m['id']); result = None
-        if text.startswith('/pulse cancel '):
+        if text == '/new':
+            self.sid = 'fresh'
+            with sqlite3.connect(self.state) as db: db.execute('INSERT OR IGNORE INTO sessions VALUES (?)', (self.sid,))
+            self.store.cas_session('chat', {'current_session_id': 's'}, current_session_id=self.sid, unanswered_count=0)
+        elif text == '/pulse quiet default': self.store.set_meta('quiet:chat', '{}')
+        elif text.startswith('/pulse cancel '):
             w = self.store.get_wake(text.split()[-1]); self.store.cas_wake(w.id, w.status, status='cancelled')
         elif text == '/pulse on': self.store.cas_session('chat', {'enabled': False}, enabled=True)
         elif text == 'stop checking in on me':
@@ -46,9 +52,9 @@ class FakeClient:
             self.store.cas_session('chat', {'unanswered_count': self.store.get_session('chat').unanswered_count}, unanswered_count=0)
             for w in self.store.list_wakes('chat', status='active'):
                 if w.cancel_on_reply: self.store.cas_wake(w.id, 'active', status='cancelled')
-        elif self.e['kind'] != 'N':
+        elif not text.startswith('/') and self.e['kind'] != 'N':
             k = self.e['kind']; n = self.request_no; self.request_no += 1
-            due = now+3600 if k == 'S' else epoch(self.e['flip'])+300 if k == 'W' else epoch(self.e['due'][n])
+            due = now+3600 if k == 'S' else epoch(self.e['flip'])+300 if k == 'W' else now+([20,40,60][n]*60) if k == 'M' else epoch(self.e['due'][n])
             term = self.e['tasks'][n]['term'] if self.e['tasks'] else 'DONE' if k == 'W' else 'check'
             w = Wake(session_key='chat', armed_session_id='s', note=term, kind='every' if k == 'S' else 'file' if k == 'W' else 'at',
                      next_due_at=due, cancel_on_reply=k.startswith('C'), owner_requested=True, eff_interval_s=3600,
@@ -81,21 +87,24 @@ class FakeClient:
 
 
 def rig(tmp_path, kind):
-    s = build(date(2026, 10, 15), 'UTC'); e = deepcopy(next(e for e in s['episodes'] if e['kind'] == kind))
-    s['episodes'] = [e]; s['sha256'] = digest({k: v for k, v in s.items() if k != 'sha256'})
+    s = build(date(2026, 10, 15), 'Asia/Tokyo'); e = deepcopy(next(e for e in s['episodes'] if e['kind'] == kind))
+    s['episodes'] = [e]; s['start'] = datetime.fromisoformat(e['sends'][0]['at']).date().isoformat(); s['sha256'] = digest({k: v for k, v in s.items() if k != 'sha256'})
     home = tmp_path/'profile'; plugin = home/'plugins/heartbeat2'; plugin.mkdir(parents=True)
     (plugin/'plugin.yaml').write_text('version: 0.1.15\n')
-    (home/'config.yaml').write_text('model: {default: fake, provider: fake}\nplugins: {entries: {heartbeat2: {enabled: true, timezone: UTC}}}\n')
+    (home/'config.yaml').write_text('model: {default: fake, provider: fake}\nplugins: {entries: {heartbeat2: {enabled: true, allow_gateway_injection: true, timezone: UTC}}}\n')
     state = home/'state.db'
     with sqlite3.connect(state) as db:
         db.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY)')
         db.execute("INSERT INTO sessions VALUES ('s')")
         db.execute('CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_calls TEXT, tool_name TEXT, tool_call_id TEXT, platform_message_id TEXT)')
-    clock = FakeClock(epoch(e['sends'][0]['at']))
+    clock = FakeClock(epoch(e['sends'][0]['at'])-120)
     store = Store(tmp_path/'pulse.db', clock); store.upsert_session(Session(session_key='chat', current_session_id='s'))
     client = FakeClient(clock, store, state, e, tmp_path/'jobs'); clock.callback = client.tick
     runner = Runner(s, tmp_path/'run.jsonl', client, home, tmp_path/'jobs', 'chat', clock=clock,
                     pulse=Pulse(store.path), transcript=Transcript(state, now=clock.now), until_day=e['day'])
+    from bench.soak.evidence import frozen_state
+    runner.hermes_version_file = tmp_path/'version.txt'; runner.hermes_version_file.write_text('1.0\n')
+    runner.state = lambda: dict(frozen_state(home), hermes_version=runner.hermes_version_file.read_text().strip() if runner.hermes_version_file else None, hermes_commit='a'*40)
     return runner, client, store, e
 
 
@@ -103,11 +112,16 @@ def rig(tmp_path, kind):
 def test_episode_actions_and_evidence(tmp_path, kind):
     r, c, store, e = rig(tmp_path, kind)
     assert r.run() == 0
-    assert [text for _, text in c.sent[:len(e['sends'])]] == [s['text'].replace('{soak_dir}', str(r.soak_dir)) for s in e['sends']]
+    requests = [row for row in r.rows if row['kind'] == 'send' and row['purpose'] == 'request']
+    assert [row['message']['text'] for row in requests] == [s['text'].replace('{soak_dir}', str(r.soak_dir)) for s in e['sends']]
     turns = [row for row in r.rows if row['kind'] == 'turn']
     assert len(turns) == len(c.sent)
     assert all('pulse_results' in t and 'snapshot' in t and t['final_text'] for t in turns)
-    assert [t for t, _ in c.sent[:len(e['sends'])]] == [epoch(s['at']) for s in e['sends']]
+    if kind != 'M': assert [epoch(row['t']) for row in requests] == [epoch(s['at']) for s in e['sends']]
+    else:
+        for previous, current in zip(requests, requests[1:]):
+            turn = next(row for row in turns if row['message_id'] == previous['message']['id'])
+            assert epoch(current['t']) == epoch(turn['t'])+60
     thanks = [t for t, text in c.sent if text == 'thanks']
     assert len(thanks) == (0 if kind in ('C-reply', 'S', 'N') else 1)
     if thanks:
@@ -115,7 +129,7 @@ def test_episode_actions_and_evidence(tmp_path, kind):
         assert 60 <= thanks[0]-epoch(dm['date']) <= 300+30
     if kind == 'M':
         gate = next(row for row in r.rows if row['kind'] == 'gate' and row['request_index'] == 2)
-        assert epoch(gate['t']) <= epoch(e['due'][2])-30
+        assert epoch(gate['t']) <= gate['due']-30
         assert gate['session']['unanswered_count'] == 2
         assert next(row for row in r.rows if row['kind'] == 'm3_owner_check')['owner_after'] == []
     if kind == 'W':
@@ -171,13 +185,16 @@ def test_abort_resume_requeue_hours_and_dryrun(tmp_path, capsys):
     assert r.rows[-1]['kind'] in ('snapshot', 'abort')
     store.close()
     r, c, store, e = rig(tmp_path/'resume', 'R-rel')
-    r.frozen = __import__('bench.soak.evidence', fromlist=['frozen_state']).frozen_state(r.home)
+    r.frozen = r.state()
     r.emit('declaration', start=r.schedule['start'], tz=r.schedule['tz'], seed=r.schedule['seed'], schedule_sha256=r.schedule['sha256'], frozen=r.frozen)
+    r.frozen = r.state(); assert r.baseline()
+    r.clock.wall = epoch(e['sends'][0]['at'])
     r.emit('episode_start', e['id'], schedule=e, session=r.pulse.session('chat'))
     r.send(e, 'request:0', e['sends'][0]['text'], 'request')
     restarted = Runner(r.schedule, r.path, c, r.home, r.soak_dir, 'chat', clock=r.clock, pulse=r.pulse, transcript=r.transcript, until_day=e['day'])
+    restarted.state = r.state
     assert restarted.run() == 0
-    assert len(c.sent) == 1
+    assert sum(text == e['sends'][0]['text'] for _, text in c.sent) == 1
     assert any(row['kind'] == 'void' and row['reason'] == 'runner_stopped' for row in restarted.rows)
     restarted.requeue(); replacements = next(row['episodes'] for row in restarted.rows if row['kind'] == 'requeue')
     assert len(replacements) == 1 and replacements[0]['day'] == 8
@@ -185,14 +202,19 @@ def test_abort_resume_requeue_hours_and_dryrun(tmp_path, capsys):
     before = r.path.read_bytes(); sends = len(c.sent)
     assert r.run(dry_run=True) == 0
     assert r.path.read_bytes() == before and len(c.sent) == sends and capsys.readouterr().out
-    r.clock.wall = datetime.fromisoformat(e['sends'][0]['at']).replace(hour=8, minute=29).timestamp()
+    r.clock.wall = datetime.fromisoformat(e['sends'][0]['at']).replace(hour=7, minute=59).timestamp()
     r.send(e, 'early', 'hello')
     assert r.has('hours_guard', e['id'], 'early') and len(c.sent) == sends
     store.close()
 
 
-def test_send_failure_overrun_and_w_replacement(tmp_path):
-    r, c, store, e = rig(tmp_path/'send', 'N'); c.failed = 'send'
+def test_send_failure_fixed_w_window_and_replacement(tmp_path):
+    r, c, store, e = rig(tmp_path/'send', 'N')
+    original = c.send
+    def fail_request(text):
+        if text == e['sends'][0]['text']: raise ClientError('fake')
+        return original(text)
+    c.send = fail_request
     assert r.run() == 0
     assert any(row['kind'] == 'void' and row['reason'] == 'client_error' for row in r.rows)
     store.close()
@@ -213,22 +235,26 @@ def test_send_failure_overrun_and_w_replacement(tmp_path):
             row['snapshot']['wakes'][-1]['trigger_json'] = json.dumps(dict(check_every=1800, path=str(r.soak_dir/(e['job']+'.status')), pattern='^DONE$'))
     r.evidence(e)
     shifts = [row for row in r.rows if row['kind'] == 'shift']
-    assert shifts[0]['seconds'] == 300
-    assert epoch(next(x for x in r.episodes if x['id'] == 'later')['sends'][0]['at']) == epoch(extra['sends'][0]['at'])+300
+    assert not shifts
+    assert epoch(e['latest_close']) == epoch(e['flip'])+1800
+    assert epoch(next(x for x in r.episodes if x['id'] == 'later')['sends'][0]['at']) == epoch(extra['sends'][0]['at'])
     r.void('client_error'); r.requeue()
     replacement = next(row['episodes'][0] for row in r.rows if row['kind'] == 'requeue')
-    assert replacement['job'] != e['job'] and replacement['path'] in replacement['sends'][0]['text']
+    assert replacement['job'] == e['job'] and replacement['path'] in replacement['sends'][0]['text']
     store.close()
 
 
 def test_s_resume_archives_and_restores_chat(tmp_path):
     from bench.soak.evidence import frozen_state
     r, c, store, e = rig(tmp_path, 'S')
-    r.emit('declaration', start=r.schedule['start'], tz=r.schedule['tz'], seed=r.schedule['seed'], schedule_sha256=r.schedule['sha256'], frozen=frozen_state(r.home))
+    r.emit('declaration', start=r.schedule['start'], tz=r.schedule['tz'], seed=r.schedule['seed'], schedule_sha256=r.schedule['sha256'], frozen=r.state())
+    r.frozen = r.state(); assert r.baseline()
+    r.clock.wall = epoch(e['sends'][0]['at'])
     r.emit('episode_start', e['id'], schedule=e, session=r.pulse.session('chat'))
     r.send(e, 'request:0', e['sends'][0]['text'], 'request')
     store.cas_session('chat', {'enabled': True}, enabled=False)
     resumed = Runner(r.schedule, r.path, c, r.home, r.soak_dir, 'chat', clock=r.clock, pulse=r.pulse, transcript=r.transcript, until_day=e['day'])
+    resumed.state = r.state
     assert resumed.run() == 0
     texts = [text for _, text in c.sent]
     assert texts.count('check on me every hour today') == 1

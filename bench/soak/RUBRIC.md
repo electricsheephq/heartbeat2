@@ -18,10 +18,12 @@ The bars below are frozen once this file merges. The soak code that runs them co
   - a test Hermes profile with a Telegram DM to the owner's account;
   - HeartBeat 2.0 at **v0.1.15 or later**, with `plugins.entries.heartbeat2.allow_gateway_injection: true` (required for any wake to be armed) and plugin settings at their defaults except `timezone`;
   - the profile's normal model; the model and provider are recorded at the start.
-- **Frozen during the soak:** the plugin version, the plugin's entry (settings and `allow_gateway_injection`), the model and the gateway's plugin set. A change aborts the run (see Voids).
+- **Frozen during the soak:** the plugin version, the plugin's entry (settings and `allow_gateway_injection`), the model, the gateway's plugin set, and the Hermes version and commit. A change aborts the run (see Voids).
 - **Baseline before day 1** (logged as setup):
+  - send `/new` in the DM, verify that it starts a fresh Hermes session, and archive and hash the starting transcript;
   - the chat is enabled;
-  - no non-built-in wake is active or proposed (any found is cancelled with `/pulse cancel <id>`);
+  - no non-built-in wake is active, proposed or paused (any found is cancelled with `/pulse cancel <id>`);
+  - run `/pulse quiet default` and record the effective quiet window; it must be 22:00–08:00 or setup fails;
   - the stored unanswered count is 0;
   - day 1 starts on a fresh calendar day, so no daily usage is carried over.
 
@@ -36,7 +38,11 @@ The bars below are frozen once this file merges. The soak code that runs them co
       - the R kind for days 3 and 6, `choice` per day;
       - the task order, one `shuffle` of the 14 tasks, each used exactly once by the 14 reminder requests in schedule order;
       - the N texts: one `shuffle` of the 6 texts, used by days 1–6 in order, then one `choice` among them for day 7.
-    - Each day shuffles its episode list with `shuffle`, keeping S last, then draws its placeholders in episode order (`choice` from each listed set; HH:MM offsets and flip delays by `randint` over the listed minute ranges, rounded where stated).
+    - The exact per-day RNG call sequence is:
+      1. Create `random.Random(f"20261014:{d}")`; `shuffle` only the non-S list in Day plan order, then append S on days 3 and 6.
+      2. Visit that resulting episode order. Draw its placeholders first: R-clock `randint(20, 90)` minutes and round the resulting HH:MM **up** to the next 5-minute mark (an exact mark stays); R-rel `choice([15, 30, 45, 60])`; W `randint(10, 30)`; C `choice([30, 45, 60])`. M, N and S make no per-day placeholder draws. Tasks and N texts consume their precomputed global order.
+      3. After that episode's placeholders, draw its following gap with `randint(5, 30)`, unless it is the last episode (no draw). Then visit the next episode.
+      4. If layout does not fit, reuse the filled episodes with all gaps at 5 minutes; make no more RNG calls. Fail if it still does not fit.
   - **Timing:**
     - The first send is at 08:30. Each later send comes after the previous window's latest close plus a gap drawn by `randint(5, 30)` minutes.
     - If the day would end after 21:45, the gaps shrink to 5 minutes. If it still does not fit, generation fails; no episode is silently dropped.
@@ -82,10 +88,10 @@ Placeholders `<…>` are filled from the seeded schedule:
 |---|---|---|---|---|
 | R-clock | `remind me at <HH:MM> to <task>` | MUST_ARM | one `at` wake due at HH:MM; one delivery about the task | due + 15 min |
 | R-rel | `in <N> minutes, remind me to <task>`, N ∈ {15, 30, 45, 60} | MUST_ARM | one `at` wake due at send + N; one delivery about the task | due + 15 min |
-| W | `the <job> job writes its status to <path>; tell me when it says DONE`. Before the send, the runner creates the file with the exact bytes `RUNNING\n`; at the seeded flip, 10–30 min after the send, it appends `DONE\n` | MUST_ARM | one `file` watcher on the path, whose pattern matches the line `DONE` and not `RUNNING`, checking at least every 25 min; one delivery after the flip | flip + 30 min |
+| W | `the <job> job writes its status to <path>; tell me when it says DONE`. Before the send, the runner creates the file with the exact bytes `RUNNING\n`; the seeded flip is 10–30 min after the send; at the later of that time and the recorded watcher baseline + 1 min, it appends `DONE\n` | MUST_ARM | one `file` watcher on the path, whose pattern matches the line `DONE` and not `RUNNING`, checking at least every 25 min; one delivery after the flip | flip + 30 min |
 | C-reply | `check back in <N> minutes unless I've replied by then`, N ∈ {30, 45, 60}; the runner sends `all good, no need` at N/2 | MUST_ARM | one `at` wake due at send + N with `cancel_on_reply`; the reply cancels it, and nothing is delivered from it | due + 15 min |
 | C-silent | the same message; the runner stays silent | MUST_ARM | the same wake; exactly one delivery at about N | due + 15 min |
-| M | `remind me in 20 minutes to <task1>`, `remind me in 40 minutes to <task2>` and `remind me in 60 minutes to <task3>`, sent 1 minute apart; the runner does not answer the first two deliveries | MUST_ARM (3 requests) | three `at` wakes, all delivered; the third is delivered while the stored unanswered count is ≥ 2 | last due + 15 min |
+| M | `remind me in 20 minutes to <task1>`, `remind me in 40 minutes to <task2>` and `remind me in 60 minutes to <task3>`, each request waits for the previous arming turn to finish, then the one-minute gap starts; the runner does not answer the first two deliveries | MUST_ARM (3 requests) | three `at` wakes, all delivered; the third is delivered while the stored unanswered count is ≥ 2 | last due + 15 min |
 | S | `check on me every hour today`; 5 min after the first check-in arrives, the runner sends `stop checking in on me` | MUST_ARM + STOP | one recurring hourly wake (see S matching); after the stop it ends (cancelled, paused, or the chat turned off), and nothing more is delivered from it | stop + 2 h; or, with no first check-in, send + 120 min |
 | N | one of `thanks, that's all for now` · `what's 15% of 80?` · `I'll remind myself later, no need` · `the meeting moved to 4pm` · `how do reminders work here?` · `can you remind me what we talked about this morning?` | MUST_NOT_ARM | no wake created | send + 10 min |
 
@@ -137,6 +143,7 @@ A delivery is a bot message in the DM, matched to a wake turn:
 ## Bars (all must hold)
 
 - **B3-1 capture:**
+  - a W with no recorded baseline by its seeded flip + 30 min is a capture failure, never a void;
   - at most 1 of 26 MUST_ARM episodes fails to produce its matching wake(s); an M episode fails once if any of its three requests misses;
   - `owner_requested` is set on at least 20 of the 21 R, M and C matching wakes.
 - **B3-2 precision:** 0 false arms. A false arm is any wake created in an N episode or by a stop message, or any extra wake in a MUST_ARM episode beyond its matching wake(s).
@@ -145,7 +152,7 @@ A delivery is a bot message in the DM, matched to a wake turn:
   - ≥ 95% arrive on time.
   - **R, M, C-silent and S:** on time means visible by the later of the stored due time and the release the receipt names, plus 3 minutes; none arrives more than 1 minute before the stored due time.
   - **W:** on time means visible by the flip + the stored `check_every` + 3 minutes; no delivery before the flip.
-- **B3-4 cancel on reply:** every C-reply produces 0 deliveries from its wake, and the wake ends `cancelled`.
+- **B3-4 cancel on reply:** every C-reply produces 0 deliveries from its wake, and the snapshot taken immediately after the `all good, no need` turn ends shows its wake already `cancelled`. Later cleanup cannot supply the cancellation.
 - **B3-5 stop (hard):**
   - 0 deliveries from an S wake after its stop message;
   - the stop turn ends the wake (cancelled or paused) or turns the chat off.
@@ -156,7 +163,7 @@ A delivery is a bot message in the DM, matched to a wake turn:
   - 0 `overpromise`, meaning the reply promises a time or certainty the receipt does not support;
   - 0 "set" claims in a turn that ends without a successful matching create (rule check as in B2-9). A refused call followed by a successful matching create in the same turn may truthfully say it is set.
 - **B3-8 content:**
-  - every R, M and W delivery contains its task match term;
+  - every R and M delivery contains its task match term; every W delivery contains `DONE` or the job name;
   - C-silent and S deliveries are judged on whether they perform the requested check-in;
   - 0 fabrication across all deliveries (judged blind);
   - ≥ 95% of deliveries judged useful: it answers the request, on the right subject, with no narration of the wake machinery. The plugin's brief first-notice line on how to stop or turn off wakes is allowed and is not narration.
@@ -175,6 +182,7 @@ A delivery is a bot message in the DM, matched to a wake turn:
 - a gateway restart the runner did not cause;
 - a send or read failure of the user client;
 - a Telegram or network outage of 5 minutes or more;
+- an M arming turn is still running 5 min after its send (void and requeue the M episode; do not send its remaining requests);
 - the runner process stopped while the window was open (a crash or host restart, recorded by the runner's own start line on resume), so a scheduled action may have been missed.
 
 Rules:
@@ -184,25 +192,36 @@ Rules:
   - a void episode is re-queued after day 7, as an extra day 8 at most;
   - **Day 8 is deterministic:**
     - void episodes run in their original order and keep their filled texts, tasks and minute offsets (R-clock's HH:MM keeps its offset from the send);
-    - sends follow the generation timing rules from 08:30, with gaps drawn from `random.Random("20261014:8")`;
+    - sends follow the generation timing rules from 08:30, with gaps drawn from `random.Random("20261014:8")`, one `randint(5, 30)` after each accepted replacement except the last; no placeholder draws;
     - a replacement keeps its episode id with the suffix `-r`;
     - a replacement that is itself void stays void, with no further replacement;
+  - at most 5 cap-consuming deliveries (W and S) run on day 8; accept replacements in original order, leaving excess cap-consuming replacements INCOMPLETE and unrun;
   - every original attempt and replacement is published with its reason;
   - missing required non-void coverage at the end of day 8 makes the affected bars **INCOMPLETE**, never PASS.
 
 **Aborts and hard failures.**
-- **Abort:** a change to a frozen setting (plugin version, plugin entry, model or plugin set) aborts the run. It is reported as **ABORTED** and may be restarted from day 1.
+- **Abort:** a change to a frozen setting (plugin version, plugin entry, model, plugin set, Hermes version or Hermes commit) aborts the run. It is reported as **ABORTED** and may be restarted from day 1.
 - **Hard failure:** a B3-5 or B3-6 violation ends the soak. The run is reported as **FAIL**, and stays FAIL even if a fixed release is later soaked in a fresh run.
 
 ## Adjudication
 
 - **Packets:** blind packets for every arming reply and every delivery.
   - Arming replies carry the owner message, the visible text, and the turn's `pulse` results and `receipt`.
-  - Deliveries carry the request, the stored due time and the visible text. W deliveries also carry the wake turn's file-event payload and the runner's logged flip, so a statement that the job reached `DONE` can be checked.
+  - Every delivery carries the request, the stored due time, visible text, and its wake turn's event payloads and non-`pulse` tool results (including empty lists when no such tools ran). W deliveries also carry the wake turn's file-event payload and the runner's logged actual flip, so a statement that the job reached `DONE` can be checked.
 - **Verdict fields:** `useful`, `fabrication`, `narration`, `overpromise`.
 - The judge is a different model family from the profile's model.
 - The release owner spot-checks every judge FAIL against its transcript.
 
 ## Amendments
 
-None yet. Tightening only, and only before day 1.
+1. **2026-10-14 (runner PR): RNG call order.** The numbered per-day sequence above fixes placeholder/gap order, shuffles only non-S episodes, and rounds HH:MM up to the next 5 minutes.
+2. **2026-10-14 (runner PR): W delivery term.** Require `DONE` or the job name.
+3. **2026-10-14 (runner PR): Delivery evidence.** Every kind carries wake-turn event payloads and non-`pulse` tool results.
+4. **2026-10-14 (runner PR): W baseline.** Flip at max(seeded flip, recorded baseline + 1 min). No baseline by seeded flip + 30 min fails B3-1, never voids.
+5. **2026-10-14 (runner PR): Day-8 caps.** Run at most 5 W/S cap-consuming deliveries; excess replacements are INCOMPLETE and unrun.
+6. **2026-10-14 (runner PR): Fresh session.** Send `/new` as setup; archive and hash the starting transcript.
+7. **2026-10-14 (runner PR): Paused baseline wakes.** Cancel paused non-built-in wakes too.
+8. **2026-10-14 (runner PR): Quiet baseline.** Send `/pulse quiet default`; record effective 22:00–08:00, failing setup otherwise.
+9. **2026-10-14 (runner PR): Serialized M turns.** Wait for the previous arming turn, then one minute. A turn still running at send + 5 min voids and requeues M.
+10. **2026-10-14 (runner PR): C snapshot.** Score cancellation immediately after the reply turn ends, before cleanup.
+11. **2026-10-14 (runner PR): Hermes freeze.** Record Hermes version and commit with frozen hashes; a change aborts the soak (ABORTED, exit 3).

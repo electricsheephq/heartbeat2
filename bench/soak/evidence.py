@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
+import re
 import time
 import yaml
 from .schedule import digest
@@ -51,6 +53,9 @@ class Transcript(Reader):
         rows = self.turn(session_id, after_ts)
         return bool(rows and rows[-1]['role'] == 'assistant' and not decoded(rows[-1].get('tool_calls')) and self.now() - rows[-1]['timestamp'] >= quiet_s)
 
+    def session_rows(self, session_id):
+        return self.rows('SELECT * FROM messages WHERE session_id=? ORDER BY timestamp,id', (session_id,))
+
     def occurrence_turn(self, session_id, occurrence):
         rows = self.rows('SELECT * FROM messages WHERE session_id=? AND timestamp>=? AND timestamp<=? ORDER BY timestamp,id',
                          (session_id, occurrence['started_at'], occurrence['ended_at']))
@@ -71,17 +76,40 @@ class Pulse(Reader):
     def occurrences(self, wake_id):
         return self.rows('SELECT * FROM occurrences WHERE wake_id=? ORDER BY created_at,dedupe_key', (wake_id,))
 
-    def snapshot(self):
-        return {name: self.rows(f'SELECT * FROM {name}') for name in ('wakes', 'occurrences', 'sessions')}
+    def snapshot(self, session_key=None):
+        if session_key is None: return {name: self.rows(f'SELECT * FROM {name}') for name in ('wakes', 'occurrences', 'sessions')}
+        return dict(wakes=self.wakes(session_key), sessions=self.rows('SELECT * FROM sessions WHERE session_key=?', (session_key,)),
+                    occurrences=self.rows('SELECT o.* FROM occurrences o JOIN wakes w ON w.id=o.wake_id WHERE w.session_key=?', (session_key,)))
+
+    def baseline_state(self, session_key, day, default_quiet):
+        quiet = self.rows('SELECT value FROM meta WHERE key=?', ('quiet:'+session_key,))
+        override = decoded(quiet[0]['value']) if quiet else {}
+        usage = self.rows('SELECT l.* FROM ledger l JOIN wakes w ON w.id=l.wake_id WHERE w.session_key=? AND l.day=?', (session_key, day))
+        pending = self.rows("SELECT o.* FROM occurrences o JOIN wakes w ON w.id=o.wake_id WHERE w.session_key=? AND o.state IN ('claimed','started')", (session_key,))
+        return dict(effective_quiet=default_quiet if not override else override.get('range'), quiet_override=override, usage=usage, pending=pending)
 
 
-def frozen_state(profile_home):
+def hermes_revision(source, version_file):
+    if source is None or version_file is None: return dict(hermes_version=None, hermes_commit=None)
+    text = Path(version_file).read_text().strip()
+    match = re.search(r"(?:__version__|version)\s*=\s*['\"]([^'\"]+)['\"]", text)
+    version = match[1] if match else text if '\n' not in text else None
+    result = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=source, capture_output=True, text=True, timeout=5)
+    commit = result.stdout.strip() if result.returncode == 0 else None
+    return dict(hermes_version=version, hermes_commit=commit if commit and re.fullmatch('[0-9a-f]{40,64}', commit) else None)
+
+
+def frozen_state(profile_home, hermes_source=None, hermes_version_file=None):
     home = Path(profile_home)
     config = yaml.safe_load((home/'config.yaml').read_text()) or {}
     entries = config.get('plugins', {}).get('entries', {})
     version = yaml.safe_load((home/'plugins/heartbeat2/plugin.yaml').read_text())['version']
     enabled = {k: v for k, v in entries.items() if v is True or isinstance(v, dict) and v.get('enabled', False)}
-    return dict(plugin_version=str(version), settings_sha256=digest(entries.get('heartbeat2', {})),
+    entry = entries.get('heartbeat2', {})
+    settings = entry.get('settings', entry) if isinstance(entry, dict) else {}
+    return dict(**hermes_revision(hermes_source, hermes_version_file),
+                allow_gateway_injection=isinstance(entry, dict) and entry.get('allow_gateway_injection') is True,
+                quiet_hours=settings.get('quiet_hours', '22:00-08:00'), plugin_version=str(version), settings_sha256=digest(entries.get('heartbeat2', {})),
                 model=config.get('model'), plugin_set_sha256=digest(dict(directories=sorted(p.name for p in (home/'plugins').iterdir() if p.is_dir()), enabled=enabled)))
 
 
