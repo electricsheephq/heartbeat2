@@ -248,3 +248,17 @@ def test_rewrite_retires_the_original_fingerprint(engine, adopt):
     before = humans(e)
     api(e, [legacy, owner('old request', 'm1')])
     assert humans(e) == before + 1
+
+
+@pytest.mark.parametrize('rewrite', ['internal-wake', 'append-block'])
+def test_rewrite_and_new_uid_row_with_the_old_text_in_one_request(engine, rewrite):
+    """T4+T5 together: a still-present rewritten row is reconciled before any uid row may adopt it."""
+    e = engine
+    legacy = owner('old')
+    anchor(e, [legacy])
+    legacy['content'] += '\n\n' + ('internal wake text' if rewrite == 'internal-wake' else owner('new block')['content'])
+    expected = 1 if rewrite == 'internal-wake' else 2
+    before = humans(e)
+    for _ in range(2):
+        api(e, [legacy, owner('old', 'fresh')])
+        assert humans(e) == before + expected
