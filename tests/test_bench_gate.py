@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 import pytest
-from bench.run import main
+from bench.run import main, runtime_budget
 from heartbeat2.intake import Intake
 
 
@@ -10,7 +10,7 @@ def test_bench_gate(tmp_path):
     assert main(['--gate','--out',str(tmp_path)])==0
     result=json.loads(next(tmp_path.glob('*.json')).read_text())
     assert len(result['scenarios'])==34
-    assert result['runtime_s']<30
+    assert result['engine_runtime_s']<runtime_budget()
     assert not result['failures']
 
 

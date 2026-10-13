@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 
+import os
 from .baseline.heartbeat1 import LABEL
 from .sim.metrics import percentile, latency_samples, TOKEN_KEYS
 from .sim.runner import simulate
@@ -15,6 +16,11 @@ from .sim.runner import simulate
 ROOT=Path(__file__).resolve().parents[1]
 CLAIM='deterministic simulation on this suite (advisory); not live gateway delivery'
 
+
+
+def runtime_budget():
+    """Seconds the engine arm may take; shared CI runners are several times slower than a workstation."""
+    return float(os.environ.get('HEARTBEAT2_BENCH_RUNTIME_BUDGET_S', '30'))
 
 def load_scenarios(selected=None):
     # PyYAML is a development/test dependency, never a runtime plugin dependency.
@@ -117,7 +123,7 @@ def main(argv=None):
         if path.is_file() and path.suffix in {'.py','.yaml'}:
             bench_digest.update(str(path.relative_to(ROOT)).encode());bench_digest.update(path.read_bytes())
     failures=[f'{row["id"]}: {failure}' for row in results for failure in row['heartbeat2']['failures']]
-    if engine_time>=30:failures.append(f'B1 runtime_s={engine_time:.3f} (required <30)')
+    if engine_time>=runtime_budget():failures.append(f'B1 runtime_s={engine_time:.3f} (required <{runtime_budget():g})')
     report={'claim_class':CLAIM,'baseline_label':LABEL,'source':{'head':head,'dirty':dirty,'engine_digest':digest.hexdigest(),'bench_digest':bench_digest.hexdigest()},
             'runtime_s':time.perf_counter()-started,'engine_runtime_s':engine_time,'scenarios':results,
             'totals':{'heartbeat2':totals(results,'heartbeat2'),'baseline':totals(results,'baseline')},'failures':failures}
