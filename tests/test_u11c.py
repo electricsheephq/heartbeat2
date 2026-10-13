@@ -322,19 +322,20 @@ def test_counter_baseline_multiplicity_and_compaction(engine,parts):
     history=[steer,{'role':'tool','content':'old'},row]
     e.intake.pre_llm_call(session_id='sid',turn_id='wake',user_message=row['content'],conversation_history=history)
     fp=hashlib.sha256(text.encode()).hexdigest()[:16]
-    assert e.intake.anchors['sid']==('wake',Counter({fp:1}))
     api(e,history); count(e)
     assert not e.intake.flights['sid'].owner_replied
-    history[2:2]=[steer,steer]
+    # Hermes builds a separate row dict for every steer, even with identical text.
+    s1,s2=dict(steer),dict(steer)
+    history[2:2]=[s1,s2]
     for _ in range(5): api(e,history)
     count(e,None,None)
     # Ordinals continue after the baseline copy, so each new copy has its own key.
     assert e.store.get_meta(f'human:{KEY}:origin:wake:{fp}:2')=='1'
     assert e.store.get_meta(f'human:{KEY}:origin:wake:{fp}:3')=='1'
-    # Compaction moves the copies; Counter subtraction must not recount them.
-    for _ in range(4): api(e,[row,steer,steer,steer])
+    # Compaction moves the copies; that must not recount them.
+    for _ in range(4): api(e,[row,steer,s1,s2])
     count(e,None,None)
-    assert e.intake.anchors['sid'][1]==Counter({fp:3})
+    assert e.store.get_meta(f'human:{KEY}:origin:wake:{fp}:4') is None
 
 
 def test_leftover_idless_b_baseline_dedupes_c(engine):
