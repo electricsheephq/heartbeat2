@@ -6,7 +6,9 @@
 - Explain the error threshold, source switches and ledger retention in the Settings form.
 - Hold pending watcher matches through a governor pause and release them after keep, slow or resume.
 - Preserve busy flags for turns started in this process when restart recovery runs.
-- Use the tool's cache labels on owner commands and governor cards; silence wakes show TTL and last touch without warm/cold claims.
+- Use the tool's cache labels on owner commands and governor cards; when-silent check-ins show TTL and last touch without warm/cold claims.
+- Count a crash-resumed wake turn's tokens and estimated cost on the wake and the daily ledger. It still never counts as a fire or delivery.
+- Keep the provider's full base URL in cache routes (without userinfo, query or fragment), so custom endpoints that declare prompt caching get the TTL Hermes uses. Host-only routes stored by earlier versions still resolve.
 - Correct command-watcher documentation: the allowlisted environment does not pass proxy or custom-CA variables yet.
 
 ## 0.1.3 — 2026-10-13
