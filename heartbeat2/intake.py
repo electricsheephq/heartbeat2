@@ -581,16 +581,20 @@ class Intake:
         def retire(fps):
             for b in fps:
                 if state.unadopted[b]>0: state.unadopted[b]-=1
+        held=Counter()  # tokens of tracked rows still present in this request; only a vanished row's token is consumable
         def account(bl,dedupe,adopt=True):
             count=0
             for i,(mid,bfp) in bl:
-                if adopt and state.unadopted[bfp]>0:
+                if adopt and state.unadopted[bfp]>held[bfp]:
                     state.unadopted[bfp]-=1
                     continue
                 if mid: self.count(key,mid,platform)
                 else: self.human(key,platform,dedupe=dedupe(i))
                 count+=1
             return count
+        def stamped(row):
+            tracked=state.tracked.get(id(row))
+            return bool(tracked and tracked[0] is row)
         # Held references also adopt after a row becomes a filtered summary.
         for rid,(row,fps,fp) in list(state.tracked.items()):
             u=uid(row)
@@ -600,42 +604,45 @@ class Intake:
                 retire(fps)
                 del state.tracked[rid]
         no_uid=[(row,fp,text) for row,fp,text in rows if not uid(row)]
-        untracked=[]
-        # Still-present tracked rows reconcile first, so a rewrite never reads as a vanished row.
+        untracked,grown=[],[]
+        here={id(row) for row,_,_ in rows}
+        def vanished(fp):
+            return next((rid for rid,(_,_,f) in state.tracked.items() if f==fp and rid not in here),None)
+        # Still-present tracked rows move their fingerprints first, so a rewrite never reads as a vanished row.
         for row,fp,text in no_uid:
-            tracked=state.tracked.get(id(row))
-            if not tracked or tracked[0] is not row:
-                untracked.append((row,fp,text))
-                continue
+            if not stamped(row):
+                rid=vanished(fp)
+                if rid is None:
+                    untracked.append((row,fp,text))
+                    continue
+                # A rebuilt copy of a tracked row inherits its identity.
+                state.tracked[id(row)]=(row,*state.tracked.pop(rid)[1:])
+            _,fps,old_fp=state.tracked[id(row)]
             bl=blocks(row)
-            fps,n=tracked[1],len(tracked[1])
+            n=len(fps)
             # A rewrite of accounted blocks moves their fingerprints; nothing new is counted.
             for old,(_,new) in zip(fps,bl):
                 if old!=new:
                     retire([old])
                     state.unadopted[new]+=1
             retire(fps[len(bl):])
-            if len(bl)>n:
-                state.issued[fp]+=1
-                ordinal=state.issued[fp]
-                new_count+=account(enumerate(bl[n:],n+1),
-                                   lambda i:f'{key}:origin:{turn_id}:{fp}:{ordinal}:b{i}')
-                state.unadopted.update(b for _,b in bl[n:])
-            if fp!=tracked[2]:
-                state.occupancy[tracked[2]]-=1
+            if fp!=old_fp:
+                state.occupancy[old_fp]-=1
                 state.occupancy[fp]+=1
-            state.tracked[id(row)]=(row,[b for _,b in bl],fp)
+            kept=[b for _,b in bl[:n]]
+            state.tracked[id(row)]=(row,kept,fp)
+            held.update(kept)
+            if len(bl)>n: grown.append((row,fp,bl,n))
         # A uid row adopts a uid-less one only when that row is no longer present on its own.
         present=Counter(fp for _,fp,_ in no_uid)
-        # UIDs precede untracked fallback rows so adoption retires occupancy first.
-        for row,fp,_ in rows:
+        # Rows stamped in place are certain identities, so they settle before any other uid row is judged.
+        for row,fp,_ in sorted((r for r in rows if uid(r[0])),key=lambda r:not stamped(r[0])):
             u=uid(row)
-            if not u: continue
             bl=blocks(row)
             ab=absorbed(row)
-            tracked=state.tracked.get(id(row))
+            tracked=state.tracked.get(id(row)) if stamped(row) else None
             adopt=True
-            if tracked and tracked[0] is row:
+            if tracked:
                 start=len(tracked[1])
                 retire(tracked[1])  # the fingerprints recorded for it, even if the row was rewritten since
                 state.occupancy[tracked[2]]-=1
@@ -644,11 +651,24 @@ class Intake:
                 start=state.known.get(u,0)+sum(state.known.get(a,0) for a in ab)
                 if u not in state.known:
                     adopt=state.occupancy[fp]>present[fp]
-                    if adopt: state.occupancy[fp]-=1
+                    if adopt:
+                        state.occupancy[fp]-=1
+                        rid=vanished(fp)
+                        if rid is not None: del state.tracked[rid]  # the row it replaces
             new_count+=account(enumerate(bl[start:],start+1),lambda i:f'{key}:origin:u:{u}:{i}',adopt)
-            state.known[u]=(len(bl) if tracked and tracked[0] is row else
+            state.known[u]=(len(bl) if tracked else
                             max(0,len(bl)-sum(state.known.get(a,0) for a in ab)))
             for a in ab: state.known.setdefault(a,0)
+        # Blocks appended to a tracked row count after uid adoption has claimed the rows it replaces.
+        for row,fp,bl,n in grown:
+            state.issued[fp]+=1
+            ordinal=state.issued[fp]
+            new_count+=account(enumerate(bl[n:],n+1),
+                               lambda i:f'{key}:origin:{turn_id}:{fp}:{ordinal}:b{i}')
+            added=[b for _,b in bl[n:]]
+            state.unadopted.update(added)
+            held.update(added)
+            state.tracked[id(row)]=(row,[b for _,b in bl],fp)
         current=Counter(fp for _,fp,_ in no_uid)
         new=current-state.occupancy
         for row,fp,text in untracked:
