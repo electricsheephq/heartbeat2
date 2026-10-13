@@ -24,6 +24,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install pytest pyyaml croniter psutil
       - run: python -m pytest -q
+        env:
+          # Shared runners take 30-45 s for what a workstation runs in 8 s; the 30 s default stays the release gate.
+          HEARTBEAT2_BENCH_RUNTIME_BUDGET_S: '120'
   integration:
     name: Real Hermes loader (${{ matrix.target }})
     runs-on: ubuntu-latest

@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 import pytest
-from bench.run import main
+from bench.run import main, runtime_budget
 from heartbeat2.intake import Intake
 
 
@@ -10,7 +10,7 @@ def test_bench_gate(tmp_path):
     assert main(['--gate','--out',str(tmp_path)])==0
     result=json.loads(next(tmp_path.glob('*.json')).read_text())
     assert len(result['scenarios'])==34
-    assert result['runtime_s']<30
+    assert result['engine_runtime_s']<result['runtime_budget_s']==runtime_budget()
     assert not result['failures']
 
 
@@ -55,3 +55,10 @@ def test_bench_drained_human_finalizes_after_its_output(tmp_path,monkeypatch):
     assert any(x[0]=='end' and x[1]==human[1] and x[2] is True for x in calls[calls.index(answer)+1:])
     assert len(result['deliveries'])==1
     assert result['deliveries'][0]['prompted']
+
+
+@pytest.mark.parametrize('value', ['nan', 'inf', '-1', '0', 'fast'])
+def test_runtime_budget_rejects_non_finite_or_non_positive(monkeypatch, value):
+    monkeypatch.setenv('HEARTBEAT2_BENCH_RUNTIME_BUDGET_S', value)
+    with pytest.raises(SystemExit, match='positive number of seconds'):
+        runtime_budget()
