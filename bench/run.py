@@ -65,14 +65,14 @@ def markdown(report):
            'Latency samples cover fires that happened. Lateness excludes observed designed gate deferrals; deferred_s reports those separately. Open ticks have 15 s resolution. Missing fires have no latency sample.', '',
            f'B1 runtime: **{report["engine_runtime_s"]:.3f} s**; all requested arms including baseline: **{report["runtime_s"]:.3f} s**.', '',
            'Message attempts include failed sends; resent_messages counts retries of existing output, without a new model turn. Accepted but lost sends are not retried.', '',
-           '| Scenario | HeartBeat 2.0 bars | Naive emulator bars (reported only) | Model wakes HB2 / naive | Unprompted messages HB2 / naive | Message attempts HB2 / naive | Resent messages HB2 / naive | Est. tokens HB2 / naive |',
+           '| Scenario | HeartBeat 2.0 bars | Naive emulator bars (reported only) | Model wakes HB2 / naive | Wake messages HB2 / naive | Message attempts HB2 / naive | Resent messages HB2 / naive | Est. tokens HB2 / naive |',
            '|---|---|---|---:|---:|---:|---:|---:|']
     for row in report['scenarios']:
         h=row['heartbeat2'];b=row.get('baseline');bm=b['metrics'] if b else {}
         naive='PASS' if b and not b['failures'] else str(len(b['failures']))+' failed bars' if b else 'not run'
         if b and not b['turns']: naive='never fired; see mechanism trace'
         pairs=lambda k:f'{display(h["metrics"][k])} / {display(bm.get(k))}'
-        deliveries=lambda arm:sum(d['unprompted'] for d in arm['deliveries']) if arm else None
+        deliveries=lambda arm:sum(d['wake_message'] for d in arm['deliveries']) if arm else None
         lines.append(f'| {row["id"]} | {"PASS" if not h["failures"] else "FAIL"} | {naive} | {pairs("model_wakes")} | {deliveries(h)} / {display(deliveries(b))} | {pairs("message_attempts")} | {pairs("resent_messages")} | {pairs("est_tokens")} |')
     for name,metric in [('Total',report['totals'])]+[(row['id'],{'heartbeat2':row['heartbeat2']['metrics'],'baseline':row.get('baseline',{}).get('metrics')}) for row in report['scenarios']]:
         lines+=['',f'## {name}', '', '| Metric | HeartBeat 2.0 | Naive emulator |', '|---|---:|---:|']

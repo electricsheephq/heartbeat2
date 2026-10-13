@@ -20,7 +20,7 @@ PARAMETERS = obj({
                     'pid': {'type':'integer'}, 'command': {'type':'array','items':STR},
                     'emojis': {'type':'array','items':STR}}),
     'until': obj({'expires':STR, 'max_fires':{'type':'integer'}, 'owner_replies':BOOL}),
-    'pacing': obj({'min':STR,'max':STR}), 'babysit':BOOL, 'urgent':BOOL,
+    'pacing': obj({'min':STR,'max':STR}), 'babysit':BOOL, 'urgent':BOOL, 'owner_asked':BOOL,
     'outcome': {'type':'string','enum':['no_change','progress','done','blocked','needs_attention']},
     'notify':BOOL, 'summary':STR, 'next_check':STR, 'scratch':STR,
 })
@@ -29,7 +29,9 @@ DESCRIPTION = ('Use create to arm a wake/watcher (note and trigger.kind required
                'update to change instructions or trigger; pause to suspend; resume to restart a paused wake; '
                'cancel to end it; off to stop checks for this chat. During a wake turn, use respond to set '
                'outcome and notify, optionally scratch/next_check. Bounds and clamps are reported. Never type silence markers. '
-               'Results include a `cache` line; pick intervals the line marks warm.')
+               'Results include a `cache` line; pick intervals the line marks warm. '
+               'For a one-time "at" wake the owner asks for in their current message, set owner_asked=true: '
+               "it then fires like the owner's own reminder (not muted, not capped). Never set it for your own follow-ups.")
 SCHEMA = {'name':'pulse','description':DESCRIPTION,'parameters':PARAMETERS}
 
 
@@ -72,12 +74,19 @@ class Tool:
         if notice: result['settings_error']=notice
         return result
 
+    def owner_turn_evidence(self, session_id, flight):
+        e = self.engine
+        return (flight is None and bool(session_id) and bool(turn := e.intake.turns.get(session_id))
+                and e.intake.owner_turns.get(session_id) == turn)
+
     def _handle(self, args, *, session_id='', **kwargs):
         e = self.engine
         try:
             e.refresh()
             if not isinstance(args, dict) or set(args) - set(PARAMETERS['properties']):
                 return {'error':'unknown_parameter'}
+            if 'owner_asked' in args and not isinstance(args['owner_asked'], bool):
+                raise ValueError('owner_asked must be a boolean')
             s = self.identity()
             if s is None:
                 return {'error':'missing_session'}
@@ -85,6 +94,7 @@ class Tool:
             with e.store.atomic():
                 s = e.store.get_session(s.session_key)
                 flight = e.intake.flight_for(session_id, s.session_key)
+                evidence = self.owner_turn_evidence(session_id, flight)
                 created_in = 'wake_turn' if flight else 'human_turn'
                 if action == 'respond':
                     return self.respond(args, flight)
@@ -108,16 +118,21 @@ class Tool:
                         global_active_count=sum(w.status in {'active','proposed'} for w in e.store.list_wakes()))
                     if not gate.allowed:
                         return {'error':gate.reason,'detail':gate.detail}
+                    kind = (args.get('trigger') or {})['kind']
+                    requested = args.get('owner_asked') is True and evidence and kind == 'at'
                     w = Wake(s.session_key, args.get('note',''), (args.get('trigger') or {})['kind'],
                              platform=s.platform, chat_type=s.chat_type, chat_id=s.chat_id,
                              armed_session_id=session_id or s.current_session_id, created_in=created_in,
                              depth=parent.depth+1 if parent else 0, parent_wake_id=parent.id if parent else None,
-                             status=gate.status)
+                             status=gate.status, owner_requested=requested)
                     result = self.prepare(w,args)
                     w = e.store.create_wake(result.wake)
                     if child_key:
                         e.store.set_meta(child_key,'1')
-                    return {'ok':True,'wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w)}
+                    item = {'ok':True,'wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w)}
+                    if args.get('owner_asked') is True and not requested:
+                        item['owner_asked_ignored'] = 'wake_turn' if flight is not None else 'not_owner_turn' if not evidence else 'not_one_shot'
+                    return item
                 if action not in {'update','pause','resume','cancel'}:
                     return {'error':'unknown_action'}
                 if args.get('id') == 'all':
@@ -168,8 +183,8 @@ class Tool:
                         # Lifetime fields revoke only when the agent set them, never via a policy re-clamp.
                         edited += [f for f,present in (('expires_at','expires' in until),('max_fires','max_fires' in until),
                                                         ('cancel_on_reply','owner_replies' in until),('babysit','babysit' in args)) if present]
+                        changed = {k for k in edited if getattr(candidate,k) != getattr(w,k)}
                         if action == 'update':
-                            changed = {k for k in edited if getattr(candidate,k) != getattr(w,k)}
                             watch_conversion = (w.status_reason == 'watch_requested'
                                 and candidate.kind in PROBE_KINDS | EVENT_KINDS and changed <= set(timing)
                                 and all(getattr(candidate,k) == getattr(w,k) for k in ('title','reason','urgent')))
@@ -190,6 +205,12 @@ class Tool:
                                 clamps.update(result.clamped)
                             if w.status_reason == 'watch_requested':
                                 candidate = replace(candidate,status_reason='')
+                        if w.creator == 'agent' and not w.trigger_json.get('builtin') and w.parent_wake_id is None:
+                            granted = args.get('owner_asked') is True and evidence and candidate.kind == 'at'
+                            if granted:
+                                candidate = replace(candidate,owner_requested=True)
+                            elif action == 'resume' or changed:
+                                candidate = replace(candidate,owner_requested=False)
                         if action == 'resume':
                             candidate = replace(candidate,status='active',status_reason='')
                     else:

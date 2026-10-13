@@ -6,7 +6,7 @@ import re
 from .model import Wake, Session
 from . import governor
 from . import cache
-from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS
+from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested
 from .schedule import parse_duration, quiet_end, local_day
 from .tool import session_env
 
@@ -62,7 +62,7 @@ def _time(engine, epoch):
 
 def _item(engine, wake):
     due='paused · resumes on keep/resume' if wake.status=='paused' else 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
-    return f'{wake.id} {wake.status} · {wake.title or wake.note[:60]} · {wake.kind} · {due}' + (f' · {wake.status_reason}' if wake.status_reason else '')
+    return f'{wake.id} {wake.status} · {wake.title or wake.note[:60]} · {wake.kind} · {due}' + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _occurrences(engine, wake):
@@ -229,7 +229,7 @@ def handle(raw_args, runtime):
             lines = []
             for wake in wakes:
                 if action == 'why':
-                    reason=wake.reason or ('you asked (via /pulse add)' if wake.creator=='user' else 'the named task')
+                    reason=wake.reason or ('you asked (via /pulse add)' if wake.creator=='user' else 'you asked in chat' if owner_requested(wake) else 'the named task')
                     return f'{_item(engine,wake)}\nWhy: {reason}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\nFires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}\n'+_occurrences(engine,wake)
                 try:
                     with engine.store.atomic():

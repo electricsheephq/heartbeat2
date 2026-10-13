@@ -6,6 +6,7 @@ import re
 
 from .clock import Clock
 from .model import Wake, Occurrence, Session, TIME_KINDS
+from .policy import owner_requested
 from .schedule import zone
 
 HOLD_LABELS = {
@@ -43,7 +44,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
     now = clock.now()
     local = datetime.fromtimestamp(now, zone(timezone))
     label = "wake" if wake.kind in TIME_KINDS else "watcher"
-    owner = "you" if wake.creator == "agent" else "the owner"
+    owner = "you at the owner's request" if owner_requested(wake) else "you" if wake.creator == "agent" else "the owner"
     owner_age = _age(now - session.last_human_at) if session.last_human_at is not None else "unknown"
     why = wake.reason or trigger_summary or wake.kind
     if held_by in HOLD_LABELS:
@@ -65,7 +66,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
         reason={'held_unanswered':"you hadn't replied",'held_daily_cap':'daily cap','held_paused':'wake was paused'}.get(occurrence.held_reason,'held')
         lines.append(f'Held since {since:%H:%M} ({reason}); {occurrence.held_matches} matches merged.')
     recent = ", ".join(list(recent_outcomes)[-3:]) or "none"
-    lines.append(f"Recent outcomes: {recent} · unprompted messages today: {messages_today} of {max_messages}")
+    lines.append(f"Recent outcomes: {recent} · wake messages today: {messages_today} of {max_messages}")
     if governor_hint:
         lines.append(escape_text(governor_hint))
     if payload is None and occurrence.payload_json:

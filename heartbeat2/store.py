@@ -27,7 +27,7 @@ LEDGER_FIELDS = frozenset({"fires", "gated_skips", "governor_skips", "model_turn
     "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals", "checks", "no_verdict"} | CACHE_FIELDS)
 _JSON_FIELDS = {"trigger_json", "probe_state_json", "payload_json"}
 _BOOL_FIELDS = {"babysit", "urgent", "cancel_on_reply", "notify", "force_silent",
-                "enabled", "first_notice_sent", "agent_edited"}
+                "enabled", "first_notice_sent", "agent_edited", "owner_requested"}
 _TRANSITIONS = {
     "pending": { "skipped", "missed", "dead", "orphaned", "superseded"},
     "claimed": {"pending", "started", "dead", "interrupted", "orphaned", "superseded"},
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS wakes (
  noop_streak INTEGER NOT NULL, ignored_streak INTEGER NOT NULL, error_streak INTEGER NOT NULL,
  delivered INTEGER NOT NULL, engaged INTEGER NOT NULL, tokens_in INTEGER NOT NULL,
  tokens_out INTEGER NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
- version INTEGER NOT NULL);
+ owner_requested INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS wakes_session_status ON wakes(session_key,status);
 CREATE INDEX IF NOT EXISTS wakes_due ON wakes(status,next_due_at);
 CREATE TABLE IF NOT EXISTS occurrences (
@@ -174,7 +174,7 @@ class Store:
                 if "provider_deferrals" not in columns:
                     self.connection.execute("ALTER TABLE ledger ADD COLUMN provider_deferrals INTEGER NOT NULL DEFAULT 0")
                 additions = {'wakes': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0',
-                                      'agent_edited':'INTEGER NOT NULL DEFAULT 0'},
+                                      'agent_edited':'INTEGER NOT NULL DEFAULT 0', 'owner_requested':'INTEGER NOT NULL DEFAULT 0'},
                     'ledger': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0'},
                     'occurrences': {'created_at':'REAL NOT NULL DEFAULT 0', 'matched_at':'REAL', 'held_since':'REAL',
                         'held_reason':"TEXT NOT NULL DEFAULT ''", 'held_matches':'INTEGER NOT NULL DEFAULT 0', 'api_calls':'INTEGER NOT NULL DEFAULT 0'}}

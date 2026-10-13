@@ -19,19 +19,19 @@ def latency_samples(turns):
 
 
 def compute(scenario,log,turns,humans,snapshot,pause_fires,cards,message_attempts=None):
-    unprompted=[d for d in log if d['unprompted']]
+    wake_messages=[d for d in log if d['wake_message']]
     seen=set();duplicates=0
     for delivery in log:
         identity=(delivery.get('profile','main'),delivery['wake_id'],delivery['occurrence'])
-        repeated=delivery['unprompted'] and identity in seen
+        repeated=delivery['wake_message'] and identity in seen
         if delivery.get('terminal_before',False) or repeated:duplicates+=1
-        if delivery['unprompted']:seen.add(identity)
+        if delivery['wake_message']:seen.add(identity)
     leaks=sum(any(x in d['text'] for x in SENTINELS) or bool(re.search(r'\{[^{}]*"(?:action|outcome)"\s*:\s*"(?:respond|no_change|progress|done|blocked|needs_attention)"',d['text'])) for d in log)
     wrong=sum(d['session_key']!=d['owner_session_key'] or d.get('profile')!=d.get('owner_profile') for d in log)
     sessions=defaultdict(list)
-    for d in unprompted:sessions[(d.get('profile','main'),d['session_key'])].append(d['t'])
+    for d in wake_messages:sessions[(d.get('profile','main'),d['session_key'])].append(d['t'])
     episodes=defaultdict(int)
-    for d in unprompted:
+    for d in wake_messages:
         # A human at the same instant may precede a prompted response; prompted
         # deliveries are already excluded above.
         boundaries=[h['t'] for h in humans if h['session_key']==d['session_key'] and h.get('profile','main')==d.get('profile','main') and h['t']<=d['t']]
@@ -68,11 +68,11 @@ def compute(scenario,log,turns,humans,snapshot,pause_fires,cards,message_attempt
         matches=[d for d in log if ('wake' not in banned or d['ref']==banned['wake']) and
                  ('window' not in banned or banned['window'][0]<=d['t']<=banned['window'][1]) and
                  ('text' not in banned or banned['text'] in d['text']) and
-                 ('unprompted' not in banned or d['unprompted']==banned['unprompted'])]
+                 ('wake_message' not in banned or d['wake_message']==banned['wake_message'])]
         if matches:failures.append(f'forbidden_deliveries {banned}: {len(matches)}')
     wakes=[w for p in snapshot.values() for w in p['wakes']]
     for ref,bar in expect.get('bars',{}).items():
-        rows=[d for d in log if d['ref']==ref and d['unprompted']]
+        rows=[d for d in log if d['ref']==ref and d['wake_message']]
         started=[t for t in turns if t['ref']==ref and t.get('valid',True)]
         prompted=[d for d in log if d['ref']==ref and d['prompted']]
         if 'prompted_deliveries' in bar and len(prompted)!=bar['prompted_deliveries']: failures.append(f'{ref}: prompted_deliveries={len(prompted)} (required {bar["prompted_deliveries"]})')
