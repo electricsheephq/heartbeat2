@@ -1,5 +1,5 @@
 name: heartbeat2
-version: "0.1.4"
+version: "0.1.5"
 description: >-
   HeartBeat 2.0: bounded wakes and watchers in the conversation that armed them. Disclosure — wakes and watchers run full turns on the conversation's own model,
   billed like any message; command probes run allowlisted read-only commands without
