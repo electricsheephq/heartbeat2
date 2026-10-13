@@ -21,7 +21,7 @@ The bars below are frozen once this file merges. The soak code that runs them co
 - **Frozen during the soak:** the plugin version, the plugin's entry (settings and `allow_gateway_injection`), the model and the gateway's plugin set. A change aborts the run (see Voids).
 - **Baseline before day 1** (logged as setup):
   - the chat is enabled;
-  - no non-built-in wake is active (any found is cancelled with `/pulse cancel <id>`);
+  - no non-built-in wake is active or proposed (any found is cancelled with `/pulse cancel <id>`);
   - the stored unanswered count is 0;
   - day 1 starts on a fresh calendar day, so no daily usage is carried over.
 
@@ -89,7 +89,7 @@ Placeholders `<…>` are filled from the seeded schedule:
 | S | `check on me every hour today`; 5 min after the first check-in arrives, the runner sends `stop checking in on me` | MUST_ARM + STOP | one recurring hourly wake (see S matching); after the stop it ends (cancelled, paused, or the chat turned off), and nothing more is delivered from it | stop + 2 h; or, with no first check-in, send + 120 min |
 | N | one of `thanks, that's all for now` · `what's 15% of 80?` · `I'll remind myself later, no need` · `the meeting moved to 4pm` · `how do reminders work here?` · `can you remind me what we talked about this morning?` | MUST_NOT_ARM | no wake created | send + 10 min |
 
-**Replies.** After each expected delivery, the runner replies `thanks` 1–5 minutes later, except in C-reply, the first two deliveries of M, and S's first check-in, which is answered by the stop.
+**Replies.** After each expected delivery, the runner replies `thanks` 1–5 minutes later, except in C-reply, the first two deliveries of M, and S's first check-in, which is answered by the stop. A reply is sent only while the delivery's own episode window is open; a delivery that arrives after its window gets no reply, and the skip is logged, so it cannot touch the next episode.
 
 **Day plan.** Each day's order is shuffled by the seed, except that **S is always the last episode of its day**:
 - days 1, 4 and 7: R-clock, R-rel, W, C, N;
@@ -119,7 +119,8 @@ These are logged as setup, never as an episode reply or a void. Leftover wakes t
 - **Time (R, M, C):** due within ±2 minutes of the requested time; R-clock is checked against the clock time.
 - **S:**
   - the wake is `every` with an interval of 55–60 minutes (the plugin may snap 60 minutes to just under the cache lifetime), or an hourly `cron`;
-  - its stored first due time is at or before send + 115 minutes (the agent floor of 55 minutes plus the wait for the next full hour);
+  - its stored first due time is between send + 55 minutes (the agent floor) and send + 115 minutes (the floor plus the wait for the next full hour);
+  - it keeps going: `max_fires` is unset or at least 3, and its expiry is no earlier than its first due time plus two intervals;
   - S is scored against that stored first due, not against send + 60;
   - immediately before the stop, the S wake must still be active, with its next fire due within 2 hours. Otherwise S fails: a wake that ends itself, for example `max_fires: 1`, is not an hourly check-in.
 
@@ -137,7 +138,7 @@ A delivery is a bot message in the DM, matched to a wake turn:
 
 - **B3-1 capture:**
   - at most 1 of 26 MUST_ARM episodes fails to produce its matching wake(s); an M episode fails once if any of its three requests misses;
-  - `owner_requested` is set on all 21 R, M and C matching wakes but at most one.
+  - `owner_requested` is set on at least 20 of the 21 R, M and C matching wakes.
 - **B3-2 precision:** 0 false arms. A false arm is any wake created in an N episode or by a stop message, or any extra wake in a MUST_ARM episode beyond its matching wake(s).
 - **B3-3 delivery:**
   - every armed R, M, C-silent and W, and every S first check-in, produces exactly one delivery (26 of 26 when all arm);
@@ -181,6 +182,11 @@ Rules:
 - Deliberate intervention by the operator never voids an episode.
 - **Re-queueing:**
   - a void episode is re-queued after day 7, as an extra day 8 at most;
+  - **Day 8 is deterministic:**
+    - void episodes run in their original order and keep their filled texts, tasks and minute offsets (R-clock's HH:MM keeps its offset from the send);
+    - sends follow the generation timing rules from 08:30, with gaps drawn from `random.Random("20261014:8")`;
+    - a replacement keeps its episode id with the suffix `-r`;
+    - a replacement that is itself void stays void, with no further replacement;
   - every original attempt and replacement is published with its reason;
   - missing required non-void coverage at the end of day 8 makes the affected bars **INCOMPLETE**, never PASS.
 
