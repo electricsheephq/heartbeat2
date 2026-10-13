@@ -33,6 +33,12 @@ The bars below are frozen once this file merges. The soak code that runs them co
     - The first send is at 08:30. Each later send comes after the previous window's latest close plus a gap drawn by `randint(5, 30)` minutes.
     - If the day would end after 21:45, the gaps shrink to 5 minutes. If it still does not fit, generation fails; no episode is silently dropped.
   - **No overlap:** episodes never overlap; the next send comes at least 5 minutes after the previous window's latest close.
+  - **Latest close used for generation:**
+    - R, M and C: last due time + 15 min;
+    - W: flip + 30 min;
+    - N: send + 10 min;
+    - S: send + 245 min. S is last, so this only bounds the day.
+  - **Overruns:** if a W window actually runs longer, because the watcher chose `check_every` over 25 min, the runner delays the rest of that day by the overrun and logs the shift. The scorer accepts only logged shifts.
   - **Unlike B2, nothing is compressed:** a 60-minute reminder waits 60 real minutes.
 
 ## Evidence the runner keeps
