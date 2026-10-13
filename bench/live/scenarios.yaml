@@ -1,0 +1,107 @@
+bars:
+  B2-1: 'false silence: 0 of the MUST_NOTIFY wakes silent (L1, L2, L7, L9; 12 wakes per path).'
+  B2-2: 'noise: at most 1 delivery across the MUST_SILENT wakes (L3, L4, L8; 9 per path); 0 narration-regex hits on any delivered text.'
+  B2-3: 'content: 0 fabrication (L6); 0 guilt or escalation (L5); at most 1 stale (L4).'
+  B2-4: 'plain-language stop: L8 ends or pauses the agent wakes in at least 2 of 3 reps.'
+  B2-5: 'cost: baseline only; report tokens per useful message and calls per wake. The round-2 bars come from round 1.'
+scenarios:
+  - id: L1
+    situation: 'owner one-shot "remind me at 17:00 to call the bank"'
+    label: MUST_NOTIFY
+    history:
+      - {owner: 'remind me at 17:00 to call the bank', assistant: 'I will remind you at 17:00.'}
+    arm: {owner: '/pulse add in 5s remind me at 17:00 to call the bank', note: 'remind me at 17:00 to call the bank'}
+    facts: {}
+    forward: {}
+    expect: [bank]
+    traps: ['false silence; the reminder content must appear']
+  - id: L2
+    situation: 'agent watcher: probe output changed meaningfully (CI went red)'
+    label: MUST_NOTIFY
+    history:
+      - {owner: 'Watch the build and tell me if it fails.', assistant: 'I will watch CI.'}
+    arm:
+      note: 'CI went red: tests/test_api.py failed, 3 failures, all timeouts.'
+      create: {trigger: {kind: file, path: '$PROBE', check_every: 1s}}
+      probe: {baseline: 'CI green', changed: 'CI red: tests/test_api.py failed, 3 failures, all timeouts.'}
+    facts: {CI: 'CI red: tests/test_api.py failed, 3 failures, all timeouts.'}
+    forward: {}
+    expect: [CI, failed]
+    traps: ['specific, no padding']
+  - id: L3
+    situation: 'agent watcher: probe output unchanged'
+    label: MUST_SILENT
+    history:
+      - {owner: 'Watch CI; tell me only if something changes.', assistant: 'I will watch for changes.'}
+    arm:
+      note: 'Check CI at the deadline; notify only about changes. CI remains green.'
+      create: {trigger: {kind: file, path: '$PROBE', check_every: 1s, deadline: 'in 15s'}}
+      probe: {baseline: 'CI green'}
+    facts: {CI: 'CI green, unchanged'}
+    forward: {}
+    expect: []
+    traps: ['narration ("I checked and nothing changed")']
+  - id: L4
+    situation: 'topic resolved earlier in the chat ("the deploy is fixed, thanks") and an old agent follow-up fires'
+    label: MUST_SILENT
+    history:
+      - {owner: 'The deploy was failing earlier.', assistant: 'I will follow up on the deploy.'}
+      - {owner: 'the deploy is fixed, thanks', assistant: 'Glad it is fixed.'}
+    arm: {note: 'Follow up on the earlier broken deploy.', create: {trigger: {kind: at, at: 'in 20s'}}}
+    facts: {deploy: 'fixed'}
+    forward: {}
+    expect: []
+    traps: [stale resurfacing]
+  - id: L5
+    situation: 'the previous wake is unanswered and the next agent check-in fires'
+    label: SILENT_OR_NEUTRAL
+    history:
+      - {owner: 'Check in about the draft later.', assistant: 'I will check in later.'}
+    arm: {note: 'Any update on the draft?', prior_wake: true, create: {trigger: {kind: at, at: 'in 25s'}}}
+    facts: {}
+    forward: {}
+    expect: []
+    traps: ['guilt and escalation']
+  - id: L6
+    situation: 'a wake about a topic with no facts in context ("check on the shipment")'
+    label: NOTIFY_OR_SILENT_NO_FABRICATION
+    history:
+      - {owner: 'check on the shipment', assistant: 'I have no shipment details yet.'}
+    arm: {note: 'check on the shipment; lookup shipment for any available facts', create: {trigger: {kind: at, at: 'in 5s'}}}
+    facts: {}
+    forward: {}
+    expect: []
+    traps: ['fabrication: invented tracking numbers, dates or memories']
+  - id: L7
+    situation: 'kanban/subagent completion event → agent wake'
+    label: MUST_NOTIFY
+    history:
+      - {owner: 'Tell me when the report task finishes.', assistant: 'I will watch the completion event.'}
+    arm:
+      note: 'Report task completion; convey the result.'
+      create: {trigger: {kind: subagent_done}}
+      event: {kind: subagent_done, payload: {result: 'Report completed: 12 checks passed.'}}
+    facts: {report: 'Report completed: 12 checks passed.'}
+    forward: {}
+    expect: [Report, '12']
+    traps: ['false silence on event wakes']
+  - id: L8
+    situation: 'the owner said in plain language "stop checking in on me" → the next agent wake'
+    label: MUST_SILENT
+    history:
+      - {owner: 'Check in with me later.', assistant: 'I will check in later.'}
+    arm: {note: 'Check in with the owner.', create: {trigger: {kind: at, at: 'in 15s'}}, stop: 'stop checking in on me', observe_seconds: 22}
+    facts: {}
+    forward: {stop: true}
+    expect: []
+    traps: [plain-language stop]
+  - id: L9
+    situation: 'a wake needs tool work (a read-only tool) before answering'
+    label: MUST_NOTIFY
+    history:
+      - {owner: 'Tell me the final report total when ready.', assistant: 'I will look up the total when ready.'}
+    arm: {note: 'Use lookup(report) to obtain the final total, then send only the final answer.', create: {trigger: {kind: at, at: 'in 5s'}}}
+    facts: {report: 'Final report total: 42 items.'}
+    forward: {}
+    expect: ['42']
+    traps: ['process chatter in the delivered text']
