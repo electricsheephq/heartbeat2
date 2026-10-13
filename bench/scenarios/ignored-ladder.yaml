@@ -1,0 +1,66 @@
+id: ignored-ladder
+title: Ignored deliveries pause at the configured ladder with exactly one owner card
+cites:
+- 'B1 realism: Ignored deliveries pause at the configured ladder with exactly one
+  owner card'
+settings:
+  max_unanswered: 10
+  engagement_window_hours: 1
+arms:
+- ref: ignored
+  command: add every 2h Check for news
+timeline:
+- t: 33000
+  event: human
+- t: 33100
+  event: human
+model_policy:
+  default:
+  - outcome: progress
+    notify: true
+    summary: Fresh news 0
+  - outcome: progress
+    notify: true
+    summary: Fresh news 1
+  - outcome: progress
+    notify: true
+    summary: Fresh news 2
+  - outcome: progress
+    notify: true
+    summary: Fresh news 3
+  - outcome: progress
+    notify: true
+    summary: Fresh news 4
+  - outcome: progress
+    notify: true
+    summary: Fresh news 5
+duration: 34000
+expectations:
+  required_fires:
+  - wake: ignored
+    window:
+    - 7200
+    - 7215
+  - wake: ignored
+    window:
+    - 18015
+    - 18030
+  - wake: ignored
+    window:
+    - 28830
+    - 28845
+  forbidden_deliveries: []
+  bars:
+    ignored:
+      deliveries: 3
+      model_wakes: 3
+      status: paused
+      wake_fields:
+        ignored_streak: 3
+        status_reason: governor:ignored
+  cards: 1
+heartbeat_checklist:
+- ref: ignored
+  session: owner
+  note: add every 2h Check for news
+baseline_interval_s: 7200

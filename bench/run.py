@@ -9,7 +9,7 @@ import tempfile
 import time
 
 from .baseline.heartbeat1 import LABEL
-from .sim.metrics import percentile, latency_samples
+from .sim.metrics import percentile, latency_samples, TOKEN_KEYS
 from .sim.runner import simulate
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -38,8 +38,8 @@ def totals(results,system):
     rows=[x[system] for x in results if system in x]
     if not rows:return None
     metrics=[x['metrics'] for x in rows]
-    summed=('duplicate_deliveries','missed_required_fires','model_wakes','noop_model_wakes','est_tokens','sentinel_leaks','wrong_destination',
-            'delivered_messages','message_attempts','resent_messages')
+    summed=('duplicate_deliveries','missed_required_fires','model_wakes','noop_model_wakes','sentinel_leaks','wrong_destination',
+            'delivered_messages','message_attempts','resent_messages')+TOKEN_KEYS
     answer={k:sum(x[k] for x in metrics) for k in summed}
     for k in ('msgs_per_silence_episode','max_burst_per_min'):answer[k]=max(x[k] for x in metrics)
     answer['noop_ratio']=answer['noop_model_wakes']/answer['model_wakes'] if answer['model_wakes'] else 0
@@ -65,7 +65,8 @@ def markdown(report):
            'Latency samples cover fires that happened. Lateness excludes observed designed gate deferrals; deferred_s reports those separately. Open ticks have 15 s resolution. Missing fires have no latency sample.', '',
            f'B1 runtime: **{report["engine_runtime_s"]:.3f} s**; all requested arms including baseline: **{report["runtime_s"]:.3f} s**.', '',
            'Message attempts include failed sends; resent_messages counts retries of existing output, without a new model turn. Accepted but lost sends are not retried.', '',
-           '| Scenario | HeartBeat 2.0 bars | Naive emulator bars (reported only) | Model wakes HB2 / naive | Wake messages HB2 / naive | Message attempts HB2 / naive | Resent messages HB2 / naive | Est. tokens HB2 / naive |',
+           'est_tokens is total input (calls × context), also reported as est_input_tokens; cache reads + writes partition that input. Output is separate. Both arms use identical scenario assumptions.', '',
+           '| Scenario | HeartBeat 2.0 bars | Naive emulator bars (reported only) | Model wakes HB2 / naive | Wake messages HB2 / naive | Message attempts HB2 / naive | Resent messages HB2 / naive | Est. input tokens HB2 / naive |',
            '|---|---|---|---:|---:|---:|---:|---:|']
     for row in report['scenarios']:
         h=row['heartbeat2'];b=row.get('baseline');bm=b['metrics'] if b else {}
@@ -82,7 +83,7 @@ def markdown(report):
         if name!='Total':
             row=next(x for x in report['scenarios'] if x['id']==name)
             lines+=['', row['title'], '', 'Provenance: '+', '.join(row['cites'])+'.', '',
-                    f'Settings overrides: `{json.dumps(row["settings"],sort_keys=True)}`; naive fixed interval: {row["baseline_interval_s"]} s; context: {row["context_tokens"]} tokens per model turn.', '',
+                    f'Settings overrides: `{json.dumps(row["settings"],sort_keys=True)}`; naive fixed interval: {row["baseline_interval_s"]} s; input: {row["context_tokens"]} tokens per call; calls/turn: {row["calls_per_turn"]}; output/call: {row["output_tokens_per_call"]}; cache TTL: {row["cache_ttl_s"]} s.', '',
                     'HeartBeat 2.0 failures: '+('; '.join(row['heartbeat2']['failures']) or 'none')+'.',
                     'Naive failures: '+('; '.join(row.get('baseline',{}).get('failures',[])) or 'none / not run')+'.']
     return '\n'.join(lines)+'\n'
@@ -102,7 +103,9 @@ def main(argv=None):
             h=simulate(scenario,Path(home)/scenario['id']/'heartbeat2')
             engine_time+=time.perf_counter()-start
             row={'id':scenario['id'],'title':scenario['title'],'cites':scenario['cites'],'settings':scenario['settings'],
-                 'baseline_interval_s':scenario.get('baseline_interval_s',1800),'context_tokens':scenario.get('context_tokens',150000),'heartbeat2':h}
+                 'baseline_interval_s':scenario.get('baseline_interval_s',1800),'context_tokens':scenario.get('context_tokens',150000),
+                 'calls_per_turn':scenario.get('calls_per_turn',2),'output_tokens_per_call':scenario.get('output_tokens_per_call',150),
+                 'cache_ttl_s':scenario.get('cache_ttl_s',300),'heartbeat2':h}
             if args.baseline:row['baseline']=simulate(scenario,Path(home)/scenario['id']/'baseline',baseline=True)
             results.append(row)
     head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()

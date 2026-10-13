@@ -1,0 +1,82 @@
+id: quiet-default
+title: Default quiet hours defer at to 08:00, skip recurring ticks and admit urgent
+  wakes
+cites:
+- 'B1 realism: Default quiet hours defer at to 08:00, skip recurring ticks and admit
+  urgent wakes'
+settings:
+  quiet_hours: 22:00-08:00
+  quiet_hours_urgent: true
+arms:
+- ref: at
+  args:
+    note: Report useful news for at
+    trigger:
+      kind: at
+      at: in 2h
+- ref: tick
+  command: add every 2h Quiet tick
+- ref: urgent
+  args:
+    note: Report useful news for urgent
+    trigger:
+      kind: at
+      at: in 3h
+    urgent: true
+timeline: []
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Complete.
+duration: 39600
+expectations:
+  required_fires:
+  - wake: at
+    window:
+    - 39600
+    - 39615
+  - wake: urgent
+    window:
+    - 10800
+    - 10815
+  forbidden_deliveries: []
+  bars:
+    at:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+      wake_fields: {}
+      turn_fields:
+        lateness_s: 0
+        deferred_s: 32400
+    tick:
+      deliveries: 0
+      model_wakes: 0
+      status: active
+      wake_fields:
+        gated_skips: 5
+    urgent:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+      wake_fields: {}
+  observations:
+  - event: gate
+    ref: at
+    reason: quiet_hours
+    window:
+    - 7200
+    - 7200
+heartbeat_checklist:
+- ref: at
+  session: owner
+  note: Report useful news for at
+- ref: tick
+  session: owner
+  note: add every 2h Quiet tick
+- ref: urgent
+  session: owner
+  note: Report useful news for urgent
+baseline_interval_s: 7200
+epoch: 1791838800.0

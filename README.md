@@ -44,18 +44,21 @@ Heartbeats, as OpenClaw popularised them, made agents feel alive. They also prod
 | Messages to the wrong chat or person | There is no destination parameter at all. A wake can only return to the chat that armed it, and only in DMs by default. |
 | Most spend going to no-op ticks | Watchers decide without a model call. The no-op governor backs off, then pauses. |
 
-Totals over 23 deterministic scenarios (B1 simulation driving the real engine; `python -m bench.run --baseline --gate`, source `eded2e0`, v0.1.12; the totals are unchanged since v0.1.0). The comparison arm is a naive heartbeat-1.0 emulator built from documented failure reports. It is **not** a measurement of OpenClaw itself.
+Totals over 34 deterministic scenarios (B1 simulation driving the real engine; `python -m bench.run --baseline --gate`, source `7a312cb` plus uncommitted B1 realism changes, v0.1.14 engine; the gate report records content digests). The comparison arm is a naive heartbeat-1.0 emulator built from documented failure reports. It is **not** a measurement of OpenClaw itself.
 
 | Across the suite | HeartBeat 2.0 | Naive heartbeat |
 |---|---:|---:|
 | Duplicate deliveries | 0 | 1 |
-| Required fires missed | 0 | 9 |
+| Required fires missed | 0 | 27 |
 | Sentinel text leaked into chat | 0 | 2 |
-| Messages to the wrong chat | 0 | 2 |
+| Messages to the wrong chat | 0 | 6 |
 | Most messages in one minute | 1 | 100 |
-| Model turns | 42 | 504 |
-| Model turns that found nothing | 15 | 78 |
-| Estimated input tokens | 6,300,000 | 75,600,000 |
+| Model turns | 110 | 588 |
+| Model turns that found nothing | 15 | 82 |
+| Estimated input tokens (total; calls × context) | 33,000,000 | 176,400,000 |
+| Estimated cache read tokens | 25,950,000 | 116,550,000 |
+| Estimated cache write tokens | 7,050,000 | 59,850,000 |
+| Estimated output tokens | 33,000 | 176,400 |
 
 Every scenario and its hard bars are in [bench/README.md](bench/README.md); the full per-scenario table is regenerated per commit.
 
