@@ -114,7 +114,7 @@ def test_n7_prearm_without_chat_turn(monkeypatch, tmp_path):
 
 def invoke_runner(monkeypatch, tmp_path, *options):
     pin = tmp_path / 'pin/tests/fakes'
-    pin.mkdir(parents=True)
+    pin.mkdir(parents=True, exist_ok=True)
     (pin / 'fake_llm_provider.py').touch()
     selected = []
     def popen(command, **kwargs):
@@ -169,3 +169,26 @@ def test_round2_score_bytes_ignore_capture_files(monkeypatch, tmp_path):
     scored = json.loads((tmp_path / 'mixed-score/score.json').read_text())['paths']['P1']
     assert len(scored['cells']) == 27 and scored['bars']['B2-2'] == 'PASS'
     assert scored['bars']['B2-5']['tokens'] == 270
+
+
+def test_p3_rejects_capture_scenarios(monkeypatch, tmp_path, capsys):
+    for options in [('--path', 'P3', '--round', '3'), ('--path', 'P3', '--scenarios', 'L1,A1'),
+                    ('--path', 'P3', '--round', '3', '--context-tokens', '100')]:
+        with pytest.raises(SystemExit) as exc:
+            invoke_runner(monkeypatch, tmp_path, *options)
+        assert exc.value.code == 2
+        assert 'P3 does not inject' in capsys.readouterr().err
+    assert not (tmp_path / 'out').exists()
+    assert invoke_runner(monkeypatch, tmp_path, '--path', 'P3') == [f'L{i}' for i in range(1, 10)]
+
+
+def test_ctx_packets_name_the_omitted_filler():
+    from bench.live.adjudicate import packets
+    from bench.live.round3 import CTX_HASH
+    data = results(ctx=True)
+    for result in data:
+        result.update(context_pairs=553, context_size=120014)
+    blind = packets(data)
+    assert blind and all(p['context'] == {'omitted': 'fact-free synthetic small talk seeded before the history rows',
+                                          'pairs': 553, 'tokens': 120014, 'sha256': CTX_HASH} for p in blind)
+    assert all('context' not in p for p in packets(results()))

@@ -349,6 +349,8 @@ def main():
         if not selected:
             parser.error('--context-tokens requires at least one context-eligible scenario')
         args.path += f'-ctx{args.context_tokens}'
+    if args.path.split('-ctx')[0] == 'P3' and any(data[sid].get('type') == 'capture' for sid in selected):
+        parser.error('P3 does not inject its primary fault into capture turns; run capture scenarios on P1')
     if args.cell:
         sid, rep = args.cell.split(':')
         return cell(args, data[sid], int(rep))

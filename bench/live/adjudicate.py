@@ -47,6 +47,9 @@ def packets(results):
                 output[-1].update(pulse_results=result['pulse_results'], receipts=[r['receipt'] for r in result['pulse_results'] if 'receipt' in r])
             if result.get('type') == 'capture':
                 output[-1]['owner_message'] = result['owner_message']
+            if result.get('context_tokens'):
+                output[-1]['context'] = {'omitted': 'fact-free synthetic small talk seeded before the history rows',
+                    'pairs': result.get('context_pairs'), 'tokens': result.get('context_size'), 'sha256': result['context_hash']}
     return output
 
 
