@@ -144,3 +144,21 @@ def test_fingerprint_unchanged_without_snapshot_or_trailing_space(prefix):
         (fp, seen), = origin_rows([{'role': 'user', 'content': content}])
         assert seen == text and fp == hashlib.sha256(text.encode()).hexdigest()[:16]
     assert ORIGIN in text
+
+
+# agent/context_compressor.py _merge_summary_into_tail_row, delimiter form, at the three pins.
+PRIOR = '[PRIOR CONTEXT — for reference only; not a new message]'
+DELIMITER = '[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]'
+END = '--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---'
+
+
+@pytest.mark.parametrize('metadata', [False, True])
+def test_carrier_holding_a_snapshot_stays_skipped(metadata):
+    # A tail that kept an earlier snapshot is merged with the next summary, so the
+    # snapshot sits before the delimiter and END marker. The marker still wins.
+    tail = fold(steer_row(hermes_origin('earlier request', 'signal')))
+    carrier = {'role': 'user', 'content': PRIOR + '\n' + tail['content'] + '\n\n' + DELIMITER +
+               '\n\n[CONTEXT COMPACTION — REFERENCE ONLY]\nsummary\n\n' + END}
+    if metadata:
+        carrier['_compressed_summary'] = True
+    assert not list(origin_rows([carrier]))
