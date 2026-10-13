@@ -109,8 +109,10 @@ def origin_rows(history):
         if not isinstance(row,dict) or row.get('role')!='user': continue
         # Compaction rewrites carried rows in place; a rewrite is not new owner text.
         if row.get('_compressed_summary'): continue
+        # Markers are checked on the whole row: a carrier can hold a snapshot before its END marker.
+        if any(m in row_text(row.get('content','')) for m in COMPACTION_MARKERS): continue
         text=owner_text(row.get('content',''))
-        if ORIGIN in text and not any(m in text for m in COMPACTION_MARKERS):
+        if ORIGIN in text:
             yield hashlib.sha256(text.encode()).hexdigest()[:16],text
 
 
