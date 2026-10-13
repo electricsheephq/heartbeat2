@@ -79,6 +79,7 @@ def row_text(content):
 
 
 COMPACTION_MARKERS = ('--- END OF CONTEXT SUMMARY', '[STILL IN PROGRESS — this is the active request')
+STEER_PREFIX = '[OUT-OF-BAND USER MESSAGE —'
 STEER_COMMAND = re.compile(r'^/(steer|s)(@\S+)?(\s|$)',re.I)
 
 
@@ -88,7 +89,10 @@ def origin_rows(history):
         # Compaction rewrites carried rows in place; a rewrite is not new owner text.
         if row.get('_compressed_summary'): continue
         text=row_text(row.get('content',''))
-        if ORIGIN in text and not any(m in text for m in COMPACTION_MARKERS):
+        # Hermes writes owner rows starting with the origin header or the steer wrapper;
+        # carriers and replay copies start elsewhere. Owner text may quote any marker.
+        owner=text.lstrip().startswith((ORIGIN,STEER_PREFIX))
+        if ORIGIN in text and (owner or not any(m in text for m in COMPACTION_MARKERS)):
             yield hashlib.sha256(text.encode()).hexdigest()[:16],text
 
 
