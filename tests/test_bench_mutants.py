@@ -84,7 +84,7 @@ def control(tmp_path_factory):
 def mutant_budget():
     before=time.monotonic()
     yield
-    assert time.monotonic()-before<120, 'all mutants must stay below 120 s in total'
+    assert time.monotonic()-before<60, 'all mutants must stay below 60 s in total'
 
 
 @pytest.mark.parametrize('mutant',MUTANTS)
