@@ -34,3 +34,20 @@ def test_title_only_change_keeps_the_wake_the_owners(engine, runtime):
     wake = owner_add(engine, runtime)
     _, changed = update(engine, wake, title='Agent title')
     assert changed.title == 'Agent title' and not changed.agent_edited and is_owner(changed)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize('args', [{'title': 'Cosmetic'}, {'reason': 'Cosmetic'}, {'urgent': False}, {}],
+                         ids=['title', 'reason', 'same-urgent', 'empty'])
+def test_update_without_a_trigger_keeps_a_relative_deadline_and_owner_status(engine, runtime, args):
+    wake = owner_add(engine, runtime)
+    assert not commands.handle('watch ' + wake.id, runtime).startswith('Error:')
+    _, converted = update(engine, wake, trigger=EVENT)
+    assert engine.tool.handle({'action': 'resume', 'id': wake.id}, session_id='sid')['ok']
+    resumed = engine.store.get_wake(wake.id)
+    engine.clock.advance(600)
+    _, after = update(engine, resumed, **args)
+    assert after.deadline_at == resumed.deadline_at  # the stored relative text is not re-read
+    assert not after.agent_edited and is_owner(after)
