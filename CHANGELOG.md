@@ -2,9 +2,7 @@
 
 ## 0.1.5 — 2026-10-13
 
-- An owner message that quotes a compaction marker (for example a pasted Hermes log containing `--- END OF CONTEXT SUMMARY`) now counts as the owner's message; before, it was skipped, and a silent wake's answer to it was silenced.
-- Eight numeric settings have upper bounds (ledger history 100 years, wake lifetime 10 years, interval floors and slowed intervals one year, watcher floor one week, slow-down multiplier 100). A larger value is reported and ignored instead of crashing every tick.
-- Restart recovery clears a busy flag stamped in the future (a wall-clock step back) instead of waiting for the acknowledgement timeout.
+- Eight numeric settings have upper bounds (ledger history 100 years, wake lifetime 10 years, interval floors and slowed intervals one year, watcher floor one week, slow-down multiplier 100). A larger value is reported by `/pulse status` and ignored, instead of crashing every tick.
 - The E2E `/stop` cell names the upstream Telegram duplicate-`/stop` wedge, NousResearch/hermes-agent#137545.
 
 ## 0.1.4 — 2026-10-13

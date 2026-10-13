@@ -130,8 +130,7 @@ class Poller:
                     s.set_meta('recovered:'+o.id,'1')
                 elif o.state=='started': self.interrupt(o,'restart')
             for session in s.list_sessions() if self.process_start else []:
-                if session.busy_since is not None and (session.busy_since<self.boot_at
-                                                      or session.busy_since>self.clock.now()):
+                if session.busy_since is not None and session.busy_since<self.boot_at:
                     s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
             # Persisted future deadlines remain future. time_due() coalesces
             # genuinely overdue intervals at the next tick without changing them

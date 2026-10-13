@@ -1,4 +1,4 @@
-"""Numeric settings must survive real ticks; restart clears only stale busy stamps."""
+"""Numeric settings must survive real ticks."""
 from dataclasses import fields
 import json
 import math
@@ -117,28 +117,3 @@ def test_maximum_setting_survives_tick(tmp_path, clock, key, maximum, kind):
         assert len(e.ctx.calls) == 1
     finally:
         rt.close()
-
-
-@pytest.mark.parametrize('offset,expected', [(-1, None), (0, 0), (3, 3), (5, 5), (3600, None)])
-def test_reconcile_busy_stamp(engine, offset, expected):
-    boot = engine.boot_at
-    engine.clock.advance(5)
-    session(engine, busy_since=boot + offset)
-    engine.reconcile()
-    assert engine.store.get_session(KEY).busy_since == (None if expected is None else boot + expected)
-
-
-@pytest.mark.parametrize('started', [False, True])
-def test_future_busy_recovery_fires_due_wake(engine, started):
-    if started:
-        old = arm(engine)
-        o = pending(engine, old)
-        assert engine.store.claim(old.id, o.dedupe_key, epoch='old-process', pid=1)
-        engine.store.cas_occurrence(old.id, o.dedupe_key, 'claimed', 'started',
-                                    attempt=1, started_at=engine.clock.now())
-    engine.clock.advance(5)
-    session(engine, busy_since=engine.boot_at + 3600)
-    arm(engine)
-    engine.tick()
-    assert engine.store.get_session(KEY).busy_since is None
-    assert len(engine.ctx.calls) == 1
