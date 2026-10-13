@@ -94,6 +94,11 @@ def cost(route, *, prompt=0, read=0, written=0, out=0, ttl=None):
     return float(amount)+correction
 
 
+def minutes(seconds):
+    text=f'{seconds/60:.1f}'
+    return (text[:-2] if text.endswith('.0') else text)+'m'
+
+
 def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=True, first_wake=False):
     try:
         if not session or not session.last_route: return ''
@@ -106,9 +111,9 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
             host = urlsplit(_base(part)).hostname or ''
             rows = json.loads(store.get_meta('cache_routes') or '{}')
             row = rows.get(session.last_route, rows.get(f'{route_provider}|{model}|{host}', {}))
-            bracket = ', '.join(f'{label}{row[key]/60:g}m' for key,label in (('max_warm_gap','warm seen ≤'),('min_cold_gap','cold ≥')) if key in row)
+            bracket = ', '.join(f'{label}{minutes(row[key])}' for key,label in (('max_warm_gap','warm seen ≤'),('min_cold_gap','cold ≥')) if key in row)
             return f'Cache: {provider} TTL {source}'+(f' ({bracket})' if bracket else '')
-        label = f'Cache: {provider} {"1h" if ttl==3600 else str(ttl/60)+"m"} · last touch {age:.0f}m ago'
+        label = f'Cache: {provider} {"1h" if ttl==3600 else minutes(ttl)} · last touch {age:.0f}m ago'
         if watcher: return label
         prefix = session.last_prompt_tokens
         warm = cost(session.last_route,prompt=prefix,read=prefix,ttl=ttl) if pricing else None
@@ -118,8 +123,8 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
         state = 'warm' if gap < ttl else 'cold'
         price = f' (~${(warm if state=="warm" else cold):.2f}) · cold ~${cold:.2f}' if warm is not None and cold is not None else ''
         edge = ttl-max(30,.05*ttl)
-        next_hint = 'floor ≥ TTL: wakes cold' if floor>edge else f'next warm ≤{edge/60:g}m'
-        text = f'{label} · {"this wake" if seconds is None else str(seconds/60)+"m"} {state}{price} · {next_hint}'
+        next_hint = 'floor ≥ TTL: wakes cold' if floor>edge else f'next warm ≤{minutes(edge)}'
+        text = f'{label} · {"this wake" if seconds is None else minutes(seconds)} {state}{price} · {next_hint}'
         return text[:220] if len(text.split())<=40 else ''
     except Exception:
         return ''

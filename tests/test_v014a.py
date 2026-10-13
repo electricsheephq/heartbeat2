@@ -271,7 +271,7 @@ def test_owner_add_cache_matches_tool(engine, monkeypatch, add):
     assert out.splitlines()[-1] == engine.tool.cache_result(w)
     assert 'this wake warm' not in out
     if w.kind == 'at':
-        assert '120.0m cold' in out
+        assert '120m cold' in out
     else:
         assert 'warm' not in out.splitlines()[-1] and 'cold' not in out.splitlines()[-1]
 

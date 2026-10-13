@@ -193,7 +193,7 @@ def test_first_wake_cache_age_owner_only(engine, monkeypatch, creator, expected)
     session(engine,last_route='openai|gpt-6.1|api.openai.com',last_cache_touch_at=engine.clock.now()-1700)
     monkeypatch.setattr(cache,'cost',lambda *a,**k:None)
     w=arm(engine,'every',creator=creator,created_in='command' if creator=='user' else 'human_turn')
-    assert '5.0m '+expected in engine.cache_line(w,seconds=300)
+    assert '5m '+expected in engine.cache_line(w,seconds=300)
 
 
 def test_probe_failed_checks_cas_has_no_effect(engine, monkeypatch):
