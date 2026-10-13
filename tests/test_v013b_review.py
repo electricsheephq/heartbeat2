@@ -64,7 +64,7 @@ def test_first_fire_cache_line_describes_this_wake(engine, monkeypatch):
     session(engine, last_route='openai|gpt-6.1-sol|api.openai.com', last_cache_touch_at=now - 300, last_prompt_tokens=50000)
     monkeypatch.setattr(commands, 'session_env', lambda n: KEY if n == 'HERMES_SESSION_KEY' else '')
     added = commands.handle('add every 20m Owner wake', SimpleNamespace(get_engine=lambda: engine))
-    assert '20.0m warm' in added
+    assert '20m warm' in added
     w, = engine.store.list_wakes(KEY)
     engine.clock.advance(w.next_due_at - now + 1)
     engine.tick()

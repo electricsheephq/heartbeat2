@@ -281,8 +281,8 @@ def test_N7_tool_cache_fields_match_due_or_unknown_watcher(engine, hermes_helper
     updated = engine.tool.handle({'action':'update', 'id':created['wake']['id'], 'note':'Task update'})
     listed = engine.tool.handle({'action':'list'})['wakes'][0]
     for text in (created['cache'], updated['cache'], listed['cache']):
-        if kind == 'at': assert '180.0m cold' in text
-        elif kind == 'every': assert '57.0m warm' in text
+        if kind == 'at': assert '180m cold' in text
+        elif kind == 'every': assert '57m warm' in text
         else: assert '1h' in text and 'last touch' in text and 'warm' not in text and 'cold' not in text
 
 

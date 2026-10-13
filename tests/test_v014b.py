@@ -248,7 +248,7 @@ def test_legacy_learned_row_resolves_for_full_route(engine, base, complete):
     assert cache.cache_ttl_for(route, store=engine.store) == (
         (240, 'learned') if complete else (None, 'unknown'))
     text = cache.line(engine.store, engine.store.get_session(KEY), engine.clock.now(), pricing=False)
-    assert ('4.0m' if complete else 'warm seen ≤4m') in text
+    assert ('4m' if complete else 'warm seen ≤4m') in text
     assert 'chatgpt.com' not in text
 
 

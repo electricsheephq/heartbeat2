@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.7 — 2026-10-13
+
+- The cache line in `/pulse add` and pulse tool results shows minutes rounded to 0.1 (`9.8m`, `2m`) instead of raw floats such as `9.811217749118805m` (#36).
+
 ## 0.1.6 — 2026-10-13
 
 - On platforms without message ids (Signal, SimpleX), an owner message is no longer counted a second time when Hermes appends its task list to it after a context compaction. The second count marked a silent wake as answered, so its text was shown (#33).
