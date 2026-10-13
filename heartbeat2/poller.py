@@ -41,8 +41,9 @@ def check_paused():
 
 class Poller:
     def __init__(self,ctx,store,policy,clock,*,paused=check_paused,jitter=None,
-                 compression_tip=None,session_key_fn=None,probe_runner=None):
+                 compression_tip=None,session_key_fn=None,probe_runner=None,boot_at=None):
         self.ctx,self.store,self.policy,self.clock=ctx,store,policy,clock
+        self.boot_at=clock.now() if boot_at is None else boot_at
         self.paused,self.jitter=paused,jitter or (lambda: random.uniform(-1,1))
         self.compression_tip=compression_tip or self._compression_tip
         from .intake import Intake
@@ -68,7 +69,17 @@ class Poller:
 
     def refresh(self):
         if self.refresh_policy:
-            self.policy=self.refresh_policy()
+            try: self.policy=self.refresh_policy()
+            except (ValueError,TypeError,OverflowError) as exc:
+                self.store.set_meta('settings_error',json.dumps([{'key':'policy','reason':str(exc),'effective':'previous policy'}]))
+            else:
+                errors=json.loads(self.store.get_meta('settings_error') or '[]')
+                if len(errors)==1 and errors[0].get('key')=='policy':
+                    self.store.set_meta('settings_error','')
+
+    def settings_notice(self):
+        errors=json.loads(self.store.get_meta('settings_error') or '[]')
+        return '\n'.join(f'Setting ignored: {e["key"]} ({e["reason"]}); using {e["effective"]!r}' for e in errors)
 
     def injection_allowed(self):
         try:
@@ -119,7 +130,7 @@ class Poller:
                     s.set_meta('recovered:'+o.id,'1')
                 elif o.state=='started': self.interrupt(o,'restart')
             for session in s.list_sessions() if self.process_start else []:
-                if session.busy_since is not None:
+                if session.busy_since is not None and session.busy_since<self.boot_at:
                     s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
             # Persisted future deadlines remain future. time_due() coalesces
             # genuinely overdue intervals at the next tick without changing them
@@ -459,7 +470,7 @@ class Poller:
             if not self.policy.owner_silent_checkin: return 'setting_off',True,None
             after=self.policy.checkin_after_hours*3600*(2 if w.ignored_streak else 1)
             if s and s.last_human_at is not None and now-s.last_human_at<after: return 'checkin_not_due',True,None
-        held_paused=o.state=='pending' and o.held_since is not None and w.status=='paused'
+        held_paused=o.state=='pending' and w.status=='paused' and (o.held_since is not None or is_watcher(w))
         if w.status!='active' and not held_paused: return 'expired' if w.status=='expired' else 'wake_inactive',False,None
         if w.expires_at is not None and now>=w.expires_at: return 'expired',False,None
         if w.max_fires is not None and w.fires>=w.max_fires: return 'max_fires',False,None
@@ -609,7 +620,8 @@ class Poller:
             self.end_max_fires(s.get_wake(w.id))
             if provider and not s.get_meta('provider_health'): self.provider_failure(provider)
             session=s.get_session(w.session_key)
-            if session: s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
+            if session and not (cause=='restart' and session.busy_since is not None and session.busy_since>=self.boot_at):
+                s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None)
             return True
 
     @staticmethod

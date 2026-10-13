@@ -121,7 +121,7 @@ def _add(engine, session, text):
     _activation(engine,session,wake)
     result = engine.tool.prepare(wake, {'trigger':trigger})
     created = engine.store.create_wake(result.wake)
-    return _item(engine, created)+_clamps(result.clamped)+'\n'+engine.cache_line(created,seconds=created.eff_interval_s)
+    return _item(engine, created)+_clamps(result.clamped)+'\n'+engine.tool.cache_result(created)
 
 
 def _clamps(clamped):
@@ -171,6 +171,7 @@ def handle(raw_args, runtime):
                          f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
                 held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
                 if held: lines.append(f'Held items: {held}')
+                if engine.settings_notice(): lines.append(engine.settings_notice())
                 if cache.ttl_for_session(engine.store,session)==(300,'hermes'):
                     lines.append('your Claude cache lasts 5 min, so every wake is cold; set `prompt_caching: {cache_ttl: auto}` (1h for chat) in config.yaml')
                 health=json.loads(engine.store.get_meta('provider_health') or '{}')

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.4 — 2026-10-13
+
+- At start a rejected setting falls back to its default; on a live change it keeps its last good value, and your other changes still apply. `/pulse status` and pulse tool results name the ignored setting.
+- Explain the error threshold, source switches and ledger retention in the Settings form.
+- Hold pending watcher matches through a governor pause and release them after keep, slow or resume.
+- Preserve busy flags for turns started in this process when restart recovery runs.
+- Use the tool's cache labels on owner commands and governor cards; when-silent check-ins show TTL and last touch without warm/cold claims.
+- Count a crash-resumed wake turn's tokens and estimated cost on the wake and the daily ledger. It still never counts as a fire or delivery.
+- Keep the provider's full base URL in cache routes (without userinfo, query or fragment), so custom endpoints that declare prompt caching get the TTL Hermes uses. Host-only routes stored by earlier versions still resolve.
+- Correct command-watcher documentation: the allowlisted environment does not pass proxy or custom-CA variables yet.
+
 ## 0.1.3 — 2026-10-13
 
 - Silence crash-resumed wake replays, including a replay that arrives before restart recovery runs, and reject stale responses. Each replay counts as a model turn toward the daily cap, never as a fire or delivery. Only an admitted owner message (not a bot or unauthorized sender) marks a resumed turn as the owner's.
@@ -37,7 +48,8 @@ gh watchers that authenticated only through `GH_TOKEN`/`GITHUB_TOKEN` in the
 gateway environment stop authenticating: run `gh auth login` (hosts.yml or
 keyring) for the gateway's user before upgrading. Command watchers also no longer
 inherit proxy, custom-CA or D-Bus variables (`HTTPS_PROXY`, `SSL_CERT_FILE`,
-`DBUS_SESSION_BUS_ADDRESS`); configure those in gh/git config instead.
+`DBUS_SESSION_BUS_ADDRESS`). The command watcher's allowlisted environment
+does not pass proxy or custom-CA variables yet; gh has no config workaround for them.
 
 ## 0.1.0 — 2026-10-12
 

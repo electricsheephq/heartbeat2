@@ -253,9 +253,31 @@ class PulseRig:
                 break
             except AssertionError:
                 if attempt == attempts - 1:
+                    log = self.gateway.hermes_home / "logs/agent.log"
+                    if text == "/pulse status" and log.exists() and "flush-cancelled" in log.read_text():
+                        raise AssertionError("Hermes Telegram duplicate /stop wedge (upstream)\n" + self.ctx()) from None
                     raise
         self.gateway.wait_idle(timeout=30)
         return inbound
+
+    def after_stop(self):
+        """Wait for interruption completion before sending same-chat status input."""
+        self.wait(lambda: any("⚡ Stopped" in t for t in self.texts()), "visible stop ack", 90)
+
+        def ended():
+            logs = self.gateway.hermes_home / "logs"
+            return any(path.exists() and phrase in path.read_text() for path, phrase in (
+                (logs / "gateway.log", "Discarding stale agent result"),
+                (logs / "agent.log", "Turn ended: reason=interrupted")))
+
+        self.wait(ended, "stopped agent result discarded or turn ended", 30)
+        self.gateway.wait_idle(timeout=30)
+        time.sleep(1)
+
+    def injections(self):
+        """Gateway dispatches, including repeated dispatches of the same marker."""
+        log = self.gateway.hermes_home / "logs/gateway.log"
+        return log.read_text().count("Plugin message injection dispatched: plugin=heartbeat2")
 
     def arm(self, note="e2e-wake", delay="1m"):
         before = {r["id"] for r in self.rows("wakes")}

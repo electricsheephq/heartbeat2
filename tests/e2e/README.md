@@ -3,7 +3,7 @@
 These opt-in tests run the shipping Hermes gateway and Telegram adapter against
 Hermes's loopback Bot API stand-in and scripted OpenAI-compatible model. No
 Telegram account, real token, model spend, or live profile is used. The default
-unit run skips all 18 cells (E2 has two display variants).
+unit run skips all 19 cells (E2 has two display variants).
 
 Use a separate read-only checkout for each exact Hermes commit:
 
@@ -42,7 +42,9 @@ floors, disables streaming, and restricts tools to `heartbeat2`. Tool Search is
 explicitly off so the scripted direct `pulse` calls are offered and executed.
 E2's default Telegram display keeps tool progress/reasoning off; its second cell
 sets `display.platforms.telegram.tool_progress: new` and `show_reasoning: true`.
-That cell allows Hermes' own `⚙️ pulse` progress bubble, which appears depending
+Before arming, that cell holds an owner tool continuation until Hermes' own
+`⚙️ pulse` progress bubble is visible, proving the display setting takes effect.
+The wake allows that progress bubble, which appears depending
 on timing (README: silence covers the final reply), and fails on any reply or
 reasoning text.
 The gateway still uses its real streaming provider client.
@@ -64,6 +66,12 @@ queries, and recorded provider request bodies. `/pulse status` is a same-chat
 delivery barrier and does not count as an owner reply.
 The status barrier uses at most three sends to cover the upstream adapter-close
 window (#121393); arming and owner/model input are never retried.
+E7 waits for the visible stop ack, interruption completion in the logs, gateway
+idle, and a one-second grace before that barrier. A status timeout with
+`flush-cancelled` in the agent log names the upstream duplicate `/stop` wedge.
+E11/E14 count real gateway injection dispatches as well as distinct wake markers.
+The invalid-setting cell changes only the rig's live config after arming an owner
+one-shot; it checks one delivery and the `Setting ignored: quiet_hours` status notice.
 Negative replay/loop claims have a bounded poller-tick observation window;
 they are not soak claims.
 

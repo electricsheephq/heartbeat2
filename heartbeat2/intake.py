@@ -142,6 +142,7 @@ class Flight:
     invalid: bool=False
     scratch: str | None=None
     owner_replied: bool=False
+    replay: bool=False
 
 
 class Intake:
@@ -378,7 +379,7 @@ class Intake:
                             e.interrupt(o,'restart')
                             w=s.get_wake(wid)
                             s.cas_session(key,{'busy_since':None},busy_since=now)  # this replay turn is running
-                        self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,invalid=True)
+                        self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,invalid=True,replay=True)
                         stamp='resumed_turn:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
                         updates={'model_turns':w.model_turns+1}
                         if w.status!='paused' and (not w.status_reason or w.status in {'failed','done'}):
@@ -544,13 +545,24 @@ class Intake:
             if priced:
                 cache.touch(s,session,started_at=kwargs.get('started_at'),route=route,prompt=prompt,read=read,api_mode=kwargs.get('api_mode',''))
         f=self.flights.get(session_id)
-        if not f or f.invalid or turn_id and f.turn_id and turn_id!=f.turn_id: return None
-        o=s.get_occurrence(f.wake_id,f.dedupe_key)
-        if o and o.attempt==f.attempt: s.set_meta('provider_error:'+o.id,'')
+        if not f or f.invalid and not f.replay or turn_id and f.turn_id and turn_id!=f.turn_id: return None
         price=None
         if priced:
             try: price=cache.cost(route,prompt=prompt,read=read,written=written,out=count('completion_tokens','output_tokens'),ttl=cache.cache_ttl_for(route,store=s,platform=s.get_session(key).platform,api_mode=kwargs.get('api_mode',''))[0])
             except Exception: pass
+        if f.invalid and f.replay:
+            counts={'tokens_in':prompt,'tokens_out':count('completion_tokens','output_tokens'),
+                    'cache_read_tokens':read,'cache_write_tokens':written,
+                    'cost_microusd':round(price*1e6) if price is not None else 0,
+                    'unpriced_calls':int(price is None)}
+            with s.atomic():
+                w=s.get_wake(f.wake_id)
+                if w and s.cas_wake(w.id,w.status,expected_version=w.version,
+                    **{k:getattr(w,k)+v for k,v in counts.items()}):
+                    e.ledger(w,**counts)
+            return None
+        o=s.get_occurrence(f.wake_id,f.dedupe_key)
+        if o and o.attempt==f.attempt: s.set_meta('provider_error:'+o.id,'')
         with s.atomic():
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
             if o and o.state=='started':

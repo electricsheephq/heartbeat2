@@ -281,7 +281,7 @@ def test_usage_split_and_human_cache_touch(engine, monkeypatch):
     engine.intake.pre_llm_call(session_id='sid',turn_id='human',user_message='Hello',platform='telegram')
     engine.intake.post_api_request(session_id='sid',turn_id='human',usage=usage,started_at=engine.clock.now()-52,**route)
     s=engine.store.get_session(KEY)
-    assert s.last_route == 'openai|gpt-6.1-sol|api.openai.com'
+    assert s.last_route == 'openai|gpt-6.1-sol|https://api.openai.com/v1'
     assert s.last_cache_touch_at==engine.clock.now()-52 and s.last_cache_hit_ratio==.7 and s.last_prompt_tokens==100
     assert s.last_activity_at==engine.clock.now()
     engine.intake.on_session_end(session_id='sid',turn_id='human',completed=True)

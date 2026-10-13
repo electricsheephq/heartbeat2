@@ -57,7 +57,7 @@ jobs:
           mkdir -p "$HEARTBEAT2_E2E_RESULTS"
           set +e
           ../hermes/.venv/bin/python -m pytest tests/e2e -q -n 4 \
-            -p no:cacheprovider --junitxml="$HEARTBEAT2_E2E_RESULTS/results.xml" \
+            -p no:cacheprovider --durations=0 --junitxml="$HEARTBEAT2_E2E_RESULTS/results.xml" \
             > "$HEARTBEAT2_E2E_RESULTS/full.log" 2>&1
           result=$?
           cat "$HEARTBEAT2_E2E_RESULTS/full.log"
@@ -70,7 +70,7 @@ jobs:
           skipped = [c.get("name") for c in cases
                      if any(x.get("type") != "pytest.xfail" for x in c.findall("skipped"))]
           print(f"e2e cells: {len(cases)}, skipped: {skipped}")
-          sys.exit(0 if len(cases) >= 18 and not skipped else 1)
+          sys.exit(0 if len(cases) >= 19 and not skipped else 1)
           PY
       - name: Retain failed gateway evidence
         if: failure()

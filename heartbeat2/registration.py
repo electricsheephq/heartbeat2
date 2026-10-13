@@ -42,6 +42,10 @@ class Runtime:
         self.home=Path(ctx._manager.home_path)
         self.scope=ctx._manager.scope_key
         self.clock=clock or SystemClock()
+        self.boot_at=self.clock.now()
+        self.settings_error=''
+        self._last_good=None
+        self._policy_lock=threading.Lock()
         self.bootstrap_interval,self.tick_interval=bootstrap_interval,tick_interval
         self._engine=None
         self._engine_lock=threading.RLock()
@@ -59,7 +63,7 @@ class Runtime:
     def policy(self):
         from dataclasses import fields
         from .policy import Policy
-        with home_scope(self.home):
+        with self._policy_lock,home_scope(self.home):
             settings={f.name:self.ctx.get_config(f.name,getattr(Policy(),f.name))
                       for f in fields(Policy) if f.name not in {'clock','profile_timezone'}}
             profile=''
@@ -67,7 +71,25 @@ class Runtime:
                 from hermes_time import get_timezone_name
                 profile=get_timezone_name()
             except Exception: pass
-            return Policy.from_settings(settings,clock=self.clock,profile_timezone=profile)
+            errors={}
+            try:
+                policy=Policy.from_settings(settings,clock=self.clock,profile_timezone=profile)
+            except (ValueError,TypeError,OverflowError):
+                for key,value in list(settings.items()):
+                    try: Policy.from_settings({key:value},clock=self.clock,profile_timezone=profile)
+                    except (ValueError,TypeError,OverflowError) as exc:
+                        errors[key]=str(exc)
+                        if self._last_good is not None: settings[key]=getattr(self._last_good,key)
+                        else: settings.pop(key)
+                try: policy=Policy.from_settings(settings,clock=self.clock,profile_timezone=profile)
+                except (ValueError,TypeError,OverflowError):
+                    policy=self._last_good or Policy.from_settings({},clock=self.clock,profile_timezone=profile)
+            self._last_good=policy
+            self.settings_error=json.dumps([{'key':key,'reason':reason,'effective':getattr(policy,key)}
+                                            for key,reason in errors.items()]) if errors else ''
+            if self._engine is not None and self._engine.store.get_meta('settings_error')!=self.settings_error:
+                self._engine.store.set_meta('settings_error',self.settings_error)
+            return policy
 
     def get_engine(self):
         with self._engine_lock:
@@ -78,7 +100,9 @@ class Runtime:
                 with home_scope(self.home):
                     store=Store(self.home/'plugin-data/heartbeat2/pulse.db',self.clock)
                     try:
-                        self._engine=Poller(self.ctx,store,self.policy(),self.clock)
+                        self._engine=Poller(self.ctx,store,self.policy(),self.clock,boot_at=self.boot_at)
+                        if store.get_meta('settings_error')!=self.settings_error:
+                            store.set_meta('settings_error',self.settings_error)
                     except BaseException:
                         store.close()
                         raise
@@ -162,7 +186,7 @@ class Runtime:
                     if runner is None:
                         from .poller import Poller
                         e=self.get_engine()
-                        runner=Poller(self.ctx,e.store,e.policy,self.clock)
+                        runner=Poller(self.ctx,e.store,e.policy,self.clock,boot_at=self.boot_at)
                         runner.refresh_policy=self.policy
                         runner.process_start=not self._reconciled
                         self._runner=runner

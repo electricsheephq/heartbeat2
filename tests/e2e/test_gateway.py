@@ -52,6 +52,26 @@ def test_owner_at_wake_delivers_once(make_rig):
 @pytest.mark.parametrize("loud", [False, True], ids=["default", "tool-progress-reasoning"])
 def test_silent_verdict_shows_nothing(make_rig, loud):
     rig = make_rig(loud=loud)
+    if loud:
+        from tests.e2e.core.history._helpers import Script
+        from tests.fakes.fake_llm_provider import Text, ToolCall
+
+        before_control = rig.visible_ids()
+
+        def progress_visible(record):
+            rig.wait(lambda: any(PROGRESS_BUBBLE.fullmatch(t)
+                                 for t in rig.new_visible(before_control)),
+                     "owner tool-progress positive control", 20)
+            return Text("PROGRESS-CONTROL-DONE")
+
+        script = Script()
+        script.actions = [ToolCall("pulse", {"action": "list"}), progress_visible]
+        rig.llm._responder = script
+        try:
+            rig.owner("list wakes for display control", "PROGRESS-CONTROL-DONE")
+            script.raise_errors("tool-progress positive control")
+        finally:
+            rig.llm._responder = rig.director
     rig.director.notify = False
     rig.director.reasoning = "E2E reasoning fixture"
     wid = rig.arm()
@@ -114,6 +134,7 @@ def test_stop_during_wake(make_rig):
 
     rig.director.action = stop
     wid = rig.arm()
+    rig.after_stop()
     row = rig.settled(wid, ("interrupted",))
     rig.director.wake_script.raise_errors("stop")
     assert not row["error"].startswith("provider_error"), row
@@ -244,6 +265,7 @@ def test_provider_error_backoff(make_rig):
     assert json.loads(health)["until"] > time.time(), health
     rig.tick_barrier()
     assert len(rig.director.wake_starts) == 1 and row["attempt"] == 1
+    assert rig.injections() == 1
     # Hermes may omit on_session_end on API failure: settlement then waits for the
     # HERMES_AGENT_TIMEOUT fallback (default 30 minutes), outside this scenario's bound.
     assert row["state"] in {"started", "interrupted"}, row
@@ -326,10 +348,31 @@ def test_api_error_watcher_no_self_loop(make_rig):
     rig.tick_barrier(seconds=20)
     assert len(rig.director.wake_starts) == 1
     watcher_rows = rig.rows("occurrences", "WHERE wake_id=?", (watcher,))
+    assert rig.injections() == 1
     assert len(watcher_rows) == 1, watcher_rows
     assert watcher_rows[0]["state"] == "pending" and watcher_rows[0]["error"] == "provider_unavailable"
     assert any(r["key"] == "api_cooldown:" + watcher and float(r["value"]) > 0 for r in rig.rows("meta"))
     assert sum(r["fires"] for r in rig.rows("ledger")) == 1
+
+
+def test_invalid_setting_does_not_halt_wakes(make_rig):
+    # A rejected live setting must not halt wakes; /pulse status names it.
+    import hermes_yaml as yaml
+
+    rig = make_rig()
+    wid = rig.arm("invalid-setting", delay="10s")
+    path = rig.gateway.hermes_home / "config.yaml"
+    config = yaml.safe_load(path.read_text())
+    config["plugins"]["entries"]["heartbeat2"]["settings"]["quiet_hours"] = "10pm-6am"
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+    row = rig.settled(wid)
+    rig.tick_barrier()
+    assert row["delivered"] == 1 and row["attempt"] == 1, row
+    assert rig.injections() == 1 and len(rig.wake_openers()) == 1
+    assert sum("WAKE-DELIVERED" in t for t in rig.texts()) == 1
+    assert any(line.startswith("Setting ignored: quiet_hours")
+               for text in rig.texts() for line in text.splitlines()), rig.texts()
+    rig.assert_tools_ok()
 
 
 def test_mute_holds_watcher_until_reply(make_rig):

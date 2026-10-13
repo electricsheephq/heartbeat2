@@ -6,11 +6,22 @@ from urllib.parse import urlsplit
 
 
 def route_key(provider='', model='', base_url=''):
-    return '|'.join((provider or '', model or '', urlsplit(base_url or '').hostname or ''))
+    url = urlsplit(base_url or '')
+    host = url.hostname or ''
+    if ':' in host: host = '['+host+']'
+    if host and url.port is not None: host += ':'+str(url.port)
+    base = (url.scheme+'://'+host+url.path) if host else ''
+    return '|'.join((provider or '', model or '', base))
+
+
+def _base(part):
+    return part if '://' in part else 'https://'+part
 
 
 def cache_ttl_for(route, *, store=None, platform='', api_mode=''):
-    provider, model, host = (route or '||').split('|', 2)
+    provider, model, part = (route or '||').split('|', 2)
+    base = _base(part) if part else ''
+    host = urlsplit(base).hostname or ''
     if 'claude' in model.lower():
         try:
             from agent.agent_runtime_helpers import configured_cache_ttl, anthropic_prompt_cache_policy, _raw_cache_ttl_from_config, cache_ttl_means_disabled
@@ -18,7 +29,7 @@ def cache_ttl_for(route, *, store=None, platform='', api_mode=''):
             from agent.session_source import session_source_for
             raw = _raw_cache_ttl_from_config('5m')
             if cache_ttl_means_disabled(raw): return None, 'off'
-            stub = SimpleNamespace(provider=provider, model=model, base_url='https://'+host if host else '', api_mode=api_mode, _cache_disabled=False)
+            stub = SimpleNamespace(provider=provider, model=model, base_url=base, api_mode=api_mode, _cache_disabled=False)
             if anthropic_prompt_cache_policy(stub)[0]:
                 ttl = configured_cache_ttl()
                 if raw == 'auto': ttl = auto_cache_ttl_for_source(session_source_for(platform))
@@ -29,7 +40,8 @@ def cache_ttl_for(route, *, store=None, platform='', api_mode=''):
         match = re.search(r'gpt-(\d+)\.(\d+)|gpt-(\d+)(?:-|$)', model.lower())
         if match and (int(match[1] or match[3]) >= 6 or (int(match[1] or match[3]) == 5 and int(match[2] or 0) >= 6)):
             return 1800, 'openai'
-    learned = json.loads(store.get_meta('cache_routes') or '{}').get(route, {}) if store else {}
+    rows = json.loads(store.get_meta('cache_routes') or '{}') if store else {}
+    learned = rows.get(route, rows.get(f'{provider}|{model}|{host}', {}))
     warm, cold = learned.get('max_warm_gap'), learned.get('min_cold_gap')
     return (warm, 'learned') if warm is not None and cold is not None and warm < cold else (None, 'unknown')
 
@@ -68,14 +80,15 @@ def cost(route, *, prompt=0, read=0, written=0, out=0, ttl=None):
         from agent.usage_pricing import CanonicalUsage, get_pricing_entry, estimate_usage_cost
     except ImportError:
         return None
-    provider, model, host = (route or '||').split('|',2)
-    entry = get_pricing_entry(model, provider=provider, base_url='https://'+host if host else '')
+    provider, model, part = (route or '||').split('|',2)
+    base = _base(part) if part else ''
+    entry = get_pricing_entry(model, provider=provider, base_url=base)
     if not entry: return None
     usage = CanonicalUsage(input_tokens=max(0,prompt-read-written), cache_read_tokens=read,
         cache_write_tokens=written if entry.cache_write_cost_per_million is not None else 0, output_tokens=out)
     if written and entry.cache_write_cost_per_million is None:
         usage = CanonicalUsage(input_tokens=usage.input_tokens+written, cache_read_tokens=read, output_tokens=out)
-    amount = estimate_usage_cost(model,usage,provider=provider,base_url='https://'+host if host else '').amount_usd
+    amount = estimate_usage_cost(model,usage,provider=provider,base_url=base).amount_usd
     if amount is None: return None
     correction = written*(2*float(entry.input_cost_per_million)-float(entry.cache_write_cost_per_million))/1e6 if ttl==3600 and 'claude' in model.lower() and entry.cache_write_cost_per_million is not None else 0
     return float(amount)+correction
@@ -89,7 +102,10 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
         age = max(0,now-(session.last_cache_touch_at if session.last_cache_touch_at is not None else now))/60
         if not ttl:
             if watcher: return f'Cache: {provider} TTL {source} · last touch {age:.0f}m ago'
-            row = json.loads(store.get_meta('cache_routes') or '{}').get(session.last_route,{})
+            route_provider, model, part = session.last_route.split('|', 2)
+            host = urlsplit(_base(part)).hostname or ''
+            rows = json.loads(store.get_meta('cache_routes') or '{}')
+            row = rows.get(session.last_route, rows.get(f'{route_provider}|{model}|{host}', {}))
             bracket = ', '.join(f'{label}{row[key]/60:g}m' for key,label in (('max_warm_gap','warm seen ≤'),('min_cold_gap','cold ≥')) if key in row)
             return f'Cache: {provider} TTL {source}'+(f' ({bracket})' if bracket else '')
         label = f'Cache: {provider} {"1h" if ttl==3600 else str(ttl/60)+"m"} · last touch {age:.0f}m ago'
