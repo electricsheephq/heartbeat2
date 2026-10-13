@@ -44,18 +44,21 @@ Heartbeats, as OpenClaw popularised them, made agents feel alive. They also prod
 | Messages to the wrong chat or person | There is no destination parameter at all. A wake can only return to the chat that armed it, and only in DMs by default. |
 | Most spend going to no-op ticks | Watchers decide without a model call. The no-op governor backs off, then pauses. |
 
-Totals over 23 deterministic scenarios (B1 simulation driving the real engine; `python -m bench.run --baseline --gate`, source `eded2e0`, v0.1.12; the totals are unchanged since v0.1.0). The comparison arm is a naive heartbeat-1.0 emulator built from documented failure reports. It is **not** a measurement of OpenClaw itself.
+Totals over 34 deterministic scenarios (B1 simulation driving the real engine; `python -m bench.run --baseline --gate`, source `ca12767`, v0.1.14 engine; the gate report records content digests). The comparison arm is a naive heartbeat-1.0 emulator built from documented failure reports. It is **not** a measurement of OpenClaw itself.
 
 | Across the suite | HeartBeat 2.0 | Naive heartbeat |
 |---|---:|---:|
 | Duplicate deliveries | 0 | 1 |
-| Required fires missed | 0 | 9 |
+| Required fires missed | 0 | 27 |
 | Sentinel text leaked into chat | 0 | 2 |
-| Messages to the wrong chat | 0 | 2 |
+| Messages to the wrong chat | 0 | 6 |
 | Most messages in one minute | 1 | 100 |
-| Model turns | 42 | 504 |
-| Model turns that found nothing | 15 | 78 |
-| Estimated input tokens | 6,300,000 | 75,600,000 |
+| Model turns | 110 | 588 |
+| Model turns that found nothing | 15 | 82 |
+| Estimated input tokens (total; calls × context) | 33,000,000 | 176,400,000 |
+| Estimated cache read tokens | 25,950,000 | 116,550,000 |
+| Estimated cache write tokens | 7,050,000 | 59,850,000 |
+| Estimated output tokens | 33,000 | 176,400 |
 
 Every scenario and its hard bars are in [bench/README.md](bench/README.md); the full per-scenario table is regenerated per commit.
 
@@ -135,6 +138,8 @@ pulse tool results name the ignored setting.
 
 A wake turn is a normal turn in your chat: the agent has the same tools as in any other turn there. HeartBeat 2.0 does not restrict them, so arm wakes in conversations whose tools you are happy to have run while you are away.
 
+Every arm returns a receipt with timing, any quiet-hour hold or unanswered mute, and expiry. The agent relays that receipt instead of promising exact timing; a proposed wake is awaiting your OK.
+
 Watchers available to the agent:
 
 | Watcher | Fires when |
@@ -147,7 +152,7 @@ Watchers available to the agent:
 
 Hermes events are selected by `trigger.kind`: `kanban_completed`, `kanban_blocked`, `kanban_worker_exited`, `subagent_done`, `api_error`, `reaction` (with an optional `emojis` filter) and `message_edited`.
 
-Any watcher can carry a `deadline`, so "nothing happened by Friday" fires once, too.
+Only probe and event watchers can carry a `deadline`: it is a one-time "nothing happened" fallback, and the watcher keeps going until it expires. Quiet hours can hold that fallback wake.
 
 ## Settings
 These live under `plugins.entries.heartbeat2.settings` and appear in **Settings ▸ Plugins**. The agent's tool can't change them. When a request goes past a bound, the tool tells the agent exactly what it clamped.
@@ -196,6 +201,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 Every guardrail is configurable:
 - Recurring timers repeat at most every 15 minutes, or every 55 minutes when the agent arms one without a watcher. Watchers check at most once a minute.
 - Every wake expires after 14 days at most.
+- A wake that could not fire before it expires is refused, including an owner-silence wait or a probe's next check without a deadline. On create, an implicit lifetime stretches to fit, up to the maximum. Existing wakes keep their expiry; an edit past it is refused with a hint to set `until.expires` when extending can help, otherwise it names the maximum lifetime. Quiet hours count at the real dispatch time for one-shot times and watcher deadlines. A timed quiet override chains into the default quiet hours if they still apply when it ends. A one-shot outside the catch-up window is refused; one due now fires on the next check. A timed resume that cannot fit ends the wake with a notice. Receipts name the silence duration and are at most 240 characters; long ones end with an ellipsis.
 - Daily caps hold watchers until capacity frees, including on a new local day; your unedited one-shot reminders, including one-time reminders you ask for in chat, bypass both caps.
 - After 2 unanswered messages, agent watchers hold until you write; other agent timers and built-in check-ins drop their occurrence. Wakes you armed, and one-time reminders you ask for in chat (the agent marks them `owner_asked`), still fire unless the agent edited their trigger, timing or note; a watcher-only conversion you requested with `/pulse watch` keeps owner status. Held matches merge, keeping the latest payload; pauses preserve them and expiry is visible in `/pulse why`.
 - A wake turn that carries untrusted data, such as a log line or a web page, cannot arm new recurring work.

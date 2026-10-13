@@ -1,0 +1,69 @@
+id: change-after-final
+title: 'Known #58 limit: final-state change watcher is silent but its deadline fires
+  once'
+cites:
+- 'B1 realism: Known #58 limit: final-state change watcher is silent but its deadline
+  fires once'
+settings:
+  probe_commands: $FIXTURES/read-status
+arms:
+- ref: silent
+  args:
+    note: Report useful news for silent
+    trigger:
+      kind: command
+      command:
+      - $FIXTURES/read-status
+      - $HOME/status.txt
+      check_every: 5m
+      fire_on: change
+- ref: deadline
+  args:
+    note: Report useful news for deadline
+    trigger:
+      kind: command
+      command:
+      - $FIXTURES/read-status
+      - $HOME/status.txt
+      check_every: 5m
+      fire_on: change
+      deadline: in 15m
+timeline:
+- t: 0
+  event: file
+  path: status.txt
+  text: 'final
+
+    '
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Complete.
+duration: 1800
+expectations:
+  required_fires:
+  - wake: deadline
+    window:
+    - 900
+    - 915
+  forbidden_deliveries: []
+  bars:
+    silent:
+      deliveries: 0
+      model_wakes: 0
+      status: active
+      wake_fields: {}
+    deadline:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+      wake_fields: {}
+heartbeat_checklist:
+- ref: silent
+  session: owner
+  note: Report useful news for silent
+- ref: deadline
+  session: owner
+  note: Report useful news for deadline
+baseline_interval_s: 1800

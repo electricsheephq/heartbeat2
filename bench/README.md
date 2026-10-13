@@ -41,6 +41,21 @@ respond results count as verdicts. All HB2 hard bars and declared scenario bars
 are gated; baseline bars are reported. A disabled transform is tested to fail
 on sentinel leaks. Generated reports include dirty-source content identity.
 
-Default model context cost is 150,000 tokens per started wake turn, an estimate,
-not provider metering. No-op backoff scenarios must demonstrate the actual
-pause and a single card, rather than merely stopping the simulation early.
+The wake token estimate uses `context_tokens=150000` input tokens per call,
+`calls_per_turn=2`, `output_tokens_per_call=150`, and `cache_ttl_s=300` by default.
+Both arms use the same scenario keys and defaults. The first call reads the
+cache when the gap since the previous model turn in that profile/session is
+at most the TTL; otherwise it writes the cache. Later calls always read it.
+Owner model turns warm the cache but their cost is outside these wake totals.
+The first model turn in a session has no previous cache touch and writes it.
+`est_tokens` remains total input (calls × context), equal to `est_input_tokens`;
+`est_cache_read_tokens` + `est_cache_write_tokens` partition that input.
+`est_output_tokens` is separate. These are estimates, not provider metering.
+
+B1 now has 34 scenarios, including caps, mute classes, production quiet defaults,
+DM admission, cron, command changes, cache snap, ignored/error ladders, lifetime
+feasibility and the #58 final-state change-watcher limit. `url-trigger` is skipped:
+the simulator has no loopback URL stub, and B1 adds no network. The command
+fixture is an allowlisted read-only status-file reader. New observation and
+stored-wake bars are hard gates alongside delivery counts and required windows.
+No-op, ignored and error ladders must pause and expose exactly one owner card.

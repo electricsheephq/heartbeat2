@@ -1,0 +1,53 @@
+id: error-ladder
+title: Repeated failed injections pause once; provider backoff itself adds no errors
+cites:
+- 'B1 realism: Repeated failed injections pause once; provider backoff itself adds
+  no errors'
+settings: {}
+arms:
+- ref: error
+  args:
+    note: Report useful news for error
+    trigger:
+      kind: every
+      every: 55m
+timeline:
+- t: 0
+  event: injector
+  mode: return_false
+- t: 3300
+  event: provider_failure
+- t: 18000
+  event: human
+- t: 18100
+  event: human
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Complete.
+duration: 19000
+expectations:
+  required_fires: []
+  forbidden_deliveries: []
+  bars:
+    error:
+      deliveries: 0
+      model_wakes: 0
+      status: paused
+      wake_fields:
+        error_streak: 5
+        status_reason: governor:error
+  observations:
+  - event: gate
+    ref: error
+    reason: provider_unavailable
+    window:
+    - 3300
+    - 3300
+  cards: 1
+heartbeat_checklist:
+- ref: error
+  session: owner
+  note: Report useful news for error
+baseline_interval_s: 1800

@@ -16,6 +16,10 @@ ROOT=Path(__file__).resolve().parents[1]
 CAS=('heartbeat2/store.py',"WHERE wake_id=? AND dedupe_key=? AND state='pending'\"\"\",\n                (epoch","WHERE wake_id=? AND dedupe_key=?\"\"\",\n                (epoch")
 FLOCK=('heartbeat2/poller.py','            fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)','            pass')
 MUTANTS={
+    'governor_pause_off':[('heartbeat2/governor.py','    if rule: pause(engine,w,rule)','    if False: pause(engine,w,rule)')],
+    'caps_off':[('heartbeat2/poller.py','        if cap and not (owner_class(w) and one_shot(w)):','        if False:')],
+    'mute_class_regress':[('heartbeat2/policy.py','unanswered_count >= self.max_unanswered and not owner_class(wake)', 'unanswered_count >= self.max_unanswered and not is_owner(wake)')],
+    'dm_only_off':[('heartbeat2/policy.py','        if self.dm_only and chat_type != "dm":','        if False:')],
     'replay_slots':[('heartbeat2/poller.py',"                        s.add_occurrence(w.id,due.dedupe_key,state=due.state)\n", "                        s.add_occurrence(w.id,due.dedupe_key,state=due.state)\n                    if w.kind in RECURRING_KINDS and due.state=='pending':\n                        k=due.scheduled_for+w.eff_interval_s\n                        while k<=now:\n                            s.add_occurrence(w.id,f't:{k:.17g}'); k+=w.eff_interval_s\n")],
     'claim_cas_off':[CAS], 'flock_off':[FLOCK], 'flock_and_claim_off':[FLOCK,CAS],
     'fencing_off':[('heartbeat2/intake.py',"if f.invalid or not o or o.state!='started' or o.attempt!=f.attempt: return '[SILENT]'", "if f.invalid or not o or o.state!='started' or o.attempt!=f.attempt: return None")],
@@ -28,6 +32,8 @@ SCENARIOS={'replay_slots':['sleep-62294','hermes-scale-zero'],'claim_cas_off':['
            'flock_off':['duplicates-59703'],'flock_and_claim_off':['duplicates-59703'],
            'fencing_off':['duplicates-59703'],'estop_off':['estop-i19'],
            'transform_raw':['sentinel-17646'],'cancel_on_reply_off':['hermes-drained'],'silenced_human':['hermes-drained']}
+SCENARIOS.update(governor_pause_off=['ignored-ladder'], caps_off=['caps-owner-bypass'],
+                 mute_class_regress=['mute-classes'], dm_only_off=['dm-only'])
 GATE_ORDER_MUTANT=[('heartbeat2/poller.py',
     '        from .commands import quiet_until\n        quiet=quiet_until(self,s.session_key,urgent=w.urgent)',
     '        mute=self.policy.unanswered_gate(w,s.unanswered_count)\n        if mute: return mute,False,None\n        from .commands import quiet_until\n        quiet=quiet_until(self,s.session_key,urgent=w.urgent)')]
@@ -84,16 +90,19 @@ def control(tmp_path_factory):
 def mutant_budget():
     before=time.monotonic()
     yield
-    assert time.monotonic()-before<60, 'all mutants must stay below 60 s in total'
+    elapsed=time.monotonic()-before
+    print(f'mutant module total: {elapsed:.3f}s')
+    assert elapsed<60, 'all mutants must stay below 60 s in total'
 
 
 @pytest.mark.parametrize('mutant',MUTANTS)
 def test_R6_E1_E2_E3_mutant_gate(tmp_path,mutant,control):
+    before=time.monotonic()
     driver=DRIVER.replace('for s in load_scenarios()', 'for s in load_scenarios() if s["id"] in '+repr(SCENARIOS[mutant]))
     failures=scratch_run(tmp_path,MUTANTS[mutant],driver)
     introduced={(k,f) for k,rows in failures.items() for f in rows}-{(k,f) for k,rows in control.items() for f in rows}
     assert introduced,mutant+' survived'
-    print(mutant,sorted(introduced))
+    print(mutant,sorted(introduced),f'{time.monotonic()-before:.3f}s')
 
 
 @pytest.mark.parametrize('mutant', ['shell','timeout'])

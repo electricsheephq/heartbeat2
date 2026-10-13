@@ -1,0 +1,516 @@
+id: cron-trigger
+title: Cron fires on scheduled times over two days and respects the agent floor without
+  interval cache snap
+cites:
+- 'B1 realism: Cron fires on scheduled times over two days and respects the agent
+  floor without interval cache snap'
+settings:
+  max_messages_per_day: 100
+arms: []
+timeline:
+- t: 0
+  event: cache
+  ttl_s: 3600
+- t: 0
+  event: arm
+  arm:
+    ref: cron
+    args:
+      note: Report useful news for cron
+      trigger:
+        kind: cron
+        cron: '*/15 * * * *'
+- t: 3660
+  event: human
+  text: Continue.
+- t: 7260
+  event: human
+  text: Continue.
+- t: 10860
+  event: human
+  text: Continue.
+- t: 14460
+  event: human
+  text: Continue.
+- t: 18060
+  event: human
+  text: Continue.
+- t: 21660
+  event: human
+  text: Continue.
+- t: 25260
+  event: human
+  text: Continue.
+- t: 28860
+  event: human
+  text: Continue.
+- t: 32460
+  event: human
+  text: Continue.
+- t: 36060
+  event: human
+  text: Continue.
+- t: 39660
+  event: human
+  text: Continue.
+- t: 43260
+  event: human
+  text: Continue.
+- t: 46860
+  event: human
+  text: Continue.
+- t: 50460
+  event: human
+  text: Continue.
+- t: 54060
+  event: human
+  text: Continue.
+- t: 57660
+  event: human
+  text: Continue.
+- t: 61260
+  event: human
+  text: Continue.
+- t: 64860
+  event: human
+  text: Continue.
+- t: 68460
+  event: human
+  text: Continue.
+- t: 72060
+  event: human
+  text: Continue.
+- t: 75660
+  event: human
+  text: Continue.
+- t: 79260
+  event: human
+  text: Continue.
+- t: 82860
+  event: human
+  text: Continue.
+- t: 86460
+  event: human
+  text: Continue.
+- t: 90060
+  event: human
+  text: Continue.
+- t: 93660
+  event: human
+  text: Continue.
+- t: 97260
+  event: human
+  text: Continue.
+- t: 100860
+  event: human
+  text: Continue.
+- t: 104460
+  event: human
+  text: Continue.
+- t: 108060
+  event: human
+  text: Continue.
+- t: 111660
+  event: human
+  text: Continue.
+- t: 115260
+  event: human
+  text: Continue.
+- t: 118860
+  event: human
+  text: Continue.
+- t: 122460
+  event: human
+  text: Continue.
+- t: 126060
+  event: human
+  text: Continue.
+- t: 129660
+  event: human
+  text: Continue.
+- t: 133260
+  event: human
+  text: Continue.
+- t: 136860
+  event: human
+  text: Continue.
+- t: 140460
+  event: human
+  text: Continue.
+- t: 144060
+  event: human
+  text: Continue.
+- t: 147660
+  event: human
+  text: Continue.
+- t: 151260
+  event: human
+  text: Continue.
+- t: 154860
+  event: human
+  text: Continue.
+- t: 158460
+  event: human
+  text: Continue.
+- t: 162060
+  event: human
+  text: Continue.
+- t: 165660
+  event: human
+  text: Continue.
+- t: 169260
+  event: human
+  text: Continue.
+model_policy:
+  default:
+  - outcome: progress
+    notify: true
+    summary: News 0
+  - outcome: progress
+    notify: true
+    summary: News 1
+  - outcome: progress
+    notify: true
+    summary: News 2
+  - outcome: progress
+    notify: true
+    summary: News 3
+  - outcome: progress
+    notify: true
+    summary: News 4
+  - outcome: progress
+    notify: true
+    summary: News 5
+  - outcome: progress
+    notify: true
+    summary: News 6
+  - outcome: progress
+    notify: true
+    summary: News 7
+  - outcome: progress
+    notify: true
+    summary: News 8
+  - outcome: progress
+    notify: true
+    summary: News 9
+  - outcome: progress
+    notify: true
+    summary: News 10
+  - outcome: progress
+    notify: true
+    summary: News 11
+  - outcome: progress
+    notify: true
+    summary: News 12
+  - outcome: progress
+    notify: true
+    summary: News 13
+  - outcome: progress
+    notify: true
+    summary: News 14
+  - outcome: progress
+    notify: true
+    summary: News 15
+  - outcome: progress
+    notify: true
+    summary: News 16
+  - outcome: progress
+    notify: true
+    summary: News 17
+  - outcome: progress
+    notify: true
+    summary: News 18
+  - outcome: progress
+    notify: true
+    summary: News 19
+  - outcome: progress
+    notify: true
+    summary: News 20
+  - outcome: progress
+    notify: true
+    summary: News 21
+  - outcome: progress
+    notify: true
+    summary: News 22
+  - outcome: progress
+    notify: true
+    summary: News 23
+  - outcome: progress
+    notify: true
+    summary: News 24
+  - outcome: progress
+    notify: true
+    summary: News 25
+  - outcome: progress
+    notify: true
+    summary: News 26
+  - outcome: progress
+    notify: true
+    summary: News 27
+  - outcome: progress
+    notify: true
+    summary: News 28
+  - outcome: progress
+    notify: true
+    summary: News 29
+  - outcome: progress
+    notify: true
+    summary: News 30
+  - outcome: progress
+    notify: true
+    summary: News 31
+  - outcome: progress
+    notify: true
+    summary: News 32
+  - outcome: progress
+    notify: true
+    summary: News 33
+  - outcome: progress
+    notify: true
+    summary: News 34
+  - outcome: progress
+    notify: true
+    summary: News 35
+  - outcome: progress
+    notify: true
+    summary: News 36
+  - outcome: progress
+    notify: true
+    summary: News 37
+  - outcome: progress
+    notify: true
+    summary: News 38
+  - outcome: progress
+    notify: true
+    summary: News 39
+  - outcome: progress
+    notify: true
+    summary: News 40
+  - outcome: progress
+    notify: true
+    summary: News 41
+  - outcome: progress
+    notify: true
+    summary: News 42
+  - outcome: progress
+    notify: true
+    summary: News 43
+  - outcome: progress
+    notify: true
+    summary: News 44
+  - outcome: progress
+    notify: true
+    summary: News 45
+  - outcome: progress
+    notify: true
+    summary: News 46
+  - outcome: progress
+    notify: true
+    summary: News 47
+duration: 172800
+expectations:
+  required_fires:
+  - wake: cron
+    window:
+    - 3600
+    - 3615
+  - wake: cron
+    window:
+    - 7200
+    - 7215
+  - wake: cron
+    window:
+    - 10800
+    - 10815
+  - wake: cron
+    window:
+    - 14400
+    - 14415
+  - wake: cron
+    window:
+    - 18000
+    - 18015
+  - wake: cron
+    window:
+    - 21600
+    - 21615
+  - wake: cron
+    window:
+    - 25200
+    - 25215
+  - wake: cron
+    window:
+    - 28800
+    - 28815
+  - wake: cron
+    window:
+    - 32400
+    - 32415
+  - wake: cron
+    window:
+    - 36000
+    - 36015
+  - wake: cron
+    window:
+    - 39600
+    - 39615
+  - wake: cron
+    window:
+    - 43200
+    - 43215
+  - wake: cron
+    window:
+    - 46800
+    - 46815
+  - wake: cron
+    window:
+    - 50400
+    - 50415
+  - wake: cron
+    window:
+    - 54000
+    - 54015
+  - wake: cron
+    window:
+    - 57600
+    - 57615
+  - wake: cron
+    window:
+    - 61200
+    - 61215
+  - wake: cron
+    window:
+    - 64800
+    - 64815
+  - wake: cron
+    window:
+    - 68400
+    - 68415
+  - wake: cron
+    window:
+    - 72000
+    - 72015
+  - wake: cron
+    window:
+    - 75600
+    - 75615
+  - wake: cron
+    window:
+    - 79200
+    - 79215
+  - wake: cron
+    window:
+    - 82800
+    - 82815
+  - wake: cron
+    window:
+    - 86400
+    - 86415
+  - wake: cron
+    window:
+    - 90000
+    - 90015
+  - wake: cron
+    window:
+    - 93600
+    - 93615
+  - wake: cron
+    window:
+    - 97200
+    - 97215
+  - wake: cron
+    window:
+    - 100800
+    - 100815
+  - wake: cron
+    window:
+    - 104400
+    - 104415
+  - wake: cron
+    window:
+    - 108000
+    - 108015
+  - wake: cron
+    window:
+    - 111600
+    - 111615
+  - wake: cron
+    window:
+    - 115200
+    - 115215
+  - wake: cron
+    window:
+    - 118800
+    - 118815
+  - wake: cron
+    window:
+    - 122400
+    - 122415
+  - wake: cron
+    window:
+    - 126000
+    - 126015
+  - wake: cron
+    window:
+    - 129600
+    - 129615
+  - wake: cron
+    window:
+    - 133200
+    - 133215
+  - wake: cron
+    window:
+    - 136800
+    - 136815
+  - wake: cron
+    window:
+    - 140400
+    - 140415
+  - wake: cron
+    window:
+    - 144000
+    - 144015
+  - wake: cron
+    window:
+    - 147600
+    - 147615
+  - wake: cron
+    window:
+    - 151200
+    - 151215
+  - wake: cron
+    window:
+    - 154800
+    - 154815
+  - wake: cron
+    window:
+    - 158400
+    - 158415
+  - wake: cron
+    window:
+    - 162000
+    - 162015
+  - wake: cron
+    window:
+    - 165600
+    - 165615
+  - wake: cron
+    window:
+    - 169200
+    - 169215
+  - wake: cron
+    window:
+    - 172800
+    - 172815
+  forbidden_deliveries: []
+  bars:
+    cron:
+      deliveries: 48
+      model_wakes: 48
+      status: active
+      wake_fields:
+        base_interval_s: 3300
+        eff_interval_s: 3300
+heartbeat_checklist: []
+baseline_interval_s: 3600
+cache_ttl_s: 3600

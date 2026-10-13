@@ -1,0 +1,51 @@
+id: due-after-expiry
+title: Thirty-day at is refused; implicit ten-day recurring lifetime widens and fires
+cites:
+- 'B1 realism: Thirty-day at is refused; implicit ten-day recurring lifetime widens
+  and fires'
+settings: {}
+arms:
+- ref: far
+  args:
+    note: Report useful news for far
+    trigger:
+      kind: at
+      at: in 30d
+  expect_error: invalid_request
+- ref: long
+  args:
+    note: Report useful news for long
+    trigger:
+      kind: every
+      every: 10d
+timeline: []
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Complete.
+duration: 864030
+expectations:
+  required_fires:
+  - wake: long
+    window:
+    - 864000
+    - 864015
+  forbidden_deliveries: []
+  bars:
+    long:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+      wake_fields:
+        expires_at: 1792674000.0
+  observations:
+  - event: arm_result
+    ref: far
+    error: invalid_request
+    detail: due after the maximum lifetime of 14 days
+heartbeat_checklist:
+- ref: long
+  session: owner
+  note: Report useful news for long
+baseline_interval_s: 864000

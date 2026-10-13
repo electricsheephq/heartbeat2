@@ -1,0 +1,139 @@
+id: mute-classes
+title: Mute exempts owner classes, holds watcher once, and drops agent timer and built-in
+  check-in
+cites:
+- 'B1 realism: Mute exempts owner classes, holds watcher once, and drops agent timer
+  and built-in check-in'
+settings:
+  owner_silent_checkin: true
+  checkin_after_hours: 1
+arms:
+- ref: owner
+  command: add in 1m Owner reminder
+- ref: requested
+  args:
+    note: Report useful news for requested
+    trigger:
+      kind: at
+      at: in 12m
+    owner_asked: true
+  owner_turn: true
+- ref: timer
+  args:
+    note: Report useful news for timer
+    trigger:
+      kind: at
+      at: in 23m
+- ref: watcher
+  args:
+    note: Report useful news for watcher
+    trigger:
+      kind: file
+      path: $HOME/build.log
+      pattern: MATCH
+      check_every: 1m
+timeline:
+- t: 0
+  event: session_state
+  values:
+    unanswered_count: 2
+- t: 0
+  event: file
+  text: 'pending
+
+    '
+- t: 1800
+  event: file
+  text: 'MATCH
+
+    '
+- t: 3700
+  event: human
+  text: I am back.
+- t: 3900
+  event: file
+  text: 'MATCH latest
+
+    '
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Complete.
+duration: 7000
+expectations:
+  required_fires:
+  - wake: owner
+    window:
+    - 60
+    - 75
+  - wake: requested
+    window:
+    - 720
+    - 735
+  - wake: watcher
+    window:
+    - 3700
+    - 3715
+  forbidden_deliveries: []
+  bars:
+    owner:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+      wake_fields: {}
+    requested:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+      wake_fields:
+        owner_requested: true
+    timer:
+      deliveries: 0
+      model_wakes: 0
+      status: failed
+      wake_fields:
+        status_reason: skipped:unanswered
+    watcher:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+      wake_fields: {}
+    checkin:
+      deliveries: 0
+      model_wakes: 0
+      status: active
+      wake_fields: {}
+  observations:
+  - event: gate
+    ref: timer
+    reason: unanswered
+    window:
+    - 1380
+    - 1380
+  - event: gate
+    ref: watcher
+    reason: held_unanswered
+    window:
+    - 1800
+    - 1800
+  - event: gate
+    ref: checkin
+    reason: unanswered
+    window:
+    - 3600
+    - 3600
+heartbeat_checklist:
+- ref: owner
+  session: owner
+  note: add in 1m Owner reminder
+- ref: requested
+  session: owner
+  note: Report useful news for requested
+- ref: timer
+  session: owner
+  note: Report useful news for timer
+- ref: watcher
+  session: owner
+  note: Report useful news for watcher
+baseline_interval_s: 1800
