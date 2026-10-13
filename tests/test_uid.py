@@ -112,7 +112,7 @@ def test_tracked_growth_moves_occupancy_and_never_writes_rows(engine):
     assert first == before and humans(e) == 1
     new_fp = next(iter(intake.origin_rows([first])))[0]
     assert state.occupancy[old_fp] == 0 and state.occupancy[new_fp] == 1
-    assert state.tracked[id(first)][1:] == (2, new_fp)
+    assert len(state.tracked[id(first)][1]) == 2 and state.tracked[id(first)][2] == new_fp
     api(e, [first])
     assert humans(e) == 1
 

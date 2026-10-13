@@ -187,8 +187,9 @@ class OriginState:
                 for a in absorbed(row): state.known.setdefault(a,0)
             else:
                 state.occupancy[fp]+=1
-                state.unadopted.update(b for _,b in bl)
-                state.tracked[id(row)]=(row,len(bl),fp)
+                fps=[b for _,b in bl]
+                state.unadopted.update(fps)
+                state.tracked[id(row)]=(row,fps,fp)
         state.issued.update(state.occupancy)
         return state
 
@@ -577,10 +578,13 @@ class Intake:
         rows=list(origin_records(conversation_history))
         new_count=0
         platform=self.engine.store.get_session(key).platform
-        def account(bl,dedupe):
+        def retire(fps):
+            for b in fps:
+                if state.unadopted[b]>0: state.unadopted[b]-=1
+        def account(bl,dedupe,adopt=True):
             count=0
             for i,(mid,bfp) in bl:
-                if state.unadopted[bfp]>0:
+                if adopt and state.unadopted[bfp]>0:
                     state.unadopted[bfp]-=1
                     continue
                 if mid: self.count(key,mid,platform)
@@ -588,12 +592,15 @@ class Intake:
                 count+=1
             return count
         # Held references also adopt after a row becomes a filtered summary.
-        for rid,(row,n,fp) in list(state.tracked.items()):
+        for rid,(row,fps,fp) in list(state.tracked.items()):
             u=uid(row)
             if u and not list(origin_rows([row])):
                 state.known[u]=len(blocks(row))
                 state.occupancy[fp]-=1
+                retire(fps)
                 del state.tracked[rid]
+        # A uid row adopts a uid-less one only when that row is no longer present on its own.
+        present=Counter(fp for row,fp,_ in rows if not uid(row))
         # UIDs precede fallback rows so adoption retires occupancy first.
         for row,fp,_ in rows:
             u=uid(row)
@@ -601,17 +608,18 @@ class Intake:
             bl=blocks(row)
             ab=absorbed(row)
             tracked=state.tracked.get(id(row))
+            adopt=True
             if tracked and tracked[0] is row:
-                start=tracked[1]
-                for _,bfp in bl[:start]:
-                    if state.unadopted[bfp]>0: state.unadopted[bfp]-=1
+                start=len(tracked[1])
+                retire(tracked[1])  # the fingerprints recorded for it, even if the row was rewritten since
                 state.occupancy[tracked[2]]-=1
                 del state.tracked[id(row)]
             else:
                 start=state.known.get(u,0)+sum(state.known.get(a,0) for a in ab)
-                if u not in state.known and state.occupancy[fp]>0:
-                    state.occupancy[fp]-=1
-            new_count+=account(enumerate(bl[start:],start+1),lambda i:f'{key}:origin:u:{u}:{i}')
+                if u not in state.known:
+                    adopt=state.occupancy[fp]>present[fp]
+                    if adopt: state.occupancy[fp]-=1
+            new_count+=account(enumerate(bl[start:],start+1),lambda i:f'{key}:origin:u:{u}:{i}',adopt)
             state.known[u]=(len(bl) if tracked and tracked[0] is row else
                             max(0,len(bl)-sum(state.known.get(a,0) for a in ab)))
             for a in ab: state.known.setdefault(a,0)
@@ -623,16 +631,23 @@ class Intake:
                 untracked.append((row,fp,text))
                 continue
             bl=blocks(row)
-            if len(bl)>tracked[1]:
+            fps,n=tracked[1],len(tracked[1])
+            # A rewrite of accounted blocks moves their fingerprints; nothing new is counted.
+            for old,(_,new) in zip(fps,bl):
+                if old!=new:
+                    retire([old])
+                    state.unadopted[new]+=1
+            retire(fps[len(bl):])
+            if len(bl)>n:
                 state.issued[fp]+=1
                 ordinal=state.issued[fp]
-                new_count+=account(enumerate(bl[tracked[1]:],tracked[1]+1),
+                new_count+=account(enumerate(bl[n:],n+1),
                                    lambda i:f'{key}:origin:{turn_id}:{fp}:{ordinal}:b{i}')
-                state.unadopted.update(b for _,b in bl[tracked[1]:])
+                state.unadopted.update(b for _,b in bl[n:])
             if fp!=tracked[2]:
                 state.occupancy[tracked[2]]-=1
                 state.occupancy[fp]+=1
-            state.tracked[id(row)]=(row,len(bl),fp)
+            state.tracked[id(row)]=(row,[b for _,b in bl],fp)
         current=Counter(fp for _,fp,_ in no_uid)
         new=current-state.occupancy
         for row,fp,text in untracked:
@@ -640,9 +655,9 @@ class Intake:
             new[fp]-=1
             state.issued[fp]+=1
             self._count_origins(key,text,turn_id,fp,state.issued[fp],platform)
-            bl=blocks(row)
-            state.unadopted.update(b for _,b in bl)
-            state.tracked[id(row)]=(row,len(bl),fp)
+            fps=[b for _,b in blocks(row)]
+            state.unadopted.update(fps)
+            state.tracked[id(row)]=(row,fps,fp)
             state.occupancy[fp]=current[fp]
             new_count+=1
         f=self.flights.get(session_id)
