@@ -1,6 +1,6 @@
 """Fail-open Hermes observers; final output silence is an exact transform."""
 from collections import Counter
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from functools import wraps
 import hashlib
 import json
@@ -129,7 +129,7 @@ COMPACTION_MARKERS = ('--- END OF CONTEXT SUMMARY', '[STILL IN PROGRESS — this
 STEER_COMMAND = re.compile(r'^/(steer|s)(@\S+)?(\s|$)',re.I)
 
 
-def origin_rows(history):
+def origin_records(history):
     for row in history or []:
         if not isinstance(row,dict) or row.get('role')!='user': continue
         # Compaction rewrites carried rows in place; a rewrite is not new owner text.
@@ -138,7 +138,57 @@ def origin_rows(history):
         if any(m in row_text(row.get('content','')) for m in COMPACTION_MARKERS): continue
         text=owner_text(row.get('content',''))
         if ORIGIN in text:
-            yield hashlib.sha256(text.encode()).hexdigest()[:16],text
+            yield row,hashlib.sha256(text.encode()).hexdigest()[:16],text
+
+
+def origin_rows(history):
+    for _,fp,text in origin_records(history): yield fp,text
+
+
+def blocks(row):
+    text=owner_text(row.get('content',''))
+    starts=[m.start() for m in re.finditer(re.escape(ORIGIN),text)]
+    result=[]
+    for i,start in enumerate(starts):
+        part=text[start:starts[i+1] if i+1<len(starts) else len(text)]
+        mids=list(origin_ids(part))
+        if mids: result.append((mids[0],hashlib.sha256(part.encode()).hexdigest()[:16]))
+    return result
+
+
+def uid(row):
+    value=row.get('message_uid')
+    return value if isinstance(value,str) and value else None
+
+
+def absorbed(row):
+    value=row.get('_absorbed_message_uids')
+    return value if isinstance(value,list) and all(isinstance(a,str) for a in value) else []
+
+
+@dataclass
+class OriginState:
+    known: dict=field(default_factory=dict)
+    occupancy: Counter=field(default_factory=Counter)
+    issued: Counter=field(default_factory=Counter)
+    unadopted: Counter=field(default_factory=Counter)
+    tracked: dict=field(default_factory=dict)
+
+    @classmethod
+    def anchor(cls,history):
+        state=cls()
+        for row,fp,_ in origin_records(history):
+            bl=blocks(row)
+            u=uid(row)
+            if u:
+                state.known[u]=len(bl)
+                for a in absorbed(row): state.known.setdefault(a,0)
+            else:
+                state.occupancy[fp]+=1
+                state.unadopted.update(b for _,b in bl)
+                state.tracked[id(row)]=(row,len(bl),fp)
+        state.issued.update(state.occupancy)
+        return state
 
 
 def keys_for(key,mid):
@@ -366,7 +416,7 @@ class Intake:
         key=identity.session_key
         owner_seen=key in self.inbounds or self.owner_turns.get(session_id)==turn_id
         self.inbounds.discard(key)
-        self.anchors[session_id]=(turn_id,Counter(fp for fp,_ in origin_rows(conversation_history)))
+        self.anchors[session_id]=(turn_id,OriginState.anchor(conversation_history))
         for stamp in (f'pending_human:key:{identity.session_key}',
                       f'pending_human:{identity.platform}:{identity.chat_id}'):
             pending=s.get_meta(stamp)
@@ -521,17 +571,80 @@ class Intake:
         if not anchor or anchor[0]!=turn_id: return None
         key=self.bindings.get(session_id)
         if not key: return None
-        rows=list(origin_rows(conversation_history))
-        current=Counter(fp for fp,_ in rows)
-        baseline=anchor[1]
-        new=current-baseline
-        texts=dict(rows)
+        state=anchor[1]
+        rows=list(origin_records(conversation_history))
+        new_count=0
+        platform=self.engine.store.get_session(key).platform
+        def account(bl,dedupe):
+            count=0
+            for i,(mid,bfp) in bl:
+                if state.unadopted[bfp]>0:
+                    state.unadopted[bfp]-=1
+                    continue
+                if mid: self.count(key,mid,platform)
+                else: self.human(key,platform,dedupe=dedupe(i))
+                count+=1
+            return count
+        # Held references also adopt after a row becomes a filtered summary.
+        for rid,(row,n,fp) in list(state.tracked.items()):
+            u=uid(row)
+            if u and not list(origin_rows([row])):
+                state.known[u]=len(blocks(row))
+                state.occupancy[fp]-=1
+                del state.tracked[rid]
+        # UIDs precede fallback rows so adoption retires occupancy first.
+        for row,fp,_ in rows:
+            u=uid(row)
+            if not u: continue
+            bl=blocks(row)
+            ab=absorbed(row)
+            tracked=state.tracked.get(id(row))
+            if tracked and tracked[0] is row:
+                start=tracked[1]
+                for _,bfp in bl[:start]:
+                    if state.unadopted[bfp]>0: state.unadopted[bfp]-=1
+                state.occupancy[tracked[2]]-=1
+                del state.tracked[id(row)]
+            else:
+                start=state.known.get(u,0)+sum(state.known.get(a,0) for a in ab)
+                if u not in state.known and state.occupancy[fp]>0:
+                    state.occupancy[fp]-=1
+            new_count+=account(enumerate(bl[start:],start+1),lambda i:f'{key}:origin:u:{u}:{i}')
+            state.known[u]=(len(bl) if tracked and tracked[0] is row else
+                            max(0,len(bl)-sum(state.known.get(a,0) for a in ab)))
+            for a in ab: state.known.setdefault(a,0)
+        no_uid=[(row,fp,text) for row,fp,text in rows if not uid(row)]
+        untracked=[]
+        for row,fp,text in no_uid:
+            tracked=state.tracked.get(id(row))
+            if not tracked or tracked[0] is not row:
+                untracked.append((row,fp,text))
+                continue
+            bl=blocks(row)
+            if len(bl)>tracked[1]:
+                state.issued[fp]+=1
+                ordinal=state.issued[fp]
+                new_count+=account(enumerate(bl[tracked[1]:],tracked[1]+1),
+                                   lambda i:f'{key}:origin:{turn_id}:{fp}:{ordinal}')
+                state.unadopted.update(b for _,b in bl[tracked[1]:])
+            if fp!=tracked[2]:
+                state.occupancy[tracked[2]]-=1
+                state.occupancy[fp]+=1
+            state.tracked[id(row)]=(row,len(bl),fp)
+        current=Counter(fp for _,fp,_ in no_uid)
+        new=current-state.occupancy
+        for row,fp,text in untracked:
+            if new[fp]<=0: continue
+            new[fp]-=1
+            state.issued[fp]+=1
+            self._count_origins(key,text,turn_id,fp,state.issued[fp],platform)
+            bl=blocks(row)
+            state.unadopted.update(b for _,b in bl)
+            state.tracked[id(row)]=(row,len(bl),fp)
+            state.occupancy[fp]=current[fp]
+            new_count+=1
         f=self.flights.get(session_id)
-        for fp,n in new.items():
-            for j in range(baseline[fp]+1,baseline[fp]+n+1):
-                self._count_origins(key,texts[fp],turn_id,fp,j)
-            if f and f.turn_id==turn_id: mark_fold(f)
-        baseline.update(new)
+        if new_count and f and f.turn_id==turn_id: mark_fold(f)
         return None
 
     @fail_open
