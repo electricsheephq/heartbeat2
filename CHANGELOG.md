@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.12 — 2026-10-13
+
+- A one-time wake that comes due while you have turned HeartBeat 2.0 off for the chat (`/pulse off`, or the agent's `pulse off` when you ask it to stop) is listed as cancelled (`session_off`), not as failed. It still never runs; recurring wakes stay armed and resume after `/pulse on` (#41).
+
 ## 0.1.11 — 2026-10-13
 
 - **Wake replies lead with the result.** When a wake is set to notify you, the agent is now told to lead with what it found, to not describe what it checked or looked up, and that `notify` must be set to true or false. In a live-model bench, wake replies with nothing to report that opened by describing the check went from 3 of 3 to 1 of 3 (read by hand; 0 of 3 by the bench's pattern). Silent wakes and delivered results were unchanged.
