@@ -44,7 +44,7 @@ Heartbeats, as OpenClaw popularised them, made agents feel alive. They also prod
 | Messages to the wrong chat or person | There is no destination parameter at all. A wake can only return to the chat that armed it, and only in DMs by default. |
 | Most spend going to no-op ticks | Watchers decide without a model call. The no-op governor backs off, then pauses. |
 
-Totals over 34 deterministic scenarios (B1 simulation driving the real engine; `python -m bench.run --baseline --gate`, source `7a312cb` plus uncommitted B1 realism changes, v0.1.14 engine; the gate report records content digests). The comparison arm is a naive heartbeat-1.0 emulator built from documented failure reports. It is **not** a measurement of OpenClaw itself.
+Totals over 34 deterministic scenarios (B1 simulation driving the real engine; `python -m bench.run --baseline --gate`, source `ca12767`, v0.1.14 engine; the gate report records content digests). The comparison arm is a naive heartbeat-1.0 emulator built from documented failure reports. It is **not** a measurement of OpenClaw itself.
 
 | Across the suite | HeartBeat 2.0 | Naive heartbeat |
 |---|---:|---:|
