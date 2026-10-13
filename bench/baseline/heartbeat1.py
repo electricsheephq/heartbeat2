@@ -90,7 +90,7 @@ class Heartbeat1:
         identity=(ref,occurrence)
         item={'t':self.gateway.t,'session_key':destination['key'],'owner_session_key':owner['key'],
               'text':text,'wake_id':'b_'+ref,'ref':ref,'occurrence':occurrence,
-              'profile':destination['profile'],'owner_profile':owner['profile'],'prompted':False,'unprompted':True,
+              'profile':destination['profile'],'owner_profile':owner['profile'],'prompted':False,'wake_message':True,
               'terminal_before':identity in self.delivered}
         self.send(item,step['outcome'])
         if step.get('drained_human'):

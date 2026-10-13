@@ -159,8 +159,8 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Quiet hours | `quiet_hours` | `22:00-08:00` | HH:MM-HH:MM, may cross midnight; blank for none. Due one-shots wait until the end; recurring ticks inside are skipped. |
 | Urgent wakes ignore quiet hours | `quiet_hours_urgent` | off | Let wakes marked urgent through quiet hours. |
 | Wake turns per day | `max_model_wakes_per_day` | 24 | Per chat, local day. Each wake turn is a full model turn. |
-| Unprompted messages per day | `max_messages_per_day` | 6 | Per chat, local day. |
-| Unanswered messages before mute | `max_unanswered` | 2 | Wakes you armed always fire; agent watchers wait for your reply; agent reminders are dropped. Agent edits revoke the owner exemption, except a watcher-only conversion you requested with `/pulse watch`. |
+| Wake messages per day | `max_messages_per_day` | 6 | Per chat, local day. |
+| Unanswered messages before mute | `max_unanswered` | 2 | Wakes you armed, and one-time reminders you ask for in chat, always fire; agent watchers wait for your reply; other agent reminders are dropped. An agent edit revokes the exemption (for a chat reminder, so does an agent resume), except a watcher-only conversion you requested with `/pulse watch`. |
 | Shortest repeat (minutes) | `min_interval_minutes` | 15 | Floor for every recurring time wake. |
 | Shortest agent timer without a watcher (minutes) | `agent_ungated_floor_minutes` | 55 | Floor for recurring timers the agent arms without a watcher. |
 | Minutes between wake turns | `wake_spacing_minutes` | 10 | Per chat. |
@@ -194,8 +194,8 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 Every guardrail is configurable:
 - Recurring timers repeat at most every 15 minutes, or every 55 minutes when the agent arms one without a watcher. Watchers check at most once a minute.
 - Every wake expires after 14 days at most.
-- Daily caps hold watchers until capacity frees, including on a new local day; your unedited one-shot reminders bypass both caps.
-- After 2 unanswered messages, agent watchers hold until you write; agent timers and built-in check-ins drop their occurrence. Wakes you armed still fire unless the agent edited their trigger, timing or note; a watcher-only conversion you requested with `/pulse watch` keeps owner status. Held matches merge, keeping the latest payload; pauses preserve them and expiry is visible in `/pulse why`.
+- Daily caps hold watchers until capacity frees, including on a new local day; your unedited one-shot reminders, including one-time reminders you ask for in chat, bypass both caps.
+- After 2 unanswered messages, agent watchers hold until you write; other agent timers and built-in check-ins drop their occurrence. Wakes you armed, and one-time reminders you ask for in chat (the agent marks them `owner_asked`), still fire unless the agent edited their trigger, timing or note; a watcher-only conversion you requested with `/pulse watch` keeps owner status. Held matches merge, keeping the latest payload; pauses preserve them and expiry is visible in `/pulse why`.
 - A wake turn that carries untrusted data, such as a log line or a web page, cannot arm new recurring work.
 - Hermes' emergency stop halts every wake.
 - `/pulse off` stops everything in that chat, and only you can turn it back on.

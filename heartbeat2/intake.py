@@ -282,6 +282,7 @@ class Intake:
             key=self.bindings.pop(old)
             self.bindings[sid]=key
             self.turns[sid]=self.turns.pop(old,'')
+            if old in self.owner_turns: self.owner_turns[sid]=self.owner_turns.pop(old)
             if old in self.anchors: self.anchors[sid]=self.anchors.pop(old)
             f=self.flights.pop(old,None)
             if f:

@@ -16,6 +16,15 @@ def is_owner(wake):
     return wake.creator == 'user' and not wake.trigger_json.get('builtin') and not wake.agent_edited
 
 
+def owner_requested(wake):
+    return (bool(wake.owner_requested) and wake.creator == 'agent' and wake.kind == 'at'
+            and wake.parent_wake_id is None and not wake.babysit and not wake.trigger_json.get('builtin'))
+
+
+def owner_class(wake):
+    return is_owner(wake) or owner_requested(wake)
+
+
 def is_watcher(wake):
     return wake.kind in PROBE_KINDS | EVENT_KINDS
 
@@ -345,7 +354,7 @@ class Policy:
                          self.resolved_timezone())
 
     def unanswered_gate(self, wake: Wake, unanswered_count: int) -> str | None:
-        if unanswered_count >= self.max_unanswered and not is_owner(wake):
+        if unanswered_count >= self.max_unanswered and not owner_class(wake):
             return "held_unanswered" if is_watcher(wake) else "unanswered"
         return None
 

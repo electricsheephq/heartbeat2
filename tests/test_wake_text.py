@@ -35,7 +35,7 @@ Local time: Sun 12 Oct 16:05 (UTC) · owner last wrote 2h 03m ago · fire 2 of 4
 Why: Follow up
 Your note: Check whether the build finished.
 Scratch: Build 12 is running.
-Recent outcomes: no_change, progress · unprompted messages today: 1 of 6
+Recent outcomes: no_change, progress · wake messages today: 1 of 6
 Contract: do what the note asks. Then call pulse(action="respond", outcome=…, notify=true|false, summary=…); notify is required.
 - notify=true → your reply is delivered to the owner: one short, specific, warm message that leads with the result. Do not describe what you checked or looked up. No guilt about silence, no mention of this mechanism, ids or ledgers.
 - notify=false → your final reply is not posted. Write no text alongside tool calls on a wake turn; some platforms show tool progress.

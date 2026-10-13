@@ -64,6 +64,7 @@ class Wake:
     checks: int = 0
     no_verdict: int = 0
     agent_edited: bool = False
+    owner_requested: bool = False
     noop_streak: int = 0
     ignored_streak: int = 0
     error_streak: int = 0

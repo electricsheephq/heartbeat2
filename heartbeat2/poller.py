@@ -15,7 +15,7 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import MESSAGING_PLATFORMS, is_owner, is_watcher, one_shot
+from .policy import MESSAGING_PLATFORMS, owner_class, is_watcher, one_shot
 from .schedule import time_due, local_day, parse_duration, next_every
 from . import governor
 
@@ -500,7 +500,7 @@ class Poller:
         if mute: return mute,mute=='held_unanswered',None
         totals=self.daily(s.session_key)
         cap='daily_model_cap' if totals['model_turns']>=self.policy.max_model_wakes_per_day else 'daily_message_cap' if totals['delivered']>=self.policy.max_messages_per_day else ''
-        if cap and not (is_owner(w) and one_shot(w)):
+        if cap and not (owner_class(w) and one_shot(w)):
             if is_watcher(w):
                 return 'held_daily_cap',True,None
             return cap,False,None

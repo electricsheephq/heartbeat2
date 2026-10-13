@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.13 — 2026-10-14
+
+- **A reminder you ask for in chat fires like your own (#55).** When you said "remind me at 4" in chat, the agent armed the reminder as its own follow-up, so after two unanswered messages, or at a daily cap, it was dropped. Only `/pulse add` reminders were safe. Now a one-time reminder the agent arms because you asked in your current message (it marks the call `owner_asked`) bypasses the unanswered mute and both daily caps. HeartBeat 2.0 checks that the turn really carries your message; a reminder the agent sets on its own, or arms from a wake turn, keeps the agent's limits. A later agent edit or resume without a new request from you removes the exemption. Quiet hours, spacing and expiry still apply.
+- The wake text's counter now reads "wake messages today" instead of "unprompted messages today", and the matching setting is labelled "Wake messages per day".
+
 ## 0.1.12 — 2026-10-13
 
 - A one-time wake that comes due while you have turned HeartBeat 2.0 off for the chat (`/pulse off`, or the agent's `pulse off` when you ask it to stop) is listed as cancelled (`session_off`), not as failed. It still never runs; recurring wakes stay armed and resume after `/pulse on` (#41).

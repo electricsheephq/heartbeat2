@@ -116,7 +116,7 @@ class FakeGateway:
                     if reply and answer!='[SILENT]':
                         self.deliveries.append({**reply,'t':self.t,'session_key':session['key'],
                             'profile':session['profile'],'owner_profile':session['profile'],
-                            'text':answer,'turn_id':turn,'prompted':True,'unprompted':False,'terminal_before':False})
+                            'text':answer,'turn_id':turn,'prompted':True,'wake_message':False,'terminal_before':False})
                     e.intake.on_session_end(session_id=session['sid'],turn_id=turn,completed=True)
         self.trace.append({'t':self.t,'event':'human','session':name,'drained':drained})
         return turn
@@ -189,7 +189,7 @@ class FakeGateway:
                               'lateness_s':max(0,inj-due-held),'deferred_s':held})
             if text!='[SILENT]':
                 self.deliveries.append({'t':self.t,'session_key':session['key'],'text':text,'wake_id':wid,'ref':ref,
-                    'occurrence':occ,'profile':profile,'owner_profile':profile,'prompted':prompted,'unprompted':not prompted,'owner_session_key':w.session_key,'terminal_before':terminal_before})
+                    'occurrence':occ,'profile':profile,'owner_profile':profile,'prompted':prompted,'wake_message':not prompted,'owner_session_key':w.session_key,'terminal_before':terminal_before})
             e.intake.post_api_request(session_id=sid,turn_id=turn,usage={'input_tokens':self.scenario.get('context_tokens',150000),'output_tokens':0})
             e.intake.on_session_end(session_id=sid,turn_id=turn,completed=True,platform=session['platform'])
             if step.get('drained_human'):
