@@ -130,6 +130,7 @@ def owner_text(content):
     return row_text(content)
 
 
+MERGE_SEPARATOR = '\n\n'  # agent/agent_runtime_helpers.py _merge_consecutive_users
 COMPACTION_MARKERS = ('--- END OF CONTEXT SUMMARY', '[STILL IN PROGRESS — this is the active request')
 STEER_COMMAND = re.compile(r'^/(steer|s)(@\S+)?(\s|$)',re.I)
 
@@ -154,10 +155,14 @@ def blocks(row):
     text=owner_text(row.get('content',''))
     # Only a header with its JSON line starts a block; a quoted header is owner text.
     heads=list(origin_headers(text))
-    # Trailing whitespace is dropped: Hermes joins merged rows with a blank line, so a block keeps its identity
-    # whatever follows it.
-    return [(mid,hashlib.sha256(text[at:heads[i+1][0] if i+1<len(heads) else len(text)].rstrip().encode()).hexdigest()[:16])
-            for i,(at,mid) in enumerate(heads)]
+    spans=[]
+    for i,(at,mid) in enumerate(heads):
+        span=text[at:heads[i+1][0]] if i+1<len(heads) else text[at:]
+        # Hermes joins merged rows with one blank line; dropping exactly that separator keeps a merged block's
+        # identity whatever follows it, without equating blocks whose own bytes differ.
+        if i+1<len(heads) and span.endswith(MERGE_SEPARATOR): span=span[:-len(MERGE_SEPARATOR)]
+        spans.append((mid,hashlib.sha256(span.encode()).hexdigest()[:16]))
+    return spans
 
 
 def uid(row):
