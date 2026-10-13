@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6 — 2026-10-13
+
+- On platforms without message ids (Signal, SimpleX), an owner message is no longer counted a second time when Hermes appends its task list to it after a context compaction. The second count marked a silent wake as answered, so its text was shown (#33).
+
 ## 0.1.5 — 2026-10-13
 
 - Eight numeric settings have upper bounds (ledger history 100 years, wake lifetime 10 years, interval floors and slowed intervals one year, watcher floor one week, slow-down multiplier 100). A larger value is reported by `/pulse status` and ignored, instead of crashing every tick.

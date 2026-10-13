@@ -78,6 +78,53 @@ def row_text(content):
     return ''
 
 
+# tools/todo_tool.py TODO_INJECTION_HEADER, identical at v0.21.6, v0.21.7 and main
+# 04eb00c. After a compaction Hermes appends the live task list to the end of the
+# trailing real user row (conversation_compression._fold_todo_snapshot: a blank line,
+# this header, one line per task from TodoStore.format_for_injection, maybe the
+# skill-reload notice) and strips it again at the next boundary. The snapshot is
+# never what the owner wrote, so a row ending in one is fingerprinted without it.
+TODO_HEADER='[Your active task list was preserved across context compression]'
+TODO_START=re.compile(r'(?:\n\n|^)'+re.escape(TODO_HEADER)+r'\n')
+TODO_ITEM=re.compile(r'(?:  )*- \[[^\]\n]\] [^\n]* \((?:pending|in_progress|completed|cancelled)\)')
+RELOAD_NOTICE=re.compile(re.escape('[Skills pruned during compression — reload before acting on these tasks]')+
+    r'\nThe task list above crossed the compression boundary verbatim, but [^\n]* may have invalidated it\.')
+
+
+def is_snapshot(text):
+    items,_,notice=text.partition('\n\n')
+    lines=items.split('\n')
+    return (all(TODO_ITEM.fullmatch(line) for line in lines) and
+            (not notice or bool(RELOAD_NOTICE.fullmatch(notice))))
+
+
+def without_snapshot(text):
+    """Text without a trailing snapshot exactly as Hermes renders it; anything else is unchanged.
+
+    A task spanning lines, or any text after the snapshot (Hermes' pre-call repair can
+    join a later user row there), keeps the row byte for byte: it may recount, never hide.
+    """
+    for match in TODO_START.finditer(text):
+        if is_snapshot(text[match.end():]): return text[:match.start()]
+    return text
+
+
+def owner_text(content):
+    """Row text for owner fingerprints: a provable todo snapshot removed, nothing else changed."""
+    if isinstance(content,list):
+        kept=[]
+        for part in content:
+            if isinstance(part,dict) and part.get('type')=='text' and isinstance(part.get('text'),str):
+                text=without_snapshot(part['text'])
+                if not text and part['text']: continue
+                part={**part,'text':text}
+            kept.append(part)
+        content=kept
+    elif isinstance(content,str):
+        content=without_snapshot(content)
+    return row_text(content)
+
+
 COMPACTION_MARKERS = ('--- END OF CONTEXT SUMMARY', '[STILL IN PROGRESS — this is the active request')
 STEER_COMMAND = re.compile(r'^/(steer|s)(@\S+)?(\s|$)',re.I)
 
@@ -87,8 +134,10 @@ def origin_rows(history):
         if not isinstance(row,dict) or row.get('role')!='user': continue
         # Compaction rewrites carried rows in place; a rewrite is not new owner text.
         if row.get('_compressed_summary'): continue
-        text=row_text(row.get('content',''))
-        if ORIGIN in text and not any(m in text for m in COMPACTION_MARKERS):
+        # Markers are checked on the whole row: a carrier can hold a snapshot before its END marker.
+        if any(m in row_text(row.get('content','')) for m in COMPACTION_MARKERS): continue
+        text=owner_text(row.get('content',''))
+        if ORIGIN in text:
             yield hashlib.sha256(text.encode()).hexdigest()[:16],text
 
 
@@ -331,7 +380,7 @@ class Intake:
         if not parsed:
             row=conversation_history[-1] if conversation_history else None
             if isinstance(row,dict) and row.get('role')=='user' and not row.get('display_kind'):
-                text=row_text(row.get('content',''))
+                text=owner_text(row.get('content',''))
                 if not text.startswith(GOAL_PREFIXES) and not pulse_command(text):
                     if ORIGIN in text:
                         owner_seen=True
