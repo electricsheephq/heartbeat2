@@ -95,7 +95,8 @@ def cost(route, *, prompt=0, read=0, written=0, out=0, ttl=None):
 
 
 def minutes(seconds):
-    return f'{round(seconds/60,1):g}m'
+    text=f'{seconds/60:.1f}'
+    return (text[:-2] if text.endswith('.0') else text)+'m'
 
 
 def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=True, first_wake=False):
