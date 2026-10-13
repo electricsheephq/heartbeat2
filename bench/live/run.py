@@ -147,7 +147,9 @@ def cell(args, scenario, rep):
                 seed(1, scenario['history'][1])
                 before = rig.visible_ids()
             if 'probe' in arm:
-                rig.wait(lambda: next(w for w in rig.rows('wakes') if w['id'] == wid)['probe_state_json'],
+                # A fresh wake stores the JSON text 'null'; wait for a real baseline state.
+                rig.wait(lambda: json.loads(next(w for w in rig.rows('wakes') if w['id'] == wid)
+                                            ['probe_state_json'] or 'null') is not None,
                          'probe baseline', 20)
                 if 'changed' in arm['probe']:
                     probe.write_text(arm['probe']['changed'])
@@ -170,8 +172,11 @@ def cell(args, scenario, rep):
             rig.settled(wid)
         texts = [t for t in rig.new_visible(before) if not t.startswith('HeartBeat 2.0:')]
         result.update(status='COMPLETE', delivered=texts, occurrence=rig.occurrence(wid),
-                      wake_set=rig.rows('wakes'), session=rig.session())
-        rig.assert_tools_ok()
+                      wake_set=rig.rows('wakes'), session=rig.session(), tool_errors=[])
+        try:
+            rig.assert_tools_ok()
+        except AssertionError as exc:  # a model's malformed tool call is a finding, not a void cell
+            result['tool_errors'] = [str(exc)[:500]]
     except Exception as exc:
         code = 2 if upstream.quota else 1
         result.update(status='QUOTA' if upstream.quota else 'VERIFIED_FAILURE', error=str(exc))
