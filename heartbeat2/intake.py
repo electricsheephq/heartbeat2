@@ -770,7 +770,9 @@ class Intake:
         e,s=self.engine,self.engine.store
         self._follow(session_id)
         anchor=self.anchors.get(session_id)
-        if anchor and (not turn_id or anchor[0]==turn_id): del self.anchors[session_id]  # held rows end with the turn
+        # Held rows end with the turn the finalizer names. A stop without a turn id can arrive while the
+        # worker still sends its last prepared request, so it must not drop the anchor.
+        if anchor and turn_id and anchor[0]==turn_id: del self.anchors[session_id]
         f=self.flights.get(session_id)
         if turn_id and self.turns.get(session_id) and turn_id!=self.turns[session_id]: return None
         key=f.session_key if f else self.bindings.get(session_id)

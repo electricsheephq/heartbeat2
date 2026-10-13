@@ -211,3 +211,15 @@ def test_turn_end_and_reset_release_the_anchor(engine):
     anchor(e, [owner('base')], turn='turn2')
     e.intake.on_session_reset(old_session_id='sid', new_session_id='sid-new')
     assert 'sid' not in e.intake.anchors and 'sid-new' not in e.intake.anchors
+
+
+def test_stop_without_a_turn_id_keeps_the_anchor_for_the_unwinding_turn(engine):
+    e = engine
+    anchor(e, [owner('base')])
+    e.intake.agent_loop_stopped(session_key=KEY)               # gateway /stop, before the worker unwinds
+    e.intake.on_session_end(session_id='sid', interrupted=True)  # TUI teardown: no turn id
+    before = humans(e)
+    api(e, [owner('base'), owner('accepted steer')])           # the worker's last prepared request
+    assert humans(e) == before + 1
+    e.intake.on_session_end(session_id='sid', turn_id='turn', interrupted=True)  # the finalizer names the turn
+    assert 'sid' not in e.intake.anchors
