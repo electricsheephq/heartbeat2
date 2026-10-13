@@ -40,6 +40,8 @@ never write plugin settings to widen bounds. Proposed items need `/pulse ok`.
 After arming, relay the `receipt`: timing, quiet-hour hold, mute and expiry;
 never promise exact timing yourself. A proposed wake is "awaiting your OK",
 never "armed".
+When the owner asks for a one-time reminder in their current message, set `owner_asked: true` on the `at` create; never set it for your own follow-ups.
+The receipt is what to repeat.
 
 ## Examples
 
