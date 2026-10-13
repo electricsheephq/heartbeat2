@@ -64,7 +64,7 @@ an EOF baseline; only subsequently appended complete lines match:
 Paced PR CI polling with explicit bounds and a configured read-only command:
 
 ```json
-{"action":"create","title":"PR 123 CI","note":"Check the changed CI result for PR 123 and say whether the required checks passed or failed.","trigger":{"kind":"command","command":["gh","pr","checks","123","--repo","example/project","--json","name,state"],"fire_on":"change","check_every":"5m","deadline":"in 2h"},"until":{"expires":"in 3h","max_fires":8}}
+{"action":"create","title":"PR 123 CI","note":"Read the check states for PR 123. If any required check is still pending, respond no_change silently; once all have finished, say whether they passed or failed.","trigger":{"kind":"command","command":["gh","pr","view","123","--repo","example/project","--json","statusCheckRollup"],"fire_on":"change","check_every":"5m","deadline":"in 2h"},"until":{"expires":"in 3h","max_fires":8}}
 ```
 
 Run the same check yourself before arming. If CI has already finished, tell the
@@ -72,6 +72,10 @@ owner the result now instead of arming: the first successful command result is a
 silent baseline, so a `change` watcher armed after the final state never fires.
 Arm it only while checks are still pending, and keep a deadline: if CI finishes
 between your check and the watcher's first probe, the deadline wake reports it.
+Watch with a command that exits 0 while checks are pending, such as
+`gh pr view --json statusCheckRollup`. `gh pr checks` exits 8 while checks are
+pending, which `change` mode counts as an error. The rollup changes as each check
+starts or finishes, so expect a few silent wakes before the final one.
 `change` fires only when a later successful result differs. Nonzero exits are errors in `change`/`json` mode. Use `failure` for a
 command whose failure exit is the intended signal; CLI exit conventions differ.
 A configured JSON observer may print exactly `{"fire":bool,"message":str,
