@@ -2,8 +2,8 @@
 
 ## 0.1.15 — 2026-10-14
 
-- **Unsupported event filters are refused (#57).** Select the event with `trigger.kind`; `trigger.event` is no longer advertised or accepted. At startup, existing active, paused or proposed watchers using it are stopped with `invalid_trigger_event`, pending occurrences are cancelled, and one notice per chat asks you to set the watcher up again. Stored task and board filters keep working.
-- **First-fire feasibility counts both holds (#68).** Owner-silence waits now account for quiet hours, and feasibility includes the chat's active wake-spacing window before quiet hours. A wake whose first possible fire is at or after expiry is refused; receipts report the holds.
+- **Unsupported event filters are refused (#57).** Select the event with `trigger.kind`; `trigger.event` is no longer advertised or accepted. At startup, existing active, paused or proposed event watchers using it are stopped (a stray `event` key on other kinds is ignored, as before) with `invalid_trigger_event`, pending occurrences are cancelled, and one notice per chat asks you to set the watcher up again. Stored task and board filters keep working.
+- **First-fire feasibility counts both holds (#68).** Owner-silence waits and event watchers without a deadline now account for quiet hours, and feasibility includes the chat's active wake-spacing window before quiet hours. A wake whose first possible fire is at or after expiry is refused; receipts report the holds.
 - The bundled skill tells the agent to set `owner_asked: true` when your current message asks for a one-time reminder, never for its own follow-ups, and to repeat the receipt.
 
 ## 0.1.14 — 2026-10-14

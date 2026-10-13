@@ -128,7 +128,7 @@ class Poller:
         with s.atomic():
             noticed=set()
             for w in s.list_wakes() if self.process_start else []:
-                if w.status in {'active','paused','proposed'} and 'event' in w.trigger_json:
+                if w.kind in EVENT_KINDS and w.status in {'active','paused','proposed'} and 'event' in w.trigger_json:
                     if s.cas_wake(w.id,w.status,expected_version=w.version,status='failed',status_reason='invalid_trigger_event'):
                         self.cancel_occurrences(w.id,'invalid_trigger_event')
                         if w.session_key not in noticed:

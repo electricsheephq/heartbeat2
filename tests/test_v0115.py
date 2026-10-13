@@ -176,3 +176,31 @@ def test_version_changelog_and_skill():
     assert ('When the owner asks for a one-time reminder in their current message, '
             'set `owner_asked: true` on the `at` create; never set it for your own follow-ups.') in skill
     assert 'The receipt is what to repeat.' in skill
+
+
+@pytest.mark.parametrize('kind,trigger', [
+    ('at', {'at':'in 1h','event':'stray'}),
+    ('every', {'every':'1h','event':'stray'}),
+    ('owner_silent', {'after':'1h','event':'stray'}),
+])
+def test_sweep_ignores_stray_event_key_on_non_event_kinds(engine, kind, trigger):
+    w = arm(engine, kind, trigger_json=trigger)
+    assert engine.acquire()
+    assert engine.store.get_wake(w.id) == w
+    assert engine.store.get_meta('notice:'+KEY) in (None, '', '[]')
+    result = engine.tool.handle({'action':'update','id':w.id,'title':'renamed'}, session_id='sid')
+    assert result.get('ok'), result
+
+
+@pytest.mark.parametrize('bypass', ['spacing','quiet'])
+def test_deadline_free_event_watcher_counts_holds(engine, bypass):
+    if bypass == 'spacing':
+        engine.policy = replace(engine.policy, wake_spacing_minutes=10)
+        session(engine, last_wake_turn_at=engine.clock.now()-5*60)
+    else:
+        night(engine, 23)
+    result = create(engine, {'kind':'kanban_completed'}, until={'expires':'in 2m'})
+    assert result.get('error') == 'invalid_request', result
+    assert 'after expiry' in result['detail']
+    assert not engine.store.list_wakes(KEY)
+    assert create(engine, {'kind':'kanban_completed'}, until={'expires':'in 30m' if bypass=='spacing' else 'in 10h'}).get('ok')

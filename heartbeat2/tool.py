@@ -253,7 +253,7 @@ class Tool:
             raise Infeasible('that time has already passed')
         watcher=w.kind in PROBE_KINDS | EVENT_KINDS
         if watcher:
-            point,label=(w.deadline_at,'deadline') if w.deadline_at is not None else (w.next_due_at if w.kind in PROBE_KINDS else None,'due')
+            point,label=(w.deadline_at,'deadline') if w.deadline_at is not None else (w.next_due_at if w.kind in PROBE_KINDS else e.clock.now(),'due')
         elif w.kind=='owner_silent':
             if w.trigger_json.get('builtin'): return w
             last=getattr(e.store.get_session(w.session_key),'last_human_at',None) or e.clock.now()
@@ -339,7 +339,7 @@ class Tool:
         e=self.engine
         updates={k:args[k] for k in ('title','note','reason','babysit','urgent') if k in args}
         trigger=dict(args.get('trigger',w.trigger_json))
-        if 'event' in trigger:
+        if 'trigger' in args and 'event' in trigger:
             raise ValueError('trigger.event is not supported; choose the event with trigger.kind (for example kanban_completed)')
         if 'trigger' in args and set(trigger) - set(PARAMETERS['properties']['trigger']['properties']):
             raise ValueError('unknown trigger parameter')
