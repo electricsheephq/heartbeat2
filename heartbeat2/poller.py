@@ -69,10 +69,13 @@ class Poller:
 
     def refresh(self):
         if self.refresh_policy:
-            self.store.set_meta('settings_error','')
             try: self.policy=self.refresh_policy()
             except (ValueError,TypeError,OverflowError) as exc:
                 self.store.set_meta('settings_error',json.dumps([{'key':'policy','reason':str(exc),'effective':'previous policy'}]))
+            else:
+                errors=json.loads(self.store.get_meta('settings_error') or '[]')
+                if len(errors)==1 and errors[0].get('key')=='policy':
+                    self.store.set_meta('settings_error','')
 
     def settings_notice(self):
         errors=json.loads(self.store.get_meta('settings_error') or '[]')

@@ -2,7 +2,7 @@
 
 ## 0.1.4 — draft (undated)
 
-- Ignore invalid settings with a visible reason and effective value; startup uses defaults for rejected keys and live refresh keeps the last good policy.
+- At start a rejected setting falls back to its default; on a live change it keeps its last good value, and your other changes still apply. `/pulse status` and pulse tool results name the ignored setting.
 - Explain the error threshold, source switches and ledger retention in the Settings form.
 - Hold pending watcher matches through a governor pause and release them after keep, slow or resume.
 - Preserve busy flags for turns started in this process when restart recovery runs.

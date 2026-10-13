@@ -229,3 +229,35 @@ def test_learned_routes_and_provider_only_display(engine, legacy):
 def test_openai_hostname_ttl_survives_full_base():
     assert cache.cache_ttl_for(cache.route_key('openai-api', 'gpt-6.1-sol',
         'https://api.openai.com/v1')) == (1800, 'openai')
+
+
+@pytest.mark.parametrize('base', ['https://chatgpt.com/backend-api/codex',
+                                'https://chatgpt.com:8443/backend-api/codex'])
+@pytest.mark.parametrize('complete', [False, True], ids=['warm-only', 'learned-ttl'])
+def test_legacy_learned_row_resolves_for_full_route(engine, base, complete):
+    legacy = 'openai-codex|m|chatgpt.com'
+    route = cache.route_key('openai-codex', 'm', base)
+    row = {'max_warm_gap': 240}
+    if complete:
+        row['min_cold_gap'] = 600
+    engine.store.set_meta('cache_routes', json.dumps({legacy: row}))
+    session(engine, last_route=legacy, last_cache_touch_at=engine.clock.now() - 100)
+    cache.touch(engine.store, engine.store.get_session(KEY), started_at=engine.clock.now(),
+                route=route, prompt=100, read=100)
+    assert json.loads(engine.store.get_meta('cache_routes')) == {legacy: row}
+    assert cache.cache_ttl_for(route, store=engine.store) == (
+        (240, 'learned') if complete else (None, 'unknown'))
+    text = cache.line(engine.store, engine.store.get_session(KEY), engine.clock.now(), pricing=False)
+    assert ('4.0m' if complete else 'warm seen ≤4m') in text
+    assert 'chatgpt.com' not in text
+
+
+def test_full_route_learned_row_takes_precedence(engine):
+    route = 'openai-codex|m|https://chatgpt.com/backend-api/codex'
+    engine.store.set_meta('cache_routes', json.dumps({
+        'openai-codex|m|chatgpt.com': {'max_warm_gap': 240, 'min_cold_gap': 600},
+        route: {'max_warm_gap': 120}}))
+    session(engine, last_route=route)
+    assert cache.cache_ttl_for(route, store=engine.store) == (None, 'unknown')
+    assert 'warm seen ≤2m' in cache.line(engine.store, engine.store.get_session(KEY),
+                                       engine.clock.now(), pricing=False)

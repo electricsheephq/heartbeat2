@@ -105,9 +105,9 @@ Restart the messaging gateway and send `/pulse` in your DM. It shows:
 - today's wakes, messages, cache counts and estimated cost (or token splits).
 
 All other settings are in **Settings ▸ Plugins** in Hermes Desktop or in `config.yaml`.
-Invalid settings are reported by `/pulse status` and the `pulse` tool. Startup
-uses defaults for rejected keys; live refresh keeps the last good policy until
-the settings are corrected.
+At start a rejected setting falls back to its default; on a live change it keeps
+its last good value, and your other changes still apply. `/pulse status` and
+pulse tool results name the ignored setting.
 
 ## Using it
 **You**, in the chat:

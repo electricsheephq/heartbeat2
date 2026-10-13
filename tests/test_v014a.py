@@ -1,8 +1,9 @@
 """Settings, pause/restart preservation and owner cache display regressions."""
-from dataclasses import replace
+from dataclasses import fields, replace
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import threading
 
 import pytest
 import yaml
@@ -48,7 +49,7 @@ def test_bad_live_setting_keeps_policy_and_fires(runtime, key, value):
     e.clock.advance(120)
     e.tick()
     assert len(e.ctx.calls) == 1
-    assert e.policy == old  # Even valid edits wait for a fully valid refresh.
+    assert e.policy == replace(old, max_unanswered=9)
     notice = e.store.get_meta('settings_error')
     assert key in notice
     status = commands.handle('status', runtime)
@@ -98,6 +99,84 @@ def test_refresh_build_exception_does_not_abort_due_wake(engine):
     e.refresh_policy = lambda: old
     e.refresh()
     assert not e.store.get_meta('settings_error')
+
+
+def test_runtime_bootstrap_shares_last_good_policy(runtime, monkeypatch):
+    e = bind(runtime)
+    stop = threading.Event()
+    observed = {}
+    monkeypatch.setattr(Poller, 'acquire', lambda self: True)
+    def refresh_sequence(runner):
+        runtime.ctx.settings.update({'quiet_hours': '23:00-07:00',
+                                     'max_model_wakes_per_day': 5})
+        runner.refresh()
+        observed['before'] = (e.policy.quiet_hours, runner.policy.quiet_hours)
+        runtime.ctx.settings['quiet_hours'] = '11pm-7am'
+        e.refresh()
+        runner.refresh()
+        observed['policies'] = (e.policy, runner.policy)
+        observed['notice'] = json.loads(e.store.get_meta('settings_error'))
+        stop.set()
+    monkeypatch.setattr(Poller, 'tick', refresh_sequence)
+    runtime._bootstrap(stop)  # Exercise the actual runner refresh wiring.
+    assert observed['before'] == ('', '23:00-07:00')
+    engine_policy, runner_policy = observed['policies']
+    assert engine_policy == runner_policy
+    assert runner_policy.quiet_hours == '23:00-07:00'
+    assert runner_policy.max_model_wakes_per_day == 5
+    assert observed['notice'][0]['effective'] == runner_policy.quiet_hours
+
+
+def test_valid_disable_applies_with_rejected_quiet_hours(runtime):
+    e = bind(runtime)
+    old_quiet = e.policy.quiet_hours
+    arm(e)
+    runtime.ctx.settings.update({'enabled': False, 'quiet_hours': '10pm-6am'})
+    e.tick()
+    assert e.policy.enabled is False
+    assert e.policy.quiet_hours == old_quiet
+    assert not e.ctx.calls
+    assert json.loads(e.store.get_meta('settings_error'))[0]['effective'] == old_quiet
+
+
+def test_invalid_refresh_never_clears_or_rewrites_unchanged_notice(runtime, monkeypatch):
+    e = bind(runtime)
+    runtime.ctx.settings['quiet_hours'] = '10pm-6am'
+    e.refresh()
+    writes = []
+    set_meta = e.store.set_meta
+    def record(key, value):
+        if key == 'settings_error':
+            writes.append(value)
+        return set_meta(key, value)
+    monkeypatch.setattr(e.store, 'set_meta', record)
+    for _ in range(3):
+        e.refresh()
+        assert e.settings_notice()
+    assert '' not in writes
+    assert writes == []
+
+
+@pytest.mark.parametrize('nondefault', [False, True], ids=['defaults', 'nondefaults'])
+def test_every_policy_field_round_trips(clock, nondefault):
+    defaults = Policy()
+    settings = {}
+    if nondefault:
+        strings = {'agent_can_create': 'ask_first', 'timezone': 'Asia/Tokyo',
+                   'quiet_hours': '21:00-06:00', 'probe_commands': 'git status'}
+        for field in fields(Policy):
+            value = getattr(defaults, field.name)
+            if isinstance(value, bool):
+                settings[field.name] = not value
+            elif isinstance(value, int):
+                settings[field.name] = value + 1
+            elif field.name in strings:
+                settings[field.name] = strings[field.name]
+    policy = Policy.from_settings(settings, clock=clock, profile_timezone='UTC')
+    for field in fields(Policy):
+        rebuilt = Policy.from_settings({field.name: getattr(policy, field.name)},
+            clock=policy.clock, profile_timezone=policy.profile_timezone)
+        assert getattr(rebuilt, field.name) == getattr(policy, field.name), field.name
 
 
 def test_governor_pause_holds_pending_watcher_until_keep(engine):

@@ -40,7 +40,8 @@ def cache_ttl_for(route, *, store=None, platform='', api_mode=''):
         match = re.search(r'gpt-(\d+)\.(\d+)|gpt-(\d+)(?:-|$)', model.lower())
         if match and (int(match[1] or match[3]) >= 6 or (int(match[1] or match[3]) == 5 and int(match[2] or 0) >= 6)):
             return 1800, 'openai'
-    learned = json.loads(store.get_meta('cache_routes') or '{}').get(route, {}) if store else {}
+    rows = json.loads(store.get_meta('cache_routes') or '{}') if store else {}
+    learned = rows.get(route, rows.get(f'{provider}|{model}|{host}', {}))
     warm, cold = learned.get('max_warm_gap'), learned.get('min_cold_gap')
     return (warm, 'learned') if warm is not None and cold is not None and warm < cold else (None, 'unknown')
 
@@ -101,7 +102,10 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
         age = max(0,now-(session.last_cache_touch_at if session.last_cache_touch_at is not None else now))/60
         if not ttl:
             if watcher: return f'Cache: {provider} TTL {source} · last touch {age:.0f}m ago'
-            row = json.loads(store.get_meta('cache_routes') or '{}').get(session.last_route,{})
+            route_provider, model, part = session.last_route.split('|', 2)
+            host = urlsplit(_base(part)).hostname or ''
+            rows = json.loads(store.get_meta('cache_routes') or '{}')
+            row = rows.get(session.last_route, rows.get(f'{route_provider}|{model}|{host}', {}))
             bracket = ', '.join(f'{label}{row[key]/60:g}m' for key,label in (('max_warm_gap','warm seen ≤'),('min_cold_gap','cold ≥')) if key in row)
             return f'Cache: {provider} TTL {source}'+(f' ({bracket})' if bracket else '')
         label = f'Cache: {provider} {"1h" if ttl==3600 else str(ttl/60)+"m"} · last touch {age:.0f}m ago'
