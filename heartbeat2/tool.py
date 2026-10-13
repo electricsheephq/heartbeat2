@@ -160,8 +160,9 @@ class Tool:
                         result = self.reschedule(w) if action=='resume' else self.prepare(w,args,reschedule='trigger' in args)
                         candidate, clamps = result.wake, result.clamped
                         until = args.get('until') if isinstance(args.get('until'),dict) else {}
-                        timing = ('trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s')
-                        edited = [*timing,'note']
+                        timing = ('trigger_json','kind','next_due_at','deadline_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s')
+                        # Urgency changes quiet-hours behaviour; title and reason are cosmetic and keep owner status.
+                        edited = [*timing,'note','urgent']
                         # Lifetime fields revoke only when the agent set them, never via a policy re-clamp.
                         edited += [f for f,present in (('expires_at','expires' in until),('max_fires','max_fires' in until),
                                                         ('cancel_on_reply','owner_replies' in until),('babysit','babysit' in args)) if present]
