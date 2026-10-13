@@ -129,7 +129,9 @@ def test_director_routes_without_importing_hermes(monkeypatch):
 
 
 def definitions():
-    return yaml.safe_load((ROOT / 'bench/live/scenarios.yaml').read_text())
+    data = yaml.safe_load((ROOT / 'bench/live/scenarios.yaml').read_text())
+    data['scenarios'] = [s for s in data['scenarios'] if s.get('type') != 'capture']
+    return data
 
 
 def test_scenario_schema_and_bars():

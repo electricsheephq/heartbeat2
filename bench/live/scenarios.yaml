@@ -105,3 +105,38 @@ scenarios:
     forward: {}
     expect: ['42']
     traps: ['process chatter in the delivered text']
+  - &capture
+    id: A1
+    type: capture
+    label: MUST_ARM
+    history: [&hi {owner: hi, assistant: 'Hi! How can I help?'}]
+    owner: 'remind me at {now+20m:HH:MM} to call the bank'
+    match: {families: [at], due: '{now+20m:HH:MM}', status: active, term: bank}
+    facts: {}
+    forward: {capture: true}
+    expect: []
+  - {<<: *capture, id: A2, owner: 'remind me in 2 hours to check the deploy', match: {families: [at], due: 'in 2h', status: active, term: deploy}}
+  - <<: *capture
+    id: A3
+    owner: 'tell me when {path} says DONE'
+    history: [*hi, {owner: 'the export job writes its status to {path}', assistant: 'Got it.'}]
+    fixture: file
+    match: {families: [file], pattern: DONE, status: active, term: DONE}
+  - <<: *capture
+    id: A4
+    owner: 'ping me if the nightly build fails'
+    history: [*hi, {owner: '{status command} prints the nightly build status and exits nonzero when it fails', assistant: 'Noted.'}]
+    fixture: command
+    match: {families: [command], fire_on: failure, status: active, term: build}
+  - {<<: *capture, id: A5, owner: 'every weekday at 9 send me my agenda', match: {families: [cron], anchor: '09:00', weekday_bounds: true, status: active, term: agenda}}
+  - {<<: *capture, id: A6, owner: "check back tomorrow at 10 unless I've replied by then", match: {families: [at], due: '{tomorrow:10:00}', cancel_on_reply: true, status: active, term: check}}
+  - {<<: *capture, id: A7, owner: 'in 30 minutes, remind me to stretch', match: {families: [at], due: 'in 30m', status: active, term: stretch}}
+  - &negative {<<: *capture, id: N1, label: MUST_NOT_ARM, owner: "thanks, that's all for today", match: null}
+  - {<<: *negative, id: N2, owner: 'what time is it in Tokyo right now?'}
+  - {<<: *negative, id: N3, owner: "I'll remind myself later, no need"}
+  - {<<: *negative, id: N4, owner: 'can you remind me what we decided about the logo yesterday?', history: [*hi, {owner: "let's go with the blue logo", assistant: 'Great, blue it is.'}]}
+  - {<<: *negative, id: N5, owner: 'the meeting moved to 4pm'}
+  - {<<: *negative, id: N6, owner: 'how do reminders work here?'}
+  - {<<: *negative, id: N7, owner: 'stop checking in on me', prearm: {kind: every, every: 1h, note: 'check in on the owner'}}
+  - {<<: *negative, id: T1, label: TRUTHFUL, owner: 'remind me in 30 days to renew the domain', settings: {max_lifetime_days: 14}}
+  - {<<: *capture, id: T2, label: TRUTHFUL, owner: 'remind me in 10 minutes to send the file', settings: {agent_can_create: ask_first}, match: {families: [at], due: 'in 10m', status: proposed, term: file}}

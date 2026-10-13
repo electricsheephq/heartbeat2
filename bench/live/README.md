@@ -42,3 +42,31 @@ The fake upstream is plumbing proof only. Incomplete rounds and missing semantic
 judgments remain PENDING; fake costs and verdicts never establish real quality.
 The runner retains the harness's temp evidence and produces body-only JSONL,
 cell JSON, score JSON/Markdown and blind packets. No model adjudication runs here.
+
+## Round 3: capture and realistic context
+
+Use v0.1.14 or later for real round-3 runs; GLM on the subscription lane is required.
+The second family remains **not run** until its non-metered lane and null-usage fix exist.
+Metered spend requires owner approval. Capture cells forward one exact owner turn and
+its continuations; only N7 is pre-armed. Pulse arguments/results, refusals, receipts,
+final wakes and replies are retained. Fake cells are plumbing only and stay PENDING.
+A single created wake that does not match in a MUST_ARM cell counts as a false arm for B2-7 (an "unrelated wake") and as a miss for B2-6.
+```sh
+python -m bench.live.run --round 3 --pin "$PIN" --path P1 --upstream-url "$URL" --model "$MODEL" --key-env BENCH_KEY --out "$RESULTS"
+python -m bench.live.run --round 3 --pin "$PIN" --path P1 --upstream-url "$URL" --model "$MODEL" --key-env BENCH_KEY --context-tokens 120000 --out "$RESULTS"
+python -m bench.live.score --round 3 --results "$RESULTS" --out "$SCORES"
+```
+Without an explicit scenario list, the runner defaults to the nine round-2 wake
+scenarios; `--round 3` selects all 25 wake and capture scenarios. The default
+round-2 scorer ignores capture results in mixed directories.
+Both arms must pass; ctx reports as `P1-ctx120000`. P3 does not inject its primary fault into capture turns, so the runner refuses capture scenarios on P3. The frozen
+prefix is `round3.filler_history`, seed **314159**, N **120000**, **553** synthetic
+small-talk pairs, sized by `len(prefix)//4` (**120014**). Turns alternate owner
+(20–80 words) and assistant (40–160 words), joining 2–6 sentences from forty
+distinct fact-free templates per role without identical consecutive turns. The
+pair count is chosen to make the serialized prefix closest to N. Prefix serialization is
+UTF-8 JSON of the pairs, `ensure_ascii=False, separators=(',', ':')`; SHA-256:
+`e526720ce096d3059cdb40856f2b3730565706cd5c160e6e0cc771a158980e61`.
+Any other size/hash stays PENDING. Judge packets retain frozen history, measured
+owner text and pulse results/receipts; ctx packets name the omitted fact-free filler (pairs, size, hash). Round-3 verdicts also require `overpromise`;
+use a different model family and owner spot-check every adjudicator FAIL.
