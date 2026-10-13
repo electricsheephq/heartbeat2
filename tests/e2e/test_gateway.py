@@ -356,7 +356,7 @@ def test_api_error_watcher_no_self_loop(make_rig):
 
 
 def test_invalid_setting_does_not_halt_wakes(make_rig):
-    # F10a: intentionally red on base main; Lane A supplies the production fix.
+    # A rejected live setting must not halt wakes; /pulse status names it.
     import hermes_yaml as yaml
 
     rig = make_rig()

@@ -70,9 +70,8 @@ E7 waits for the visible stop ack, interruption completion in the logs, gateway
 idle, and a one-second grace before that barrier. A status timeout with
 `flush-cancelled` in the agent log names the upstream duplicate `/stop` wedge.
 E11/E14 count real gateway injection dispatches as well as distinct wake markers.
-F10a changes only the rig's live config after arming an owner one-shot; it checks
-one delivery and the `Setting ignored: quiet_hours` status notice. It is
-intentionally red on base main until the settings-recovery production fix lands.
+The invalid-setting cell changes only the rig's live config after arming an owner
+one-shot; it checks one delivery and the `Setting ignored: quiet_hours` status notice.
 Negative replay/loop claims have a bounded poller-tick observation window;
 they are not soak claims.
 

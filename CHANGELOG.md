@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.4 — draft (undated)
+## 0.1.4 — 2026-10-13
 
 - At start a rejected setting falls back to its default; on a live change it keeps its last good value, and your other changes still apply. `/pulse status` and pulse tool results name the ignored setting.
 - Explain the error threshold, source switches and ledger retention in the Settings form.
