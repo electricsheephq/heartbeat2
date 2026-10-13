@@ -298,10 +298,11 @@ class Tool:
                   f'Waits for {duration(parse_duration(w.trigger_json.get("after",p.checkin_after_hours*3600)))} of owner silence')
             parts=[lead+(f'; if nothing happens by {local(w.deadline_at)}, it tells you once' if watcher and w.deadline_at is not None else '')+'.']
         if w.status not in {'proposed','paused'}:
-            if w.kind=='at' or watcher and w.deadline_at is not None or w.kind=='owner_silent' and not w.trigger_json.get('builtin'):
+            if w.kind=='at' or watcher or w.kind=='owner_silent' and not w.trigger_json.get('builtin'):
                 from .commands import quiet_until
                 due=((s.last_human_at or e.clock.now())+parse_duration(w.trigger_json.get('after',p.checkin_after_hours*3600)) if w.kind=='owner_silent' else
-                     (w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind=='at' else w.deadline_at)
+                     (w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind=='at' else
+                     w.deadline_at if w.deadline_at is not None else w.next_due_at if w.kind in PROBE_KINDS and w.next_due_at is not None else e.clock.now())
                 due=max(due,e.clock.now())
                 if p.wake_spacing_minutes>0 and s.last_wake_turn_at is not None:
                     spacing=s.last_wake_turn_at+p.wake_spacing_minutes*60

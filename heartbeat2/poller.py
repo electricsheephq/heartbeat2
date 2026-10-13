@@ -130,7 +130,7 @@ class Poller:
             for w in s.list_wakes() if self.process_start else []:
                 if w.kind in EVENT_KINDS and w.status in {'active','paused','proposed'} and 'event' in w.trigger_json:
                     if s.cas_wake(w.id,w.status,expected_version=w.version,status='failed',status_reason='invalid_trigger_event'):
-                        self.cancel_occurrences(w.id,'invalid_trigger_event')
+                        self.cancel_occurrences(w.id,'invalid_trigger_event',preserve_started=True)
                         if w.session_key not in noticed:
                             self.notice(w.session_key,f'A watcher ({w.id}) used an unsupported event filter and could never fire, so it was stopped. Ask me to set it up again.')
                             noticed.add(w.session_key)

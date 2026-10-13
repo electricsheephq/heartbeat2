@@ -204,3 +204,26 @@ def test_deadline_free_event_watcher_counts_holds(engine, bypass):
     assert 'after expiry' in result['detail']
     assert not engine.store.list_wakes(KEY)
     assert create(engine, {'kind':'kanban_completed'}, until={'expires':'in 30m' if bypass=='spacing' else 'in 10h'}).get('ok')
+
+
+def test_sweep_leaves_started_turn_for_restart_settlement(engine):
+    w = arm(engine, 'kanban_completed', next_due_at=None, trigger_json={'event':'completed'})
+    engine.store.add_occurrence(w.id, 'legacy-started')
+    engine.store.connection.execute("UPDATE occurrences SET state='started' WHERE wake_id=? AND dedupe_key=?", (w.id, 'legacy-started'))
+    assert engine.acquire()
+    assert engine.store.get_wake(w.id).status_reason == 'invalid_trigger_event'
+    assert engine.store.get_occurrence(w.id, 'legacy-started').error != 'invalid_trigger_event'
+
+
+@pytest.mark.parametrize('hold', ['spacing','quiet'])
+def test_deadline_free_event_watcher_receipt_reports_holds(engine, hold):
+    if hold == 'spacing':
+        engine.policy = replace(engine.policy, wake_spacing_minutes=10)
+        session(engine, last_wake_turn_at=engine.clock.now()-5*60)
+        expected = f'Wake spacing holds it until {local(engine, engine.clock.now()+5*60)}.'
+    else:
+        now = night(engine, 23)
+        expected = f'Quiet hours hold it until {local(engine, now+9*3600)}.'
+    result = create(engine, {'kind':'kanban_completed'})
+    assert result.get('ok'), result
+    assert expected in receipt(result)
