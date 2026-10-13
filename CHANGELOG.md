@@ -3,7 +3,7 @@
 ## 0.1.9 — 2026-10-13
 
 - A watcher you ask the agent to set up with `/pulse watch` stays yours. When the agent turns your paused wake into a watcher (a new trigger or schedule only), the unanswered mute no longer holds it. Before, the conversion counted as an agent edit, so your watcher waited for a reply you had no reason to send.
-- When the agent edits a wake you armed (its trigger, timing or note), the wake gets the agent's limits: the 55-minute floor for timers without a watcher, and the cache-edge snap. Before, an edited wake kept your 15-minute floor while already losing your mute exemption.
+- When the agent edits a wake you armed (its trigger, timing or note), the wake gets the agent's limits: the 55-minute floor for timers without a watcher, and the cache-edge snap. The floor also moves the occurrence that was already scheduled at your faster pace; a wake anchored to a time of day moves to its first anchor slot past the floor. Before, an edited wake kept your 15-minute floor while already losing your mute exemption.
 
 ## 0.1.8 — 2026-10-13
 
