@@ -134,7 +134,7 @@ First release. Requires Hermes ≥ 0.21.6. Delivers to messaging-gateway DMs.
   - surviving a gateway restart;
   - a quiet-hours hold;
   - the no-op governor pausing a wake;
-  - an agent-armed file watcher.
+  - an agent-armed file watcher matching its line (its delivery was held by the unanswered mute, as designed; delivery of an agent-armed watcher was proven live on v0.1.12).
 
 **Known issues**: see the README. In brief:
 - A wake that fails at the provider shows Hermes's own failure notice (NousResearch/hermes-agent#136749).
