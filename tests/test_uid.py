@@ -182,3 +182,32 @@ def test_rewrite_free_differential_500_cases(engine, with_uids):
             api(e, history, turn)
             api(e, history, turn)
         assert humans(e) - before == old_oracle(histories), (with_uids, case)
+
+
+def test_quoted_origin_header_is_not_a_block_boundary():
+    quoted = 'first line\n' + intake.ORIGIN + '\nquoted without JSON\n'
+    one, two = owner(quoted + 'suffix one'), owner(quoted + 'suffix two')
+    assert len(intake.blocks(one)) == 1
+    assert intake.blocks(one)[0][1] != intake.blocks(two)[0][1]
+
+
+def test_blocks_appended_to_a_tracked_uidless_row_each_count(engine):
+    e = engine
+    a = owner('base')
+    anchor(e, [a])
+    before = humans(e)
+    a['content'] += '\n\n' + owner('steer one')['content'] + '\n\n' + owner('steer two')['content']
+    api(e, [a])
+    assert humans(e) == before + 2
+
+
+def test_turn_end_and_reset_release_the_anchor(engine):
+    e = engine
+    anchor(e, [owner('base')])
+    e.intake.on_session_end(session_id='sid', turn_id='other-turn', completed=True)
+    assert 'sid' in e.intake.anchors  # another turn's end leaves this turn's anchor alone
+    e.intake.on_session_end(session_id='sid', turn_id='turn', completed=True)
+    assert 'sid' not in e.intake.anchors
+    anchor(e, [owner('base')], turn='turn2')
+    e.intake.on_session_reset(old_session_id='sid', new_session_id='sid-new')
+    assert 'sid' not in e.intake.anchors and 'sid-new' not in e.intake.anchors

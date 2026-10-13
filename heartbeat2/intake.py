@@ -60,14 +60,19 @@ def pulse_command(text):
     return isinstance(text,str) and bool(re.match(r'^/pulse(?:@[^\s]+)?(?:\s|$)',text.strip(),re.I))
 
 
-def origin_ids(text):
+def origin_headers(text):
+    """(offset, message id or None) for each ORIGIN header followed by its JSON line."""
     for match in re.finditer(re.escape(ORIGIN)+r'\n(\{[^\n]*\})\n',text):
         try:
             data=json.loads(match[1])
         except ValueError:
             continue
         if isinstance(data,dict):
-            yield str(data.get('message_id') or data.get('source_message_id') or '') or None
+            yield match.start(),str(data.get('message_id') or data.get('source_message_id') or '') or None
+
+
+def origin_ids(text):
+    for _,mid in origin_headers(text): yield mid
 
 
 def row_text(content):
@@ -147,13 +152,10 @@ def origin_rows(history):
 
 def blocks(row):
     text=owner_text(row.get('content',''))
-    starts=[m.start() for m in re.finditer(re.escape(ORIGIN),text)]
-    result=[]
-    for i,start in enumerate(starts):
-        part=text[start:starts[i+1] if i+1<len(starts) else len(text)]
-        mids=list(origin_ids(part))
-        if mids: result.append((mids[0],hashlib.sha256(part.encode()).hexdigest()[:16]))
-    return result
+    # Only a header with its JSON line starts a block; a quoted header is owner text.
+    heads=list(origin_headers(text))
+    return [(mid,hashlib.sha256(text[at:heads[i+1][0] if i+1<len(heads) else len(text)].encode()).hexdigest()[:16])
+            for i,(at,mid) in enumerate(heads)]
 
 
 def uid(row):
@@ -625,7 +627,7 @@ class Intake:
                 state.issued[fp]+=1
                 ordinal=state.issued[fp]
                 new_count+=account(enumerate(bl[tracked[1]:],tracked[1]+1),
-                                   lambda i:f'{key}:origin:{turn_id}:{fp}:{ordinal}')
+                                   lambda i:f'{key}:origin:{turn_id}:{fp}:{ordinal}:b{i}')
                 state.unadopted.update(b for _,b in bl[tracked[1]:])
             if fp!=tracked[2]:
                 state.occupancy[tracked[2]]-=1
@@ -767,6 +769,8 @@ class Intake:
         if delegated_child(kwargs.get('platform','')): return None
         e,s=self.engine,self.engine.store
         self._follow(session_id)
+        anchor=self.anchors.get(session_id)
+        if anchor and (not turn_id or anchor[0]==turn_id): del self.anchors[session_id]  # held rows end with the turn
         f=self.flights.get(session_id)
         if turn_id and self.turns.get(session_id) and turn_id!=self.turns[session_id]: return None
         key=f.session_key if f else self.bindings.get(session_id)
@@ -814,6 +818,7 @@ class Intake:
         e,s=self.engine,self.engine.store
         old=old_session_id or session_id
         if not old: return None
+        self.anchors.pop(old,None)
         with s.atomic():
             keys=set()
             for w in s.list_wakes():
