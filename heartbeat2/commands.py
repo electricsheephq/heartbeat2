@@ -20,7 +20,9 @@ def quiet_until(engine, session_key, *, urgent=False, now=None):
     if urgent and engine.policy.quiet_hours_urgent: return None
     now = engine.clock.now() if now is None else now
     override = json.loads(engine.store.get_meta('quiet:'+session_key) or '{}')
-    if override.get('until', 0) > now: return override['until']
+    if override.get('until', 0) > now:
+        until=override['until']
+        return max(until,engine.policy.quiet_until(urgent=urgent,now=until) or until)
     if 'range' in override:
         return quiet_end(now, override['range'], engine.policy.resolved_timezone())
     return engine.policy.quiet_until(urgent=urgent, now=now)

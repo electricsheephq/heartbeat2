@@ -10,7 +10,7 @@ import pytest
 from heartbeat2 import commands, governor
 from heartbeat2.model import Wake
 from heartbeat2.schedule import parse_at
-from heartbeat2.tool import DESCRIPTION
+from heartbeat2.tool import DESCRIPTION, Infeasible
 from test_engine import engine, session, KEY, arm
 from test_v0113 import owner_turn
 
@@ -185,7 +185,7 @@ def test_watcher_deadline_implicit_and_explicit(engine, kind, explicit):
         w = engine.store.get_wake(result['wake']['id'])
         assert w.deadline_at < w.expires_at <= w.created_at+30*DAY
         text = receipt(result)
-        assert f'until {local(engine,w.deadline_at)}' in text
+        assert f'if nothing happens by {local(engine,w.deadline_at)}, it tells you once.' in text
         # Stored expiries stay fixed even if their provenance is unknown.
         engine.store.cas_wake(w.id,w.status,expires_at=engine.clock.now()+7*DAY)
         changed = engine.tool.handle({'action':'update','id':w.id,'title':'Report'}, session_id='sid')
@@ -210,7 +210,7 @@ def test_irreconcilable_resume_does_not_change_wake(engine, command, path):
     if path == 'tool':
         result = engine.tool.handle({'action':'resume','id':w.id}, session_id='sid')
         assert result.get('error') == 'invalid_request', result
-        assert 'due after expiry' in result['detail']
+        assert 'maximum lifetime' in result['detail']
     else:
         assert command(path+' '+w.id).startswith('Error:')
     assert engine.store.get_wake(w.id) == w
@@ -234,7 +234,7 @@ def test_resume_checks_final_occurrence_key(engine):
     engine.store.add_occurrence(w.id,f't:{w.next_due_at:.17g}')
     result = engine.tool.handle({'action':'resume','id':w.id}, session_id='sid')
     assert result.get('error') == 'invalid_request', result
-    assert 'due after expiry' in result['detail']
+    assert 'maximum lifetime' in result['detail']
     assert engine.store.get_wake(w.id) == w
 
 
@@ -490,3 +490,188 @@ def test_stretched_expiry_clamp_describes_stored_expiry(engine):
     assert all(stale not in str(value) for value in result['clamped'].values())
     assert str(w.expires_at) in result['clamped']['expires']
     assert 'covers the first due time' in result['clamped']['expires']
+
+
+@pytest.mark.parametrize('after', ['24h', None])
+def test_owner_silent_refuses_expiry_before_silence(engine, after):
+    engine.policy = replace(engine.policy, checkin_after_hours=24)
+    trigger = {'kind':'owner_silent', **({'after':after} if after else {})}
+    result = create(engine, trigger, until={'expires':'in 1h'})
+    assert result.get('error') == 'invalid_request', result
+    assert 'due after expiry' in result['detail']
+    assert not engine.store.list_wakes(KEY)
+
+
+def test_owner_silent_counts_from_last_owner_message(engine):
+    now = engine.clock.now()
+    session(engine, last_human_at=now-23*3600)
+    w = engine.store.create_wake(Wake(KEY, 'Check the report.', 'owner_silent', trigger_json={'after':'24h'}, expires_at=now+2*3600))
+    assert engine.tool.feasible(w) == w  # eligible in 1h, before the 2h expiry
+    w = engine.store.create_wake(Wake(KEY, 'Check the report.', 'owner_silent', trigger_json={'after':'48h'}, expires_at=now+2*3600))
+    with pytest.raises(Infeasible, match='due after expiry'):
+        engine.tool.feasible(w)
+
+
+def test_owner_silent_implicit_extension_and_existing_expiry(engine):
+    now = engine.clock.now()
+    w = Wake(KEY, 'Check the report.', 'owner_silent', trigger_json={'after':'24h'}, expires_at=now+3600)
+    stretched = engine.tool.feasible(w)
+    assert stretched.expires_at == now+25*3600
+    stored = engine.store.create_wake(w)
+    with pytest.raises(Infeasible, match='due after expiry'):
+        engine.tool.feasible(stored)
+    result = engine.tool.handle({'action':'update','id':stored.id,'title':'Report'}, session_id='sid')
+    assert result.get('error') == 'invalid_request', result
+    assert engine.store.get_wake(stored.id) == stored
+    builtin = replace(stored, trigger_json={'after':'24h','builtin':True})
+    assert engine.tool.feasible(builtin) == builtin
+
+
+@pytest.mark.parametrize('after,expected', [('24h','1d'), ('90m','90m'), (None,'2h')])
+def test_owner_silent_receipt_names_duration(engine, after, expected):
+    engine.policy = replace(engine.policy, checkin_after_hours=2)
+    result = create(engine, {'kind':'owner_silent', **({'after':after} if after else {})})
+    assert result.get('ok'), result
+    assert receipt(result).startswith(f'Waits for {expected} of owner silence.')
+
+
+def test_long_muted_event_deadline_receipt_is_bounded(engine):
+    engine.policy = replace(engine.policy, quiet_hours='22:00-08:00')
+    session(engine, unanswered_count=engine.policy.max_unanswered)
+    result = create(engine, {'kind':'kanban_worker_exited','deadline':'tomorrow 23:00'},
+                    until={'owner_replies':True})
+    assert result.get('ok'), result
+    text = receipt(result)
+    assert text.startswith('Waits for kanban_worker_exited events; if nothing happens by ')
+    assert 'Quiet hours hold it until' in text and 'Muted' in text
+    # The spacing sentence goes first, so expiry and reply-cancel survive.
+    assert len(text) <= 240 and 'Wakes at' not in text and text.endswith('Cancels if you reply.')
+
+
+def test_receipt_without_sentence_boundary_truncates_to_240(engine):
+    w = arm(engine, status='proposed')
+    text = receipt({'receipt':engine.tool.receipt(replace(w,id='w_'+300*'x'),engine.store.get_session(KEY))})
+    assert len(text) == 240 and text.endswith('…')
+
+
+def night(engine, hour=21, minute=0):
+    engine.policy = replace(engine.policy, quiet_hours='22:00-08:00')
+    engine.clock.wall = datetime(2026,10,14,hour,minute,tzinfo=engine.policy.resolved_timezone()).timestamp()
+    return engine.clock.now()
+
+
+def test_timed_quiet_chains_default_for_feasibility_and_receipt(engine, command):
+    now = night(engine)
+    assert command('quiet for 3h') == 'Quiet for this chat: for 3h.'
+    result = create(engine, {'kind':'at','at':'in 150m'}, until={'expires':'in 4h'})
+    assert result.get('error') == 'invalid_request', result
+    assert not engine.store.list_wakes(KEY)
+    result = create(engine, {'kind':'at','at':'in 150m'})
+    assert result.get('ok'), result
+    assert f'Quiet hours hold it until {local(engine,now+11*3600)}.' in receipt(result)
+
+
+@pytest.mark.parametrize('kind', ['at','every','kanban_worker_exited'])
+def test_timed_quiet_chain_preserves_live_gate_decisions(engine, command, monkeypatch, kind):
+    now = night(engine)
+    command('quiet for 3h')
+    w = arm(engine,kind)
+    engine.store.add_occurrence(w.id,'t:quiet')
+    o = engine.store.get_occurrence(w.id,'t:quiet')
+    s = engine.store.get_session(KEY)
+    chained = commands.quiet_until
+    def old_quiet(e, key, *, urgent=False, now=None):
+        if urgent and e.policy.quiet_hours_urgent: return None
+        now = e.clock.now() if now is None else now
+        until = json.loads(e.store.get_meta('quiet:'+key))['until']
+        return until if until>now else e.policy.quiet_until(urgent=urgent,now=now)
+    for hours in (0, 2.5, 3, 4, 11):
+        engine.clock.wall = now+hours*3600
+        monkeypatch.setattr(commands,'quiet_until',old_quiet)
+        old = engine.gate(w,o,s)
+        monkeypatch.setattr(commands,'quiet_until',chained)
+        new = engine.gate(w,o,s)
+        assert new[:2] == old[:2]
+        assert new == (('quiet_hours',kind!='every',now+11*3600) if hours<11 else ('',False,None))
+    engine.clock.wall = now
+    engine.policy = replace(engine.policy, quiet_hours_urgent=True)
+    assert commands.quiet_until(engine,KEY,urgent=True) is None
+
+
+@pytest.mark.parametrize('kind', ['at','command','subagent_done','owner_silent'])
+def test_maximum_lifetime_reason_precedes_clamped_expiry(engine, kind):
+    trigger = {'kind':kind, **({'at':'in 30d'} if kind=='at' else
+               {'after':'30d'} if kind=='owner_silent' else {'deadline':'in 30d'})}
+    if kind == 'command': trigger['command'] = ['git','status']
+    result = create(engine, trigger, until={'expires':'in 40d'})
+    assert result.get('error') == 'invalid_request', result
+    assert 'maximum lifetime of 14 days' in result['detail']
+    assert 'until.expires' not in result['detail']
+    assert not engine.store.list_wakes(KEY)
+
+
+def test_existing_and_babysit_hard_end_precede_expiry_hint(engine):
+    now = engine.clock.now()
+    for w in (arm(engine,next_due_at=now+14*DAY),
+              arm(engine,'self',babysit=True,next_due_at=now+4*3600,expires_at=now+4*3600)):
+        with pytest.raises(Infeasible, match='maximum lifetime') as caught:
+            engine.tool.feasible(w,explicit_expiry=True)
+        assert 'until.expires' not in str(caught.value)
+
+
+@pytest.mark.parametrize('kind', ['at','command'])
+def test_overdue_dispatch_uses_current_quiet_hours(engine, kind):
+    now = night(engine,22,2)
+    when = '2026-10-14T21:59:00+00:00'
+    trigger = {'kind':kind, 'at':when} if kind=='at' else {
+        'kind':'command','command':['git','status'],'deadline':when}
+    rejected = create(engine, trigger, until={'expires':'2026-10-14T23:00:00+00:00'})
+    assert rejected.get('error') == 'invalid_request', rejected
+    assert 'after expiry' in rejected['detail']
+    assert not engine.store.list_wakes(KEY)
+    result = create(engine, trigger)
+    assert result.get('ok'), result
+    release = now+(9*60+58)*60
+    assert f'Quiet hours hold it until {local(engine,release)}.' in receipt(result)
+
+
+@pytest.mark.parametrize('kind', ['file','process','url','command'])
+def test_probe_without_deadline_refuses_expiry_before_next_check(engine, tmp_path, kind):
+    path = tmp_path/'report.txt'
+    path.write_text('ready')
+    fields = {'file':{'path':str(path)}, 'process':{'pid':1},
+              'url':{'url':'https://1.1.1.1'}, 'command':{'command':['git','status']}}[kind]
+    w = arm(engine,kind,next_due_at=engine.clock.now()+7200,
+            trigger_json={'check_every':60, **fields},probe_state_json={'create_time':1})
+    # No trigger edit: use the stored next probe, without actually running it.
+    result = engine.tool.handle({'action':'update','id':w.id,'until':{'expires':'in 1h'}}, session_id='sid')
+    assert result.get('error') == 'invalid_request', result
+    assert 'due after expiry' in result['detail']
+    assert engine.store.get_wake(w.id) == w
+
+
+def test_event_without_deadline_has_no_next_check(engine):
+    w = arm(engine,'kanban_worker_exited',next_due_at=engine.clock.now()+7200)
+    result = engine.tool.handle({'action':'update','id':w.id,'until':{'expires':'in 1h'}}, session_id='sid')
+    assert result.get('ok'), result
+    assert engine.store.get_wake(w.id).expires_at == engine.clock.now()+3600
+
+
+@pytest.mark.parametrize('kind', ['command','subagent_done'])
+def test_watcher_deadline_is_one_time_fallback_and_watcher_continues(engine, kind):
+    trigger = {'kind':kind,'deadline':'in 1h'}
+    if kind == 'command': trigger['command'] = ['git','status']
+    result = create(engine, trigger)
+    assert result.get('ok'), result
+    w = engine.store.get_wake(result['wake']['id'])
+    text = receipt(result)
+    assert f'; if nothing happens by {local(engine,w.deadline_at)}, it tells you once.' in text
+    assert f' until {local(engine,w.deadline_at)}' not in text
+    engine.clock.advance(3600)
+    engine.times()
+    engine.times()
+    occurrences = engine.store.list_occurrences(w.id)
+    assert len(occurrences) == 1
+    assert occurrences[0].payload_json == [{'message':'deadline passed — nothing happened'}]
+    stored = engine.store.get_wake(w.id)
+    assert stored.status == 'active' and stored.deadline_at is None and stored.expires_at == w.expires_at

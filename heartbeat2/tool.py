@@ -253,19 +253,25 @@ class Tool:
             raise Infeasible('that time has already passed')
         watcher=w.kind in PROBE_KINDS | EVENT_KINDS
         if watcher:
-            point,label=w.deadline_at,'deadline'
+            point,label=(w.deadline_at,'deadline') if w.deadline_at is not None else (w.next_due_at if w.kind in PROBE_KINDS else None,'due')
+        elif w.kind=='owner_silent':
+            if w.trigger_json.get('builtin'): return w
+            last=getattr(e.store.get_session(w.session_key),'last_human_at',None) or e.clock.now()
+            point=max(e.clock.now(),last+parse_duration(w.trigger_json.get('after',p.checkin_after_hours*3600)))
         elif w.kind not in TIME_KINDS: return w
         if point is None or w.expires_at is None: return w
         if w.kind=='at' or watcher:
             from .commands import quiet_until
+            point=max(point,e.clock.now())
             point=quiet_until(e,w.session_key,urgent=w.urgent,now=point) or point
+        max_life=min(p.max_lifetime_days*86400,4*3600) if w.babysit else p.max_lifetime_days*86400
+        hard_end=(w.created_at or e.clock.now())+max_life
+        if point>=hard_end: raise Infeasible(f'{label} after the maximum lifetime of {max_life/86400:g} days')
         if point<w.expires_at: return w
         if explicit_expiry or e.store.get_wake(w.id) is not None:
             local=lambda t: datetime.fromtimestamp(t,p.resolved_timezone()).strftime('%a %d %b %H:%M')
             raise Infeasible(f'{label} after expiry: {local(point)} >= {local(w.expires_at)}; set until.expires to extend it')
-        max_life=min(p.max_lifetime_days*86400,4*3600) if w.babysit else p.max_lifetime_days*86400
-        end=min((w.created_at or e.clock.now())+max_life,point+3600)
-        if point>=end: raise Infeasible(f'{label} after the maximum lifetime of {max_life/86400:g} days')
+        end=min(hard_end,point+3600)
         return replace(w,expires_at=end)
 
     def receipt(self,w,s):
@@ -285,12 +291,14 @@ class Tool:
             parts=[f'Next at {local(w.next_due_at)}'+(' (cron).' if w.kind=='cron' else f', then every {duration(w.eff_interval_s)}.')]
         else:
             lead=(f'Checks every {duration(w.trigger_json["check_every"])}' if w.kind in PROBE_KINDS else
-                  f'Waits for {w.kind} events' if watcher else 'Waits for owner silence')
-            parts=[lead+(f' until {local(w.deadline_at)}' if watcher and w.deadline_at is not None else '')+'.']
+                  f'Waits for {w.kind} events' if watcher else
+                  f'Waits for {duration(parse_duration(w.trigger_json.get("after",p.checkin_after_hours*3600)))} of owner silence')
+            parts=[lead+(f'; if nothing happens by {local(w.deadline_at)}, it tells you once' if watcher and w.deadline_at is not None else '')+'.']
         if w.status not in {'proposed','paused'}:
             if w.kind=='at' or watcher and w.deadline_at is not None:
                 from .commands import quiet_until
                 due=(w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind=='at' else w.deadline_at
+                due=max(due,e.clock.now())
                 release=quiet_until(e,w.session_key,urgent=w.urgent,now=due)
                 if release and release>due: parts.append(f'Quiet hours hold it until {local(release)}.')
             if not owner_class(w) and s.unanswered_count>=p.max_unanswered:
@@ -301,6 +309,11 @@ class Tool:
         if w.cancel_on_reply: parts.append('Cancels if you reply.')
         text=' '.join(parts)
         if len(text)>240: text=text.replace('Wakes are at least ','Wakes at least ').replace(' min apart, so it can land a few minutes late.',' min apart; may land a few minutes late.')
+        if len(text)>240: text=' '.join(x for x in parts if not x.startswith('Wakes are at least '))
+        if len(text)>240:
+            text=text[:239]
+            boundary=text.rfind('. ')
+            text=(text[:boundary+1] if boundary>=0 else text)+'…'
         return text
 
     def reschedule(self,w):
