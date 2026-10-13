@@ -1,5 +1,6 @@
 """Hybrid routing. Imported only after the runner selects its isolated pin."""
 import json
+import re
 
 from harness import MARKER, WakeDirector
 from tests.fakes.fake_llm_provider import Raw
@@ -31,6 +32,9 @@ class LiveDirector(WakeDirector):
             self._active = identity
         if active or any(f'[in:{token}]' in current for token in self.forward):
             self.upstream.wake = bool(active)
+            if 'capture' in self.forward or '-ctx' in getattr(self.upstream, 'path', ''):
+                body = body | {'messages': [m | {'content': re.sub(r' \[in:[^]]+\]', '', m['content'])}
+                    if isinstance(m.get('content'), str) else m for m in messages]}
             response, status = self.upstream.forward(body)
             # Errors must retain the active wake for retries/fallback continuations.
             if status < 400 and not any(c.get('message', {}).get('tool_calls')

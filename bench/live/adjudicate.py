@@ -37,28 +37,34 @@ def packets(results):
         history = [row for pair in result['history'] for row in (
             {'role': 'user', 'content': pair['owner']},
             {'role': 'assistant', 'content': pair['assistant']})][-6:]
-        history = result.get('history_rows', history)[-6:]
+        if not result.get('context_tokens') and result.get('type') != 'capture':
+            history = result.get('history_rows', history)[-6:]
         for i, text in enumerate(result['delivered']):
             output.append({'id': packet_id(result, i), 'history': history,
                            'wake_note': result['wake_note'], 'evidence': evidence(result),
                            'delivered_text': text})
+            if 'pulse_results' in result:
+                output[-1].update(pulse_results=result['pulse_results'], receipts=[r['receipt'] for r in result['pulse_results'] if 'receipt' in r])
+            if result.get('type') == 'capture':
+                output[-1]['owner_message'] = result['owner_message']
     return output
 
 
 def merge(score, verdicts):
+    keys = (*VERDICT_KEYS, 'overpromise') if score.get('round') == 3 else VERDICT_KEYS
     texts = {t['id']: t for group in score['paths'].values() for t in group['texts']}
     seen = set()
     for verdict in verdicts:
         if verdict['id'] not in texts or verdict['id'] in seen:
             raise ValueError('unknown or duplicate packet id')
         seen.add(verdict['id'])
-        if any(type(verdict.get(k)) is not bool for k in VERDICT_KEYS):
+        if any(type(verdict.get(k)) is not bool for k in keys):
             raise ValueError('every judgment must be boolean')
         why = verdict.get('why')
         if not isinstance(why, str) or not why.strip() or '\n' in why:
             raise ValueError('why must be a nonempty one-line explanation')
     for verdict in verdicts:
-        texts[verdict['id']]['verdict'] = {k: verdict[k] for k in (*VERDICT_KEYS, 'why')}
+        texts[verdict['id']]['verdict'] = {k: verdict[k] for k in (*keys, 'why')}
     return aggregate(score)
 
 

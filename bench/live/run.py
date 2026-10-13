@@ -5,6 +5,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,18 @@ def fake_reply(scenario, record):
     stop = users and '[in:stop]' in users[-1]
     tools = [m for m in messages if m['role'] == 'tool']
     last = messages[-1]
+    if scenario.get('type') == 'capture':
+        if last['role'] == 'tool':
+            if scenario['id'] == 'T2':
+                return Text('It awaits approval; please approve it with /pulse ok.')
+            if scenario['id'] == 'T1' and '"error"' in str(last.get('content')):
+                return Text('I cannot set that reminder.')
+            return Text('The tool returned the reported bounds.')
+        if scenario['id'] == 'N7':
+            return ToolCall('pulse', {'action': 'cancel', 'id': 'all'})
+        if scenario['label'] == 'MUST_NOT_ARM':
+            return Text('Blue was the logo choice.' if scenario['id'] == 'N4' else 'Understood.')
+        return ToolCall('pulse', scenario['_create'])
     if stop:
         if last['role'] != 'tool':
             ids = re.findall(r'"id"\s*:\s*"(w_[^"]+)"', ' '.join(str(t['content']) for t in tools))
@@ -53,6 +66,8 @@ def tool_arguments(call):
 
 
 def cell(args, scenario, rep):
+    args.out.mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(args.out)
     parent = Path(tempfile.mkdtemp(prefix='hb-live-parent-'))
     os.environ.update(HOME=str(parent), HERMES_HOME=str(parent / '.hermes'),
                       HERMES_DISABLE_LAZY_INSTALLS='1', PYTHONDONTWRITEBYTECODE='1')
@@ -81,22 +96,40 @@ def cell(args, scenario, rep):
     models = {'primary': args.model, 'fake-model': args.model,
               'bench-fallback': args.fallback_model}
     upstream = Upstream(url, models, args.key_env, record,
-                        {'primary': 'fake-model'} if args.path == 'P3' else None)
+                        {'primary': 'fake-model'} if args.path.split('-ctx')[0] == 'P3' else None)
     upstream.scenario, upstream.rep, upstream.path = scenario['id'], rep, args.path
     director = LiveDirector(upstream, scenario['forward'])
     rig = PulseRig(f'{args.path}-{scenario["id"]}-{rep}', args.pin, director=director,
-                   config={'model': {'streaming': False}})
+                   config={'model': {'streaming': False}, 'plugins': {'entries': {'heartbeat2': {
+                       'settings': scenario.get('settings', {})}}}})
     def terminate(signum, frame):
         upstream.quota = True
         raise QuotaError('QUOTA: another cell stopped the run')
     signal.signal(signal.SIGTERM, terminate)
-    if args.path == 'P3':
+    if args.path.split('-ctx')[0] == 'P3':
         import hermes_yaml
         cfg_path = rig.gateway.hermes_home / 'config.yaml'
         cfg = hermes_yaml.safe_load(cfg_path.read_text())
         cfg['fallback_model'] = {'provider': 'custom', 'model': 'bench-fallback',
                                  'base_url': rig.llm.base_url, 'api_key': 'fake-loopback-only'}
         cfg_path.write_text(hermes_yaml.safe_dump(cfg, sort_keys=False))
+    from .round3 import filler_history, resolve, target, turn_pulse
+    fixtures = {}
+    if scenario.get('fixture'):
+        probe = rig.gateway.home / 'probe.txt'
+        probe.write_text('RUNNING')
+        fixtures['path'] = str(probe)
+        if scenario['fixture'] == 'command':
+            script = rig.gateway.home / 'build_status.py'
+            script.write_text('from pathlib import Path\nimport sys\nsys.exit(0 if Path(__file__).with_name("probe.txt").read_text() == "PASS" else 1)\n')
+            probe.write_text('PASS')
+            fixtures.update(command=[sys.executable, str(script)], **{'status command': shlex.join([sys.executable, str(script)])})
+            import hermes_yaml
+            cfg_path = rig.gateway.hermes_home / 'config.yaml'
+            cfg = hermes_yaml.safe_load(cfg_path.read_text())
+            cfg['plugins']['entries']['heartbeat2']['settings']['probe_commands'] = fixtures['status command']
+            cfg_path.write_text(hermes_yaml.safe_dump(cfg))
+    scenario['history'] = [{k: resolve(v, time.time(), 'UTC', fixtures) for k, v in pair.items()} for pair in scenario['history']]
     install(rig, scenario['facts'])
     original_wait = rig.wait
 
@@ -108,23 +141,54 @@ def cell(args, scenario, rep):
         return original_wait(guarded, what, timeout)
     rig.wait = wait
     result = {'scenario': scenario['id'], 'rep': rep, 'path': args.path,
-              'history': scenario['history'], 'wake_note': scenario['arm']['note'],
+              'history': scenario['history'], 'wake_note': scenario.get('arm', {}).get('note', ''),
               'status': 'PENDING', 'delivered': [], 'upstream': args.upstream if args.upstream == 'fake' else 'live'}
+    result.update(plugin_version=str(yaml.safe_load((ROOT / 'plugin.yaml').read_text())['version']),
+                  type=scenario.get('type', 'wake'), timezone='UTC', fixtures=fixtures)
     code = 0
     try:
         # The helper strips conventional secret names; also protect arbitrary key-env names.
         key = os.environ.pop(args.key_env)
         try:
-            rig.start()
+            rig.start(bootstrap=scenario.get('type') != 'capture' and not args.context_tokens)
         finally:
             os.environ[args.key_env] = key
         def seed(i, pair):
             token = f'history-{i}'
             director.script(token, Text(pair['assistant']))
-            rig.owner(f'{pair["owner"]} [in:{token}]', pair['assistant'])
+            rig.owner(f'{pair["owner"]} [in:{token}]', pair['assistant'][:100] if args.context_tokens else pair['assistant'])
+        if args.context_tokens:
+            filler, prefix, digest = filler_history(args.context_tokens)
+            result.update(context_tokens=args.context_tokens, context_hash=digest, context_size=len(prefix) // 4,
+                          context_pairs=len(filler))
+            for i, pair in enumerate(filler):
+                seed(f'ctx-{i}', pair)
         for i, pair in enumerate(scenario['history']):
             if scenario['id'] != 'L4' or i == 0:
                 seed(i, pair)
+        if scenario.get('type') == 'capture':
+            if scenario.get('prearm'):
+                prearm = scenario['prearm']
+                rig.agent_arm('prearm', {k: v for k, v in prearm.items() if k != 'note'}, note=prearm['note'])
+            result.update(prearm_ids=[w['id'] for w in rig.rows('wakes')], sent_at=time.time())
+            result['owner_message'] = resolve(scenario['owner'], result['sent_at'], result['timezone'], fixtures)
+            match = scenario.get('match')
+            if match:
+                trigger = {'kind': match['families'][0]}
+                if 'due' in match:
+                    from datetime import datetime, timezone
+                    trigger['at'] = datetime.fromtimestamp(target(scenario, result), timezone.utc).isoformat()
+                else:
+                    trigger.update({'path': fixtures['path'], 'pattern': '^DONE$'} if scenario['id'] == 'A3' else
+                                   {'command': fixtures['command'], 'fire_on': 'failure'} if scenario['id'] == 'A4' else {'cron': '0 9 * * 1-5'})
+                scenario['_create'] = {'action': 'create', 'trigger': trigger, 'note': match['term'],
+                                       'owner_asked': trigger['kind'] == 'at', 'until': {'owner_replies': match.get('cancel_on_reply', False), 'expires': 'in 14d'}}
+            else:
+                scenario['_create'] = {'action': 'create', 'trigger': {'kind': 'at', 'at': 'in 30d'}, 'note': 'renew the domain', 'owner_asked': True}
+            before = rig.visible_ids()
+            rig.owner(result['owner_message'] + ' [in:capture]')
+            result.update(status='COMPLETE', delivered=rig.new_visible(before), wake_set=rig.rows('wakes'), session=rig.session())
+            return 0
         arm = scenario['arm']
         if 'owner' in arm:
             wid = rig.arm(arm['note'], '5s')
@@ -198,6 +262,10 @@ def cell(args, scenario, rep):
             for m in b.get('messages', []) if m['role'] == 'assistant'
             for c in m.get('tool_calls', []) if c['function']['name'] == 'pulse'}
         result['pulse_calls'] = list(pulse.values())
+        if scenario.get('type') == 'capture':
+            result['pulse_calls'], result['pulse_results'] = turn_pulse(upstream.rows)
+        else:
+            result['pulse_results'] = turn_pulse([r for r in upstream.rows if r.get('wake')])[1]
         history = upstream.rows[0]['request']['messages'] if upstream.rows else []
         result['history_rows'] = [{'role': m['role'], 'content': re.sub(r'\s*\[in:[^]]+\]', '',
             director._text(m))} for m in history if m['role'] in ('user', 'assistant') and
@@ -224,6 +292,7 @@ def main():
     parser.add_argument('--reps', type=int, default=3)
     parser.add_argument('--workers', type=int, choices=[1, 2], default=2)
     parser.add_argument('--scenarios')
+    parser.add_argument('--context-tokens', type=int, default=0)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--cell', help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -242,6 +311,12 @@ def main():
     if args.reps < 1:
         parser.error('--reps must be positive')
     selected = args.scenarios.split(',') if args.scenarios else [s['id'] for s in scenarios()['scenarios']]
+    if args.context_tokens < 0:
+        parser.error('--context-tokens must be nonnegative')
+    if args.context_tokens:
+        from .round3 import CTX_IDS
+        selected = [sid for sid in selected if sid in CTX_IDS]
+        args.path += f'-ctx{args.context_tokens}'
     data = {s['id']: s for s in scenarios()['scenarios']}
     if set(selected) - data.keys():
         parser.error('unknown scenario')
