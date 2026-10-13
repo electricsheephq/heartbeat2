@@ -167,7 +167,6 @@ def test_builtin_silence_still_bypasses_feasibility(engine):
 
 def test_version_changelog_and_skill():
     root = Path(__file__).resolve().parents[1]
-    assert 'version: "0.1.15"' in (root/'plugin.yaml').read_text()
     changelog = (root/'CHANGELOG.md').read_text()
     assert changelog.count('## 0.1.15 — 2026-10-14') == 1
     section = changelog.split('## 0.1.15 — 2026-10-14')[1].split('## 0.1.14')[0]

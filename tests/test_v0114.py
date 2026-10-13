@@ -166,7 +166,7 @@ def test_quiet_implicit_extension_and_recurring_skip(engine):
     recurring = create(engine, {'kind':'every','every':'1d at 23:00'},
                        until={'expires':'tomorrow 07:00'})
     assert recurring.get('ok'), recurring
-    assert 'Quiet' not in receipt(recurring)
+    assert 'Quiet hours skip its ticks until' in receipt(recurring) and 'hold it' not in receipt(recurring)
 
 
 @pytest.mark.parametrize('kind', ['command', 'subagent_done'])
@@ -341,7 +341,7 @@ def test_update_already_due_one_shot_has_receipt(engine):
 def test_docs_and_version():
     root = Path(__file__).resolve().parents[1]
     assert 'Results include a receipt line; tell the owner what it says, not a promise of your own.' in DESCRIPTION
-    assert 'version: "0.1.15"' in (root/'plugin.yaml').read_text()
+    assert '## 0.1.15 — 2026-10-14' in (root/'CHANGELOG.md').read_text()
     skill = (root/'skills/heartbeat2-usage/SKILL.md').read_text()
     assert 'receipt' in skill and 'awaiting your OK' in skill
     readme = (root/'README.md').read_text()

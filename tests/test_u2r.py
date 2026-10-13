@@ -259,11 +259,13 @@ def test_R2_G6_wall_jump_alone_does_not_restart(engine):
 @pytest.mark.parametrize('action',['create','update'])
 def test_R2_G7_invalid_duration_refused(engine, action):
     e=engine
-    args={'action':action,'note':'invalid','trigger':{'kind':'owner_silent','after':'1 day'}}
-    if action=='update': args['id']=arm(e).id
+    args={'action':action,'note':'invalid','trigger':{'kind':'owner_silent','after':'1 month'}}
+    before=arm(e) if action=='update' else None
+    if before: args['id']=before.id
     result=e.tool.handle(args,session_id='sid')
     assert result['error']=='invalid_request'
-    assert not any(w.trigger_json.get('after')=='1 day' for w in e.store.list_wakes())
+    assert not any(w.trigger_json.get('after')=='1 month' for w in e.store.list_wakes())
+    if before: assert e.store.get_wake(before.id).trigger_json==before.trigger_json
 
 
 @pytest.mark.parametrize('kind',['owner_silent','file','every'])
