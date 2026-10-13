@@ -247,7 +247,10 @@ def test_restart_interrupt_only_clears_preboot_busy(engine, live):
     e.clock.advance(1)
     runner = Poller(e.ctx, e.store, e.policy, e.clock, paused=lambda: False)
     if live:
-        session(e, busy_since=e.clock.now())
+        session(e, busy_since=e.clock.now(), busy_epoch=runner.epoch)
+    else:
+        # The flag belongs to the crashed process, as in test_v013b_review.crashed().
+        session(e, busy_epoch='crashed-process')
     busy = e.store.get_session(KEY).busy_since
     try:
         runner.reconcile()
