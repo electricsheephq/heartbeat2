@@ -177,3 +177,25 @@ def test_session_reset_clears_busy_and_epoch(busy_engine, builtin):
     stamp(e, e.clock.now(), e.epoch)
     e.intake.on_session_reset(old_session_id='sid', new_session_id='new-sid')
     assert busy_pair(e) == (None, None)
+
+
+def test_timed_out_unload_still_retires_the_engine_epoch(tmp_path, clock):
+    """Runtime.close() skips engine.close() under a still-running tick; ownership must still end."""
+    import threading
+    from heartbeat2.registration import Runtime
+    from test_engine import GatewayCtx
+    r = Runtime(GatewayCtx(tmp_path), clock=clock)
+    e = r.get_engine()
+    assert e.epoch in LOCAL_EPOCHS
+    release = threading.Event()
+    tick = threading.Thread(target=release.wait, daemon=True)
+    tick.start()
+    r._threads.append(tick)  # a tick or probe outliving close()'s join timeout
+    try:
+        r.close()
+        assert e.epoch not in LOCAL_EPOCHS
+    finally:
+        release.set()
+        tick.join()
+        e.close()
+        e.store.close()

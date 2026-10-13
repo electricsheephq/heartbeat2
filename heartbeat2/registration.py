@@ -219,6 +219,10 @@ class Runtime:
             self._wake.set()
         for thread in self._threads:
             if thread is not threading.current_thread(): thread.join(timeout=.5)
+        if self._engine:
+            # This runtime's turns are abandoned even when a tick outlives the join below.
+            from .poller import LOCAL_EPOCHS
+            LOCAL_EPOCHS.discard(self._engine.epoch)
         # Do not close a connection under a still-running old tick.
         if self._engine and all(not t.is_alive() for t in self._threads):
             self._engine.close()
