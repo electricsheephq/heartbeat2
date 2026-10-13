@@ -361,3 +361,18 @@ def test_a_merged_legacy_block_keeps_its_identity_whatever_follows(engine, tail,
     first['message_uid'] = 'first'
     api(e, [first])
     assert humans(e) == before + expected
+
+
+@pytest.mark.parametrize('old,new', [('reply ', 'reply\t'), ('reply', 'reply\n'), ('reply\n\n', 'reply')])
+def test_blocks_differing_only_in_trailing_whitespace_stay_distinct(engine, old, new):
+    """Only the blank line Hermes inserts when merging rows is ignored; other trailing bytes are owner text."""
+    e = engine
+    summarised, survivor = owner(old), owner('survivor')
+    anchor(e, [summarised, survivor])
+    summarised['_compressed_summary'] = True  # filtered from owner records; its legacy token is left over
+    api(e, [summarised, survivor])
+    survivor['content'] += '\n\n' + owner(new)['content']
+    before = humans(e)
+    for _ in range(2):
+        api(e, [summarised, survivor])
+        assert humans(e) == before + 1
