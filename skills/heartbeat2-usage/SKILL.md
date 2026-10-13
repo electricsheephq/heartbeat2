@@ -42,6 +42,7 @@ never promise exact timing yourself. A proposed wake is "awaiting your OK",
 never "armed".
 When the owner asks for a one-time reminder in their current message, set `owner_asked: true` on the `at` create; never set it for your own follow-ups.
 The receipt is what to repeat.
+For a one-time reminder use `kind: at`; `at` accepts `HH:MM`, `tomorrow HH:MM`, `in 10 minutes`, or an ISO date-time.
 
 ## Examples
 

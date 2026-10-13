@@ -7,7 +7,7 @@ from .model import Wake, Session
 from . import governor
 from . import cache
 from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested
-from .schedule import parse_duration, quiet_end, local_day
+from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible
 
 HELP = ('/pulse status | list | ledger [7d] | why <id> | add in 2h <note> | '
@@ -103,9 +103,11 @@ def _ledger(engine, key, days):
 
 
 def _add(engine, session, text):
-    match = re.fullmatch(r'in (\S+) (.+)', text, re.DOTALL)
-    if match:
-        trigger, note = {'kind':'at','at':'in '+match[1]}, match[2]
+    clock = re.fullmatch(r'(\d{1,2}:\d{2})\s+(.+)', text, re.DOTALL)
+    part = _DURATION.pattern
+    match = re.fullmatch(r'in (?P<duration>'+part+r'(?:\s*(?:,|and)?\s*'+part+r')*)\s+(?P<note>.+)', text, re.I|re.DOTALL)
+    if clock or match:
+        trigger, note = ({'kind':'at','at':clock[1]}, clock[2]) if clock else ({'kind':'at','at':'in '+match['duration']}, match['note'])
     else:
         match = re.fullmatch(r'every (\S+)\s+(.+)', text, re.DOTALL)
         if match:
@@ -122,7 +124,7 @@ def _add(engine, session, text):
                 note=anchor[4]
         else:
             match = re.fullmatch(r'when silent (\S+) (.+)', text, re.DOTALL)
-            if not match: raise ValueError('use add in 2h <note>, every 1d at 09:00 <note>, or when silent 24h <note>')
+            if not match: raise ValueError('use add in 2h <note>, add 16:30 <note>, every 1d at 09:00 <note>, or when silent 24h <note>')
             parse_duration(match[1])
             trigger, note = {'kind':'owner_silent','after':match[1]}, match[2]
     wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command',

@@ -12,29 +12,32 @@ from zoneinfo import ZoneInfo
 
 from .model import Wake, agent_authored
 
-_DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*([smhdw])", re.I)
+_DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*(s(?:econds?|ecs?)?|m(?:inutes?|ins?)?|h(?:ours?|rs?)?|d(?:ays?)?|w(?:eeks?|ks?)?)", re.I)
 
 
 def parse_duration(value: str | float) -> float:
+    error = f"invalid duration '{str(value)[:60]}': use a number and unit such as 10m, 2 hours or 1h30m"
     if isinstance(value, bool):
-        raise ValueError("duration must be positive")
+        raise ValueError(error)
     if isinstance(value, (int, float)):
-        result = float(value)
+        try: result = float(value)
+        except OverflowError: raise ValueError(error) from None
     elif isinstance(value, str):
         text = re.sub(r"^(?:in\s+|\+)", "", value.strip(), flags=re.I)
         result, pos = 0.0, 0
         for match in _DURATION.finditer(text):
-            if text[pos:match.start()].strip():
-                raise ValueError("invalid duration")
+            gap = text[pos:match.start()]
+            if (not pos and gap.strip()) or (pos and not re.fullmatch(r"\s*(?:(?:,|and)\s*)?", gap, re.I)):
+                raise ValueError(error)
             result += float(match[1]) * {"s": 1, "m": 60, "h": 3600,
-                                        "d": 86400, "w": 604800}[match[2].lower()]
+                                        "d": 86400, "w": 604800}[match[2][0].lower()]
             pos = match.end()
         if not pos or text[pos:].strip():
-            raise ValueError("invalid duration")
+            raise ValueError(error)
     else:
-        raise ValueError("invalid duration")
+        raise ValueError(error)
     if not math.isfinite(result) or result <= 0:
-        raise ValueError("duration must be finite and positive")
+        raise ValueError(error)
     return result
 
 
@@ -69,14 +72,23 @@ def _local_instant(naive: datetime, tz: tzinfo, *, later: bool = False) -> float
 
 
 def parse_at(value: str, *, now: float, timezone: str | tzinfo) -> float:
+    try: return _parse_at(value, now=now, timezone=timezone)
+    except (ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
+        if isinstance(exc, ValueError) and str(exc).startswith('invalid duration '): raise
+        raise ValueError(f"invalid time '{str(value)[:60]}': use HH:MM, tomorrow HH:MM, in 10m, or an ISO date-time") from None
+
+
+def _parse_at(value: str, *, now: float, timezone: str | tzinfo) -> float:
     tz = zone(timezone)
     text = value.strip()
     if text.startswith("+") or text.lower().startswith("in "):
         return now + parse_duration(text)
-    if text.lower().startswith("tomorrow "):
-        hour, minute = _hm(text.split(maxsplit=1)[1])
-        date = datetime.fromtimestamp(now, tz).date() + timedelta(days=1)
+    clock = re.fullmatch(r"(?:today\s+)?(\d{1,2}:\d{2})", text, re.I)
+    if clock or text.lower().startswith("tomorrow "):
+        hour, minute = _hm(clock[1].zfill(5) if clock else text.split(maxsplit=1)[1])
+        date = datetime.fromtimestamp(now, tz).date() + timedelta(days=0 if clock else 1)
         local = datetime(date.year, date.month, date.day, hour, minute)
+        if clock and _local_instant(local, tz) <= now: local += timedelta(days=1)
     else:
         local = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if local.tzinfo is not None:

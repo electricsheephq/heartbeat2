@@ -41,6 +41,11 @@ NON_GATEWAY_PLATFORMS = frozenset({"cli", "tui", "desktop", "api_server", "cron"
 INJECTION_CONFIG = "plugins:\n  entries:\n    heartbeat2:\n      allow_gateway_injection: true"
 
 
+def unknown_kind(kind):
+    return Gate(False, "unknown_kind", f"unknown trigger kind '{kind}'; valid kinds: {', '.join(sorted(KINDS))}. "
+                'A one-time reminder is {"kind": "at", "at": "in 10m"}.')
+
+
 @dataclass(frozen=True)
 class Gate:
     allowed: bool
@@ -213,7 +218,7 @@ class Policy:
         if not allow_gateway_injection:
             return Gate(False, "injection_disabled", INJECTION_CONFIG)
         if kind not in KINDS:
-            return Gate(False, "unknown_kind")
+            return unknown_kind(kind)
         family = ("silence" if kind == "owner_silent" else "events" if kind in EVENT_KINDS
                   else kind if kind in PROBE_KINDS else None)
         if family and not getattr(self, f"source_{family}"):
@@ -256,7 +261,7 @@ class Policy:
             return Gate(False, "needs_owner")
         kind = new_kind if new_kind is not None else wake.kind
         if kind not in KINDS:
-            return Gate(False, "unknown_kind")
+            return unknown_kind(kind)
         family = ("silence" if kind == "owner_silent" else "events" if kind in EVENT_KINDS
                   else kind if kind in PROBE_KINDS else None)
         if family and not getattr(self, f"source_{family}"):

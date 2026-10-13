@@ -36,6 +36,7 @@ DESCRIPTION = ('Use create to arm a wake/watcher (note and trigger.kind required
                'For a one-time "at" wake the owner asks for in their current message, set owner_asked=true: '
                "it then fires like the owner's own reminder (not muted, not capped). Never set it for your own follow-ups.")
 SCHEMA = {'name':'pulse','description':DESCRIPTION,'parameters':PARAMETERS}
+NOT_IN_FLIGHT = {'error':'not_in_flight','detail':'respond is only for answering a wake turn; in an ordinary conversation, just reply to the owner (use create/update/cancel to manage wakes).'}
 
 
 def current_session_key():
@@ -94,6 +95,9 @@ class Tool:
                 return {'error':'unknown_parameter'}
             if 'owner_asked' in args and not isinstance(args['owner_asked'], bool):
                 raise ValueError('owner_asked must be a boolean')
+            for field in ('trigger','until','pacing'):
+                if field in args and not isinstance(args[field],dict):
+                    raise ValueError(f'invalid request: {field} must be an object')
             s = self.identity()
             if s is None:
                 return {'error':'missing_session'}
@@ -160,8 +164,8 @@ class Tool:
                         babysit=args.get('babysit'), untrusted_payload=bool(flight and flight.untrusted))
                     if not gate.allowed:
                         if args.get('id') != 'all':
-                            return {'error':gate.reason}
-                        results.append({'id':w.id,'error':gate.reason})
+                            return {'error':gate.reason, **({'detail':gate.detail} if gate.detail else {})}
+                        results.append({'id':w.id,'error':gate.reason, **({'detail':gate.detail} if gate.detail else {})})
                         continue
                     clamps = {}
                     if action in {'resume','update'}:
@@ -234,8 +238,11 @@ class Tool:
                     if action in {'update','resume'}: item['receipt']=self.receipt(w,s)
                     results.append(item)
                 return results[0] if args.get('id') != 'all' and results else {'ok':True,'results':results}
-        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        except ValueError as exc:
             return {'error':'invalid_request','detail':str(exc)}
+        except (TypeError, KeyError, OverflowError, AttributeError):
+            e.log.warning('pulse tool rejected a malformed request', exc_info=True)
+            return {'error':'invalid_request','detail':'invalid request: check the field types and required trigger values'}
         except Exception:
             e.log.warning('pulse tool failed', exc_info=True)
             return {'error':'engine_error'}
@@ -298,10 +305,10 @@ class Tool:
                   f'Waits for {duration(parse_duration(w.trigger_json.get("after",p.checkin_after_hours*3600)))} of owner silence')
             parts=[lead+(f'; if nothing happens by {local(w.deadline_at)}, it tells you once' if watcher and w.deadline_at is not None else '')+'.']
         if w.status not in {'proposed','paused'}:
-            if w.kind=='at' or watcher or w.kind=='owner_silent' and not w.trigger_json.get('builtin'):
+            if w.kind in TIME_KINDS or watcher or w.kind=='owner_silent' and not w.trigger_json.get('builtin'):
                 from .commands import quiet_until
                 due=((s.last_human_at or e.clock.now())+parse_duration(w.trigger_json.get('after',p.checkin_after_hours*3600)) if w.kind=='owner_silent' else
-                     (w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind=='at' else
+                     (w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind in TIME_KINDS else
                      w.deadline_at if w.deadline_at is not None else w.next_due_at if w.kind in PROBE_KINDS and w.next_due_at is not None else e.clock.now())
                 due=max(due,e.clock.now())
                 if p.wake_spacing_minutes>0 and s.last_wake_turn_at is not None:
@@ -309,7 +316,7 @@ class Tool:
                     if spacing>due: parts.append(f'Wake spacing holds it until {local(spacing)}.')
                     due=max(due,spacing)
                 release=quiet_until(e,w.session_key,urgent=w.urgent,now=due)
-                if release and release>due: parts.append(f'Quiet hours hold it until {local(release)}.')
+                if release and release>due: parts.append(f'Quiet hours {"skip its ticks" if w.kind in RECURRING_KINDS else "hold it"} until {local(release)}.')
             if not owner_class(w) and s.unanswered_count>=p.max_unanswered:
                 parts.append('Muted: it waits for your reply.' if watcher else 'Muted: it is dropped unless you reply first.')
             if p.wake_spacing_minutes>0 and (w.kind in TIME_KINDS or watcher or w.kind=='owner_silent'):
@@ -431,10 +438,10 @@ class Tool:
     def respond(self,args,flight):
         e=self.engine
         if flight is None or flight.invalid:
-            return {'error':'not_in_flight'}
+            return dict(NOT_IN_FLIGHT)
         o=e.store.get_occurrence(flight.wake_id,flight.dedupe_key)
         if o is None or o.state!='started' or o.attempt!=flight.attempt:
-            return {'error':'not_in_flight'}
+            return dict(NOT_IN_FLIGHT)
         outcome=args.get('outcome')
         if outcome not in {'no_change','progress','done','blocked','needs_attention'} or not isinstance(args.get('notify'),bool):
             raise ValueError('respond needs outcome and boolean notify')
@@ -463,6 +470,6 @@ class Tool:
                 changes['next_check_s']=bounded
                 if requested!=bounded: clamps['next_check']=f'{requested} → {bounded} (pacing)'
         if not e.store.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=o.attempt,**changes):
-            return {'error':'not_in_flight'}
+            return dict(NOT_IN_FLIGHT)
         if scratch is not None: flight.scratch=scratch
         return {'ok':True,'clamped':clamps}
