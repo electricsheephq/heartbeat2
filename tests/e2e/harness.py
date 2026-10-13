@@ -197,7 +197,7 @@ class PulseRig:
         cfg["plugins"]["entries"]["e2e-barrier"] = {"enabled": True}
         path.write_text(yaml.safe_dump(cfg, sort_keys=False))
 
-    def start(self):
+    def start(self, *, bootstrap=True):
         # The helper's PYTHONPATH is tied to its checkout; assert provenance before boot.
         import tests.e2e.core.platforms._helpers as helper
 
@@ -206,7 +206,16 @@ class PulseRig:
         self.gateway.start(timeout=50)
         if self.heartbeat2:
             self.wait(lambda: self.pulse_db.exists(), "plugin database created", 20)
-        self.owner("hello [in:bootstrap]", "reply to bootstrap")
+        if bootstrap:
+            self.owner("hello [in:bootstrap]", "reply to bootstrap")
+        else:
+            # An empty prior session avoids onboarding sidecars without adding measured history.
+            from hermes_state import SessionDB
+            db = SessionDB(self.gateway.db_path)
+            try:
+                db.create_session("bench-prior", "test")
+            finally:
+                db.close()
 
     def ctx(self):
         return f"Evidence: {self.root}\n{self.gateway.tail(3500)}"
