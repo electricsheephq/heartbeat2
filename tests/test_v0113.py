@@ -264,3 +264,12 @@ def test_stored_flag_is_defensive(change):
     assert callable(check)
     w = SimpleNamespace(**{**asdict(Wake(KEY, 'Task', 'at')), 'owner_requested':True, **change})
     assert check(w) is False
+
+
+def test_owner_evidence_follows_mid_turn_compression(engine):
+    owner_turn(engine)
+    engine.compression_tip = lambda sid: 'compressed' if sid == 'sid' else None
+    result = call(engine, {'action':'create', 'note':'Send the invoice.', 'trigger':{'kind':'at','at':'in 1m'},
+                           'owner_asked':True}, sid='compressed')
+    assert result['wake']['owner_requested'] is True, result
+    assert 'owner_asked_ignored' not in result
