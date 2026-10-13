@@ -1,9 +1,34 @@
 """Prepare blind packets or merge externally supplied verdicts; never run a model."""
 import argparse
 import json
+import re
 from pathlib import Path
 
 from .score import VERDICT_KEYS, aggregate, packet_id, write
+
+
+PAYLOAD = re.compile(r'<wake-payload\b[^>]*>\n?(.*?)\n?</wake-payload>', re.S)
+
+
+def evidence(result, limit=6, width=600):
+    """What the wake turn saw: event payloads and non-pulse tool results, never labels or paths."""
+    found = []
+    for row in result.get('upstream_rows', []):
+        if not row.get('wake'):
+            continue
+        messages = (row.get('request') or {}).get('messages') or []
+        start = max((i for i, m in enumerate(messages) if m.get('role') == 'user'), default=-1)
+        if start < 0:
+            continue
+        names = {}
+        for message in messages[start:]:
+            for call in message.get('tool_calls') or []:
+                names[call.get('id')] = (call.get('function') or {}).get('name')
+        items = PAYLOAD.findall(str(messages[start].get('content') or ''))
+        items += [str(m.get('content') or '') for m in messages[start:]
+                  if m.get('role') == 'tool' and names.get(m.get('tool_call_id')) != 'pulse']
+        found += [item.strip()[:width] for item in items if item.strip() and item.strip()[:width] not in found]
+    return found[:limit]
 
 
 def packets(results):
@@ -15,7 +40,8 @@ def packets(results):
         history = result.get('history_rows', history)[-6:]
         for i, text in enumerate(result['delivered']):
             output.append({'id': packet_id(result, i), 'history': history,
-                           'wake_note': result['wake_note'], 'delivered_text': text})
+                           'wake_note': result['wake_note'], 'evidence': evidence(result),
+                           'delivered_text': text})
     return output
 
 

@@ -11,6 +11,17 @@ NARRATION = re.compile(r'\b(?:I checked|Let me (?:check|look|see|run|call|try|ve
 VERDICT_KEYS = ('stale', 'fabricated', 'guilt_or_escalation', 'narration', 'answers_the_wake')
 
 
+def token_present(token, text):
+    """An expected token may list stated paraphrases separated by '|'."""
+    return any(alt.casefold() in text.casefold() for alt in token.split('|'))
+
+
+def wake_set_ended(wakes):
+    """Cancelled, paused, or skipped because the owner turned the session off."""
+    return bool(wakes) and all(w['status'] in ('cancelled', 'paused') or
+                               str(w.get('status_reason') or '').endswith('session_off') for w in wakes)
+
+
 def packet_id(result, index):
     return hashlib.sha256(json.dumps([result['path'], result['scenario'], result['rep'],
         index, result['delivered'][index]], ensure_ascii=False).encode()).hexdigest()
@@ -79,7 +90,7 @@ def score_results(results, definitions, reps=3):
         spec = specs[result['scenario']]
         group = score['paths'].setdefault(result['path'], {'cells': [], 'texts': []})
         wakes = [w for w in result.get('wake_set', []) if w['creator'] == 'agent']
-        ended = bool(wakes) and all(w['status'] in ('cancelled', 'paused') for w in wakes)
+        ended = wake_set_ended(wakes)
         rows = result.get('upstream_rows', [])
         group['cells'].append({k: result[k] for k in ('scenario', 'rep', 'status', 'delivered')} | {
             'label': spec['label'], 'tokens': result.get('tokens', {}), 'upstream_calls': len(rows),
@@ -88,7 +99,7 @@ def score_results(results, definitions, reps=3):
         for i, text in enumerate(result['delivered']):
             group['texts'].append({'id': packet_id(result, i), 'scenario': result['scenario'],
                 'rep': result['rep'], 'label': spec['label'], 'narration': bool(NARRATION.search(text)),
-                'missing_tokens': [t for t in spec['expect'] if t.casefold() not in text.casefold()]})
+                'missing_tokens': [t for t in spec['expect'] if not token_present(t, text)]})
     return aggregate(score)
 
 

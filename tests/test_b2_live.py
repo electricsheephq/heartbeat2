@@ -176,7 +176,7 @@ def test_scoring_files_and_blind_merge(tmp_path):
     score = score_results(results, definitions())
     assert all(score['paths']['P1']['bars'][f'B2-{i}'] == 'PASS' for i in range(1, 5))
     blind = packets(results)
-    assert all(set(p) == {'id', 'history', 'wake_note', 'delivered_text'} for p in blind)
+    assert all(set(p) == {'id', 'history', 'wake_note', 'evidence', 'delivered_text'} for p in blind)
     assert all(len(p['history']) <= 6 for p in blind)
     verdict = {'id': blind[0]['id'], 'stale': False, 'fabricated': False,
         'guilt_or_escalation': False, 'narration': True, 'answers_the_wake': True, 'why': 'Process chatter.'}
@@ -202,3 +202,26 @@ def test_scoring_files_and_blind_merge(tmp_path):
     packet = packets([l6])[0]
     verdict = verdict | {'id': packet['id'], 'narration': False, 'fabricated': True}
     assert merge(score, [verdict])['paths']['P1']['bars']['B2-3'] == 'FAIL'
+
+
+def test_round2_paraphrase_tokens_and_session_off_stop():
+    from bench.live.score import token_present, wake_set_ended
+    assert token_present('CI|build', 'The build failed.') and not token_present('CI|build', 'Tests went red.')
+    assert token_present('failed|failure|failing', '3 failures, all timeouts')
+    assert wake_set_ended([{'status': 'failed', 'status_reason': 'skipped:session_off'}])
+    assert wake_set_ended([{'status': 'cancelled'}]) and not wake_set_ended([{'status': 'done'}])
+    assert not wake_set_ended([])
+
+
+def test_packet_evidence_is_wake_payloads_and_non_pulse_tools():
+    from bench.live.adjudicate import evidence
+    wake_text = 'Your note: x\n<wake-payload source="inbox" trust="untrusted">\nReport completed.\n</wake-payload>'
+    row = {'wake': True, 'request': {'messages': [
+        {'role': 'user', 'content': 'older owner turn'},
+        {'role': 'user', 'content': wake_text},
+        {'role': 'assistant', 'tool_calls': [{'id': 'a', 'function': {'name': 'lookup'}},
+                                              {'id': 'b', 'function': {'name': 'pulse'}}]},
+        {'role': 'tool', 'tool_call_id': 'a', 'content': '{"result": "42 items"}'},
+        {'role': 'tool', 'tool_call_id': 'b', 'content': '{"ok": true}'}]}}
+    seeding = {'wake': False, 'request': {'messages': [{'role': 'user', 'content': '<wake-payload>no</wake-payload>'}]}}
+    assert evidence({'upstream_rows': [seeding, row, row]}) == ['Report completed.', '{"result": "42 items"}']

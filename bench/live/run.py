@@ -42,7 +42,7 @@ def fake_reply(scenario, record):
         return ToolCall('pulse', {'action': 'respond', 'notify': notify,
                                   'outcome': 'progress' if notify else 'no_change',
                                   'summary': 'fake plumbing verdict'})
-    return Text(' '.join(scenario['expect']) or 'Nothing new.')
+    return Text(' '.join(token.split('|')[0] for token in scenario['expect']) or 'Nothing new.')
 
 
 def cell(args, scenario, rep):

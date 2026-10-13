@@ -21,12 +21,12 @@ scenarios:
     history:
       - {owner: 'Watch the build and tell me if it fails.', assistant: 'I will watch CI.'}
     arm:
-      note: 'CI went red: tests/test_api.py failed, 3 failures, all timeouts.'
+      note: 'When the CI status file changes, use lookup(CI) to read it; tell the owner only if the build failed.'
       create: {trigger: {kind: file, path: '$PROBE', check_every: 1s}}
       probe: {baseline: 'CI green', changed: 'CI red: tests/test_api.py failed, 3 failures, all timeouts.'}
     facts: {CI: 'CI red: tests/test_api.py failed, 3 failures, all timeouts.'}
     forward: {}
-    expect: [CI, failed]
+    expect: ['CI|build', 'failed|failure|failing']
     traps: ['specific, no padding']
   - id: L3
     situation: 'agent watcher: probe output unchanged'
