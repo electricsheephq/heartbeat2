@@ -65,6 +65,33 @@ def tool_arguments(call):
         return {'unparsed': str(call['function'].get('arguments'))[:500]}
 
 
+def prearm(rig, spec):
+    """Create through the session-bound plugin engine without a gateway turn."""
+    from types import SimpleNamespace
+    from heartbeat2.clock import SystemClock
+    from heartbeat2.policy import Policy
+    from heartbeat2.poller import Poller
+    from heartbeat2.store import Store
+
+    cfg = yaml.safe_load((rig.gateway.hermes_home / 'config.yaml').read_text())
+    entry = cfg['plugins']['entries']['heartbeat2']
+    ctx = SimpleNamespace(_manager=SimpleNamespace(home_path=rig.gateway.hermes_home),
+                          _gateway_injection_allowed=lambda: entry.get('allow_gateway_injection') is True)
+    session = rig.session()
+    clock = SystemClock()
+    with Store(rig.pulse_db, clock) as store:
+        engine = Poller(ctx, store, Policy.from_settings(entry.get('settings', {}), clock=clock),
+                        clock, session_key_fn=lambda: session['session_key'])
+        try:
+            created = engine.tool.handle({'action': 'create', 'note': spec['note'],
+                'trigger': {k: v for k, v in spec.items() if k != 'note'}},
+                session_id=session['current_session_id'])
+            assert created.get('ok') and created['wake']['creator'] == 'agent', created
+            return created['wake']['id']
+        finally:
+            engine.close()
+
+
 def cell(args, scenario, rep):
     args.out.mkdir(parents=True, exist_ok=True)
     tempfile.tempdir = str(args.out)
@@ -167,10 +194,8 @@ def cell(args, scenario, rep):
             if scenario['id'] != 'L4' or i == 0:
                 seed(i, pair)
         if scenario.get('type') == 'capture':
-            if scenario.get('prearm'):
-                prearm = scenario['prearm']
-                rig.agent_arm('prearm', {k: v for k, v in prearm.items() if k != 'note'}, note=prearm['note'])
-            result.update(prearm_ids=[w['id'] for w in rig.rows('wakes')], sent_at=time.time())
+            prearm_ids = [prearm(rig, scenario['prearm'])] if scenario.get('prearm') else []
+            result.update(prearm_ids=prearm_ids, sent_at=time.time())
             result['owner_message'] = resolve(scenario['owner'], result['sent_at'], result['timezone'], fixtures)
             match = scenario.get('match')
             if match:
@@ -292,6 +317,7 @@ def main():
     parser.add_argument('--reps', type=int, default=3)
     parser.add_argument('--workers', type=int, choices=[1, 2], default=2)
     parser.add_argument('--scenarios')
+    parser.add_argument('--round', type=int, choices=[2, 3], default=2)
     parser.add_argument('--context-tokens', type=int, default=0)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--cell', help=argparse.SUPPRESS)
@@ -310,16 +336,19 @@ def main():
         parser.error('real routing requires --model and P3 also requires --fallback-model')
     if args.reps < 1:
         parser.error('--reps must be positive')
-    selected = args.scenarios.split(',') if args.scenarios else [s['id'] for s in scenarios()['scenarios']]
+    data = {s['id']: s for s in scenarios()['scenarios']}
+    selected = args.scenarios.split(',') if args.scenarios else [sid for sid, s in data.items()
+        if args.round == 3 or s.get('type') != 'capture']
+    if set(selected) - data.keys():
+        parser.error('unknown scenario: ' + ', '.join(sorted(set(selected) - data.keys())))
     if args.context_tokens < 0:
         parser.error('--context-tokens must be nonnegative')
     if args.context_tokens:
         from .round3 import CTX_IDS
         selected = [sid for sid in selected if sid in CTX_IDS]
+        if not selected:
+            parser.error('--context-tokens requires at least one context-eligible scenario')
         args.path += f'-ctx{args.context_tokens}'
-    data = {s['id']: s for s in scenarios()['scenarios']}
-    if set(selected) - data.keys():
-        parser.error('unknown scenario')
     if args.cell:
         sid, rep = args.cell.split(':')
         return cell(args, data[sid], int(rep))

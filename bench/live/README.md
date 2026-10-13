@@ -52,10 +52,13 @@ its continuations; only N7 is pre-armed. Pulse arguments/results, refusals, rece
 final wakes and replies are retained. Fake cells are plumbing only and stay PENDING.
 A single created wake that does not match in a MUST_ARM cell counts as a false arm for B2-7 (an "unrelated wake") and as a miss for B2-6.
 ```sh
-python -m bench.live.run --pin "$PIN" --path P1 --upstream-url "$URL" --model "$MODEL" --key-env BENCH_KEY --out "$RESULTS"
-python -m bench.live.run --pin "$PIN" --path P1 --upstream-url "$URL" --model "$MODEL" --key-env BENCH_KEY --context-tokens 120000 --out "$RESULTS"
+python -m bench.live.run --round 3 --pin "$PIN" --path P1 --upstream-url "$URL" --model "$MODEL" --key-env BENCH_KEY --out "$RESULTS"
+python -m bench.live.run --round 3 --pin "$PIN" --path P1 --upstream-url "$URL" --model "$MODEL" --key-env BENCH_KEY --context-tokens 120000 --out "$RESULTS"
 python -m bench.live.score --round 3 --results "$RESULTS" --out "$SCORES"
 ```
+Without an explicit scenario list, the runner defaults to the nine round-2 wake
+scenarios; `--round 3` selects all 25 wake and capture scenarios. The default
+round-2 scorer ignores capture results in mixed directories.
 Both arms must pass; ctx reports as `P1-ctx120000` (or `P3-ctx120000`). The frozen
 prefix is `round3.filler_history`, seed **314159**, N **120000**, **553** synthetic
 small-talk pairs, sized by `len(prefix)//4` (**120014**). Turns alternate owner

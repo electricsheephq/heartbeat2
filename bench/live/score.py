@@ -103,11 +103,13 @@ def score_results(results, definitions, reps=3, round=2):
     specs = {s['id']: s for s in definitions['scenarios']}
     seen = set()
     for result in results:
+        spec = specs[result['scenario']]
+        if round == 2 and spec.get('type') == 'capture':
+            continue
         identity = (result['path'], result['scenario'], result['rep'])
         if identity in seen:
             raise ValueError('duplicate result cell')
         seen.add(identity)
-        spec = specs[result['scenario']]
         group = score['paths'].setdefault(result['path'], {'cells': [], 'texts': []})
         wakes = [w for w in result.get('wake_set', []) if w['creator'] == 'agent']
         ended = wake_set_ended(wakes) or round == 3 and result.get('session', {}).get('enabled') in (False, 0)
