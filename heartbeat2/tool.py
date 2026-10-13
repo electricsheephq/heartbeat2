@@ -173,6 +173,11 @@ class Tool:
                             if w.creator == 'user' and changed and not watch_conversion:
                                 candidate = replace(candidate,agent_edited=True)
                                 result = self.prepare(candidate,{},reschedule='trigger' in args)
+                                # The raised floor also covers the occurrence already due at the owner's cadence.
+                                if ('trigger' not in args and candidate.kind in RECURRING_KINDS
+                                        and (result.wake.eff_interval_s or 0) > (w.eff_interval_s or 0)):
+                                    due = self.prepare(result.wake,{}).wake.next_due_at
+                                    result = replace(result,wake=replace(result.wake,next_due_at=max(due,w.next_due_at or due)))
                                 candidate = result.wake
                                 clamps.update(result.clamped)
                             if w.status_reason == 'watch_requested':

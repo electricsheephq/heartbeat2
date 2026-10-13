@@ -197,3 +197,23 @@ def test_builtin_is_agent_authored_only_after_edit(engine):
     assert not agent_authored(wake)
     assert agent_authored(replace(wake, agent_edited=True))
     assert agent_authored(replace(wake, creator='agent'))
+
+
+@pytest.mark.parametrize('text,moved', [
+    pytest.param('every 15m Owner check', True, id='raised-floor-moves-pending-due'),
+    pytest.param('every 2h Owner check', False, id='slower-owner-cadence-keeps-due'),
+    pytest.param('in 2h Owner one-shot', False, id='one-shot-keeps-due'),
+])
+def test_note_only_agent_edit_applies_floor_to_pending_occurrence(engine, runtime, text, moved):
+    wake = owner_add(engine, runtime, text)
+    engine.clock.advance(60)
+    _, changed = update(engine, wake, note='Agent note')
+    assert changed.agent_edited
+    if not moved:
+        assert changed.next_due_at == wake.next_due_at
+        return
+    assert changed.eff_interval_s == 3300
+    assert changed.next_due_at == engine.clock.now() + 3300
+    engine.clock.advance(900)  # The owner's old 15-minute occurrence no longer fires.
+    engine.tick()
+    assert engine.ctx.calls == []
