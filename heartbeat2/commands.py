@@ -269,7 +269,7 @@ def _transition(engine,session,wake,action,seconds):
         changes={name:getattr(candidate,name) for name in ('next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','expires_at','max_fires','trigger_json')}
         changes.update(status='active',status_reason='')
     elif action in {'cancel','stop'}: changes={'status':'cancelled','status_reason':'command'}
-    else: changes={'status':'paused','status_reason':'command'}
+    else: changes={'status':'paused','status_reason':'watch_requested' if action=='watch' else 'command'}
     if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,**changes):
         raise ValueError('concurrent item change')
     engine.store.set_meta('resume_after:'+wake.id,str(engine.clock.now()+seconds) if action=='pause' and seconds else '')

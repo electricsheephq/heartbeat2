@@ -8,7 +8,7 @@ from typing import Mapping, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .clock import Clock, SystemClock
-from .model import Wake, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, KINDS
+from .model import Wake, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, KINDS, agent_authored
 from .schedule import parse_duration, quiet_end
 
 
@@ -267,7 +267,7 @@ class Policy:
         if wake.babysit:
             return max(300, self.min_interval_minutes * 60)
         floor = self.min_interval_minutes * 60
-        if wake.creator == "agent" and not probe_gated:
+        if agent_authored(wake) and not probe_gated:
             floor = max(floor, self.agent_ungated_floor_minutes * 60)
         return floor
 
@@ -285,7 +285,7 @@ class Policy:
         for attr, limit in (("title", 80), ("note", 2000), ("reason", 280), ("scratch", 4000)):
             change(attr, getattr(wake, attr)[:limit], attr, "length")
         floor = self.interval_floor(wake, probe_gated=probe_gated)
-        floor_rule = "babysit_floor" if wake.babysit else ("agent_ungated_floor" if wake.creator == "agent" and not probe_gated else "min_interval")
+        floor_rule = "babysit_floor" if wake.babysit else ("agent_ungated_floor" if agent_authored(wake) and not probe_gated else "min_interval")
         if wake.kind in RECURRING_KINDS:
             if wake.pacing_min_s is not None:
                 change("pacing_min_s", max(parse_duration(wake.pacing_min_s), floor), "pacing.min", floor_rule)

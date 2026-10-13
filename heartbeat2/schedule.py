@@ -10,7 +10,7 @@ import math
 import re
 from zoneinfo import ZoneInfo
 
-from .model import Wake
+from .model import Wake, agent_authored
 
 _DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*([smhdw])", re.I)
 
@@ -178,5 +178,5 @@ def time_due(wake: Wake, *, now: float, catch_up_s: float,
         next_due = next_every(now, wake.eff_interval_s, anchor=wake.trigger_json["at"], timezone=timezone)
     else:
         next_due = next_every(now, wake.eff_interval_s, jitter_unit=jitter_unit,
-            cache_ttl=cache_ttl if wake.creator=='agent' else None,minimum_s=minimum_s)
+            cache_ttl=cache_ttl if agent_authored(wake) else None,minimum_s=minimum_s)
     return DueTime("pending", key, due, next_due)

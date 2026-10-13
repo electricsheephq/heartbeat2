@@ -14,7 +14,7 @@ import os
 import random
 import uuid
 
-from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS
+from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import MESSAGING_PLATFORMS, is_owner, is_watcher, one_shot
 from .schedule import time_due, local_day, parse_duration, next_every
 from . import governor
@@ -174,7 +174,7 @@ class Poller:
     def timing(self,w):
         from .cache import ttl_for_session
         ttl=ttl_for_session(self.store,self.store.get_session(w.session_key))[0]
-        return {'cache_ttl':ttl if w.creator=='agent' and w.kind in {'every','self'} and not w.trigger_json.get('at') else None,
+        return {'cache_ttl':ttl if agent_authored(w) and w.kind in {'every','self'} and not w.trigger_json.get('at') else None,
                 'minimum_s':max(self.policy.interval_floor(w),w.pacing_min_s or 0)}
 
     def daily(self,key):
