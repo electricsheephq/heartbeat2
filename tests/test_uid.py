@@ -340,3 +340,22 @@ def test_two_row_operation_pairs_count_each_new_block_once(engine):
             wrong.append((case, expected, observed))
     assert checked > 1000
     assert not wrong, (len(wrong), wrong[:12])
+
+
+@pytest.mark.parametrize('stamp', [False, True], ids=['uidless', 'stamped'])
+@pytest.mark.parametrize('tail,expected', [('fresh', 1), ('third-legacy', 0)])
+def test_a_merged_legacy_block_keeps_its_identity_whatever_follows(engine, tail, expected, stamp):
+    """Hermes joins merged rows with a blank line; an absorbed block's fingerprint must not depend on what follows it."""
+    e = engine
+    first, absorbed_row, third = owner('first'), owner('absorbed'), owner('third')
+    anchor(e, [first, absorbed_row] + ([third] if tail == 'third-legacy' else []))
+    if stamp:
+        first['message_uid'] = 'first'
+    first['content'] += '\n\n' + absorbed_row['content'] + '\n\n' + (owner('last')['content'] if tail == 'fresh' else third['content'])
+    before = humans(e)
+    for _ in range(2):
+        api(e, [first])
+        assert humans(e) == before + expected
+    first['message_uid'] = 'first'
+    api(e, [first])
+    assert humans(e) == before + expected
