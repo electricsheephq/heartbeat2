@@ -177,6 +177,11 @@ class Tool:
                                 if ('trigger' not in args and candidate.kind in RECURRING_KINDS
                                         and (result.wake.eff_interval_s or 0) > (w.eff_interval_s or 0)):
                                     due = self.prepare(result.wake,{}).wake.next_due_at
+                                    boundary = e.clock.now() + result.wake.eff_interval_s
+                                    anchor = result.wake.trigger_json.get('at') if candidate.kind == 'every' else None
+                                    if anchor and due < boundary:  # Stay on the anchor grid, past the raised floor.
+                                        due = next_every(boundary,result.wake.eff_interval_s,anchor=anchor,
+                                                         timezone=e.policy.resolved_timezone())
                                     result = replace(result,wake=replace(result.wake,next_due_at=max(due,w.next_due_at or due)))
                                 candidate = result.wake
                                 clamps.update(result.clamped)

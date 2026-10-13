@@ -217,3 +217,19 @@ def test_note_only_agent_edit_applies_floor_to_pending_occurrence(engine, runtim
     engine.clock.advance(900)  # The owner's old 15-minute occurrence no longer fires.
     engine.tick()
     assert engine.ctx.calls == []
+
+
+@pytest.mark.parametrize('anchor,due', [
+    pytest.param('12:15', 70 * 60, id='anchor-ahead'),    # grid 12:15 + 55m·k: first slot after 12:56 is 13:10
+    pytest.param('12:00', 110 * 60, id='anchor-behind'),  # grid 12:00 + 55m·k: 12:55 is too early, so 13:50
+])
+def test_anchored_note_edit_waits_for_the_floor_on_the_anchor_grid(engine, runtime, anchor, due):
+    start = engine.clock.now()
+    wake = owner_add(engine, runtime, f'every 15m at {anchor} Owner check')
+    engine.clock.advance(60)
+    _, changed = update(engine, wake, note='Agent note')
+    assert changed.eff_interval_s == 3300 and changed.trigger_json['at'] == anchor
+    assert changed.next_due_at == start + due >= engine.clock.now() + 3300
+    engine.clock.advance(3300 - 1)
+    engine.tick()
+    assert engine.ctx.calls == []
