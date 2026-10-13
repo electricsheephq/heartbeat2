@@ -6,11 +6,11 @@ bars:
   B2-5: 'cost: baseline only; report tokens per useful message and calls per wake. The round-2 bars come from round 1.'
 scenarios:
   - id: L1
-    situation: 'owner one-shot "remind me at 17:00 to call the bank"'
+    situation: 'owner one-shot "remind me shortly to call the bank before it closes"'
     label: MUST_NOTIFY
     history:
-      - {owner: 'remind me at 17:00 to call the bank', assistant: 'I will remind you at 17:00.'}
-    arm: {owner: '/pulse add in 5s remind me at 17:00 to call the bank', note: 'remind me at 17:00 to call the bank'}
+      - {owner: 'remind me shortly to call the bank before it closes', assistant: 'I will remind you shortly.'}
+    arm: {owner: '/pulse add in 5s call the bank before it closes', note: 'call the bank before it closes'}
     facts: {}
     forward: {}
     expect: [bank]
