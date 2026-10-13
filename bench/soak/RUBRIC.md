@@ -166,7 +166,8 @@ A delivery is a bot message in the DM, matched to a wake turn:
 - an owner-account message to the DM that the runner did not send;
 - a gateway restart the runner did not cause;
 - a send or read failure of the user client;
-- a Telegram or network outage of 5 minutes or more.
+- a Telegram or network outage of 5 minutes or more;
+- the runner process stopped while the window was open (a crash or host restart, recorded by the runner's own start line on resume), so a scheduled action may have been missed.
 
 Rules:
 - **An observed bar violation is irreversible.** A later void event in the same window cannot erase it.
