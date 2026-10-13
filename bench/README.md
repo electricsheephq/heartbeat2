@@ -3,6 +3,8 @@
 Run `.venv/bin/python -m bench.run --baseline --gate --out /path/to/artifacts`.
 Select one YAML with `--scenario ID`. There is no network or real model call.
 The runtime uses only development dependencies already used by the tests.
+The gate fails when the engine arm takes 30 s or more. `HEARTBEAT2_BENCH_RUNTIME_BUDGET_S`
+overrides that budget; CI sets 120 s because shared runners are several times slower.
 
 Claim class: deterministic simulation on this suite (advisory). These results
 prove the named source/harness/scenarios, not live Hermes delivery, providers,
