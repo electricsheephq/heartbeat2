@@ -59,7 +59,7 @@ python -m bench.live.score --round 3 --results "$RESULTS" --out "$SCORES"
 Without an explicit scenario list, the runner defaults to the nine round-2 wake
 scenarios; `--round 3` selects all 25 wake and capture scenarios. The default
 round-2 scorer ignores capture results in mixed directories.
-Both arms must pass; ctx reports as `P1-ctx120000` (or `P3-ctx120000`). The frozen
+Both arms must pass; ctx reports as `P1-ctx120000`. P3 does not inject its primary fault into capture turns, so the runner refuses capture scenarios on P3. The frozen
 prefix is `round3.filler_history`, seed **314159**, N **120000**, **553** synthetic
 small-talk pairs, sized by `len(prefix)//4` (**120014**). Turns alternate owner
 (20–80 words) and assistant (40–160 words), joining 2–6 sentences from forty
@@ -68,5 +68,5 @@ pair count is chosen to make the serialized prefix closest to N. Prefix serializ
 UTF-8 JSON of the pairs, `ensure_ascii=False, separators=(',', ':')`; SHA-256:
 `e526720ce096d3059cdb40856f2b3730565706cd5c160e6e0cc771a158980e61`.
 Any other size/hash stays PENDING. Judge packets retain frozen history, measured
-owner text and pulse results/receipts. Round-3 verdicts also require `overpromise`;
+owner text and pulse results/receipts; ctx packets name the omitted fact-free filler (pairs, size, hash). Round-3 verdicts also require `overpromise`;
 use a different model family and owner spot-check every adjudicator FAIL.
