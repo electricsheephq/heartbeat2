@@ -44,7 +44,7 @@ Heartbeats, as OpenClaw popularised them, made agents feel alive. They also prod
 | Messages to the wrong chat or person | There is no destination parameter at all. A wake can only return to the chat that armed it, and only in DMs by default. |
 | Most spend going to no-op ticks | Watchers decide without a model call. The no-op governor backs off, then pauses. |
 
-Totals over 23 deterministic scenarios (B1 simulation driving the real engine; `python -m bench.run --baseline --gate`, source `77f0bd4`). The comparison arm is a naive heartbeat-1.0 emulator built from documented failure reports. It is **not** a measurement of OpenClaw itself.
+Totals over 23 deterministic scenarios (B1 simulation driving the real engine; `python -m bench.run --baseline --gate`, source `eded2e0`, v0.1.12; the totals are unchanged since v0.1.0). The comparison arm is a naive heartbeat-1.0 emulator built from documented failure reports. It is **not** a measurement of OpenClaw itself.
 
 | Across the suite | HeartBeat 2.0 | Naive heartbeat |
 |---|---:|---:|
@@ -126,12 +126,14 @@ pulse tool results name the ignored setting.
 | `/pulse keep\|slow\|stop\|watch <id>` | Answer the governor's card for a paused wake (`watch` pauses it and asks your agent to turn it into a watcher; the next watcher-only trigger or schedule conversion keeps it yours). Any other agent edit of the trigger, timing or note makes it the agent's: it gets the agent's interval floor and cache snap, and the unanswered mute applies. |
 | `/pulse off` · `/pulse on` | Turn wakes off or back on for this chat. Only you can turn them back on. |
 
-`/pulse` is a control panel, not conversation. Using it never counts as replying to the agent.
+`/pulse` is a control panel, not conversation. Using it never counts as replying to the agent. Anything else you send counts as a reply, including a reaction or an edit on platforms that report them: it resets the unanswered mute and cancels wakes armed to stop when you reply.
 
 **Your agent** gets one tool, `pulse` (`create · list · update · pause · resume · cancel · respond · off`), and the bundled `heartbeat2-usage` skill. The skill teaches it to:
 - arm a wake only for a named open loop, never just to stay in touch;
 - prefer a watcher to a timer whenever a deterministic check can tell "changed";
-- answer every wake with `respond`: `outcome` (no_change · progress · done · blocked · needs_attention), `notify`, a one-line `summary`, and optionally `next_check` and `scratch` notes for its next wake.
+- answer every wake with `respond`: `outcome` (no_change · progress · done · blocked · needs_attention), `notify`, a one-line `summary`, and optionally `next_check` and `scratch` notes for its next wake. `done` ends the wake. A wake that stays silent (`notify=false`) counts as a no-op for backoff, whatever its outcome.
+
+A wake turn is a normal turn in your chat: the agent has the same tools as in any other turn there. HeartBeat 2.0 does not restrict them, so arm wakes in conversations whose tools you are happy to have run while you are away.
 
 Watchers available to the agent:
 
@@ -226,15 +228,13 @@ The default command allowlist still permits `gh -R HOST/...` and `git ls-remote 
 
 ## Roadmap
 
-- [v0.1.1: catalog listing conditions](https://github.com/electricsheephq/heartbeat2/milestone/5)
-- [v0.1.2: no silent loss + cache-aware timing](https://github.com/electricsheephq/heartbeat2/milestone/4)
-- [v0.2: real-gateway proof, behaviour bench, cost](https://github.com/electricsheephq/heartbeat2/milestone/2)
+- [v0.2: proven follow-ups, promise → useful message, measured](https://github.com/electricsheephq/heartbeat2/milestone/2)
 - [v0.3: more triggers + learning](https://github.com/electricsheephq/heartbeat2/milestone/3)
 - [Research / blocked](https://github.com/electricsheephq/heartbeat2/milestone/6)
 
 ## Compatibility and known issues
 - **v0.1 delivers only to messaging-gateway DMs.** It refuses to arm wakes from the CLI, TUI, Desktop, the API server or cron: a CLI wake would interrupt your turn, and TUI/Desktop have no silence filter for injected turns yet. Desktop and TUI wakes are planned for v0.3 ([#8](https://github.com/electricsheephq/heartbeat2/issues/8)), once Hermes core supports them.
-- **A wake turn that fails at the provider** (quota, auth, outage) shows Hermes's own failure notice in the chat. The plugin cannot suppress it ([NousResearch/hermes-agent#136749](https://github.com/NousResearch/hermes-agent/issues/136749)). HeartBeat 2.0 settles that wake, then holds every wake back (5 min → 15 min → 1 h → 4 h) until a model call on the profile succeeds again. A long outage therefore costs one notice per backoff step, not one per wake.
+- **A wake turn that fails at the provider** (quota, auth, outage) shows Hermes's own failure notice in the chat. The plugin cannot suppress it ([NousResearch/hermes-agent#136749](https://github.com/NousResearch/hermes-agent/issues/136749)). HeartBeat 2.0 settles that wake once Hermes ends the turn (some provider errors leave it open until the agent timeout, [#27](https://github.com/electricsheephq/heartbeat2/issues/27)), then holds every wake back (5 min → 15 min → 1 h → 4 h) until a model call on the profile succeeds again. A long outage therefore costs one notice per backoff step, not one per wake.
 - **Silence covers the final reply.** `notify=false` keeps the agent's reply out of the chat. On platforms that show tool progress by default (Discord; WhatsApp and Matrix show new tools), each wake turn still posts a progress bubble. Telegram and Slack hide tool progress by default. To keep wakes fully silent there, set `display.platforms.<platform>.tool_progress: off`. A quiet-injection option is requested upstream ([NousResearch/hermes-agent#136825](https://github.com/NousResearch/hermes-agent/issues/136825)).
 - **Messages sent while the agent is busy.** On Signal/SimpleX, a message that waits in Hermes' queue while a turn is running (a photo, or any message when `busy_input_mode` is `queue`) reaches the agent without a message id, so HeartBeat 2.0 does not count it as your reply. The unanswered mute and the silence check-in treat you as silent until your next message. Text you send mid-turn in the default mode is counted. With the Codex app-server runtime, its native steer (text you send into a running wake turn) is not detected, so a wake that decides to stay silent can leave that steer unanswered.
 - **Memory providers see wake text as a user turn** ([NousResearch/hermes-agent#130622](https://github.com/NousResearch/hermes-agent/issues/130622)). An external memory provider may store a wake's instructions as if you had written them.
