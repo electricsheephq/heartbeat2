@@ -10,9 +10,14 @@ from test_u11c import hermes_origin, humans, steer_row
 
 # tools/todo_tool.py TODO_INJECTION_HEADER at the three supported Hermes pins.
 TODO = '[Your active task list was preserved across context compression]'
-SNAPSHOT = TODO + '\n- [ ] check the deploy (in_progress)'
-# conversation_compression._PRUNED_SKILL_RELOAD_NOTICE_HEADER rides after the snapshot.
-RELOAD = '\n\n[Skills pruned during compression — reload before acting on these tasks]\n- deploy-skill'
+# TodoStore.format_for_injection renders one line per task (children indented).
+SNAPSHOT = TODO + '\n- [>] 1. check the deploy (in_progress)\n  - [ ] 1a. read the logs (pending)'
+# conversation_compression._pruned_skill_reload_notice rides after the snapshot.
+RELOAD = ('\n\n[Skills pruned during compression — reload before acting on these tasks]\n'
+          'The task list above crossed the compression boundary verbatim, but the skill instructions that '
+          'governed it were pruned. Before executing any preserved task that depends on these skills, reload '
+          "them first: skill_view(name='deploy'). After reloading, re-check that each pending task is still "
+          'justified — findings recorded before the boundary may have invalidated it.')
 
 
 def strip(content):
@@ -133,11 +138,22 @@ def test_new_owner_steers_still_count_after_a_fold(engine, platform, mid):
 
 
 def test_snapshot_text_is_never_owner_text():
-    # A task list quoting the origin header is scaffolding, not an owner message.
-    quoted = hermes_origin('reply to the deploy thread', 'signal')
-    assert not list(origin_rows([{'role': 'user', 'content': TODO + '\n- [ ] 1. ' + quoted,
-                                  '_todo_snapshot_synthetic': True}]))
-    assert not list(origin_rows([{'role': 'user', 'content': 'plain owner text\n\n' + TODO + '\n- [>] 1. ' + quoted}]))
+    # A one-line task quoting the origin header is scaffolding, not an owner message.
+    task = '\n- [ ] 1. answer the ' + ORIGIN + ' question (pending)'
+    assert not list(origin_rows([{'role': 'user', 'content': TODO + task, '_todo_snapshot_synthetic': True}]))
+    assert not list(origin_rows([{'role': 'user', 'content': 'plain owner text\n\n' + TODO + task}]))
+
+
+def test_task_spanning_lines_keeps_the_row_as_is(engine):
+    # Not provably Hermes' rendering, so nothing is removed: a fold may recount (as in
+    # v0.1.5), but a quoted owner block inside a task is never mistaken for removable text.
+    e = engine
+    row, history = begin_wake(e, [], 'signal')
+    owner = {'role': 'user', 'content': hermes_origin('please check the deploy', 'signal')}
+    api(e, history + [owner])
+    task = TODO + '\n- [ ] 1. quoted block\n\n' + hermes_origin('old reply', 'signal') + ' (pending)'
+    api(e, [row, fold(owner, task)])
+    assert humans(e) == 2
 
 
 @pytest.mark.parametrize('suffix', ['', '  ', '\n', ' quoting ' + TODO + ' inline', '\n' + TODO + ' on its own line'])
@@ -198,4 +214,18 @@ def test_new_message_that_differs_only_after_a_quote_or_in_space_counts(engine, 
     api(e, history + [{'role': 'user', 'content': hermes_origin('shared prefix' + first, 'signal')}])
     carrier = {'role': 'user', 'content': 'summary --- END OF CONTEXT SUMMARY', '_compressed_summary': True}
     api(e, [carrier, row, {'role': 'user', 'content': hermes_origin('shared prefix' + second, 'signal')}])
+    assert humans(e) == 2
+
+
+@pytest.mark.parametrize('second', ['and roll back if red', 'owner preamble\n' + hermes_origin('and roll back', 'signal')],
+                         ids=['bare', 'preamble-then-origin'])
+def test_any_row_merged_after_a_snapshot_keeps_the_text(engine, second):
+    # Text after a snapshot is not Hermes' rendering; v0.1.5 counted the changed row, and so do we.
+    e = engine
+    row, history = begin_wake(e, [], 'signal')
+    first = {'role': 'user', 'content': hermes_origin('please check the deploy', 'signal')}
+    api(e, history + [first])
+    folded = fold(first)
+    api(e, [row, folded])
+    api(e, [row, merge_users(folded, {'role': 'user', 'content': second})])
     assert humans(e) == 2

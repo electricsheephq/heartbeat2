@@ -79,40 +79,49 @@ def row_text(content):
 
 
 # tools/todo_tool.py TODO_INJECTION_HEADER, identical at v0.21.6, v0.21.7 and main
-# 04eb00c. After a compaction Hermes appends the live task list (a blank line, this
-# header, one "- [ ] ..." line per task, maybe a skill-reload notice) to the trailing
-# real user row (conversation_compression._fold_todo_snapshot) and strips it again at
-# the next boundary, so the snapshot is never part of what the owner wrote.
+# 04eb00c. After a compaction Hermes appends the live task list to the end of the
+# trailing real user row (conversation_compression._fold_todo_snapshot: a blank line,
+# this header, one line per task from TodoStore.format_for_injection, maybe the
+# skill-reload notice) and strips it again at the next boundary. The snapshot is
+# never what the owner wrote, so a row ending in one is fingerprinted without it.
 TODO_HEADER='[Your active task list was preserved across context compression]'
-TODO_SNAPSHOT=re.compile(r'(?:\n\n|^)'+re.escape(TODO_HEADER)+r'\n- \[[^\]\n]\] ')
-# Hermes' pre-call repair (agent_runtime_helpers._merge_consecutive_users) joins
-# consecutive user rows with a blank line, so a later owner row can follow a snapshot.
-OWNER_ROW_STARTS=('\n\n'+ORIGIN,'\n\n[OUT-OF-BAND USER MESSAGE')
+TODO_START=re.compile(r'(?:\n\n|^)'+re.escape(TODO_HEADER)+r'\n')
+TODO_ITEM=re.compile(r'(?:  )*- \[[^\]\n]\] [^\n]* \((?:pending|in_progress|completed|cancelled)\)')
+RELOAD_NOTICE=re.compile(re.escape('[Skills pruned during compression — reload before acting on these tasks]')+
+    r'\nThe task list above crossed the compression boundary verbatim, but [^\n]* may have invalidated it\.')
 
 
-def without_snapshots(text):
-    match=TODO_SNAPSHOT.search(text)
-    while match:
-        rest=text[match.end():]
-        ends=[i for i in (rest.find(start) for start in OWNER_ROW_STARTS) if i!=-1]
-        text=text[:match.start()]+rest[min(ends,default=len(rest)):]
-        match=TODO_SNAPSHOT.search(text,match.start())
+def is_snapshot(text):
+    items,_,notice=text.partition('\n\n')
+    lines=items.split('\n')
+    return (all(TODO_ITEM.fullmatch(line) for line in lines) and
+            (not notice or bool(RELOAD_NOTICE.fullmatch(notice))))
+
+
+def without_snapshot(text):
+    """Text without a trailing snapshot exactly as Hermes renders it; anything else is unchanged.
+
+    A task spanning lines, or any text after the snapshot (Hermes' pre-call repair can
+    join a later user row there), keeps the row byte for byte: it may recount, never hide.
+    """
+    for match in TODO_START.finditer(text):
+        if is_snapshot(text[match.end():]): return text[:match.start()]
     return text
 
 
 def owner_text(content):
-    """Row text without Hermes' todo snapshots; any other row is returned byte for byte."""
+    """Row text for owner fingerprints: a provable todo snapshot removed, nothing else changed."""
     if isinstance(content,list):
         kept=[]
         for part in content:
             if isinstance(part,dict) and part.get('type')=='text' and isinstance(part.get('text'),str):
-                text=without_snapshots(part['text'])
+                text=without_snapshot(part['text'])
                 if not text and part['text']: continue
                 part={**part,'text':text}
             kept.append(part)
         content=kept
     elif isinstance(content,str):
-        content=without_snapshots(content)
+        content=without_snapshot(content)
     return row_text(content)
 
 

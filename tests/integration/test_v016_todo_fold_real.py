@@ -76,7 +76,7 @@ def test_real_fold_keeps_counted_steer_once(hermes, engine, wrapped, parts, tail
     api(e, rows)
     # On string content that strip uses rstrip(), so a plain row ending in whitespace
     # changes and is recounted once (v0.1.5 recounted it at every fold). List content
-    # loses only the snapshot part. Never a missed message.
+    # loses only the snapshot part.
     assert humans(e) == (3 if tail and not wrapped and not parts else 2)
 
 
@@ -117,3 +117,31 @@ def test_real_repair_after_a_quoted_header_counts(hermes, engine):
     assert repairs == 1
     api(e, rows)
     assert humans(e) == 1
+
+
+def test_real_reload_notice_is_part_of_the_snapshot(hermes, engine):
+    # A pruned skill makes Hermes add its reload notice after the task list.
+    e = engine
+    row, history = begin_wake(e, [], 'signal')
+    rows = history + [{'role': 'assistant', 'content': "[SKILL_PRUNED: content lost in compression; reload with skill_view(name='deploy')]"},
+                      owner(hermes_origin('please check the deploy', 'signal'), False, False)]
+    api(e, rows)
+    expected = [fp for fp, _ in origin_rows(rows)]
+    boundary(hermes, rows, 'check the deploy')
+    assert hermes[0]._PRUNED_SKILL_RELOAD_NOTICE_HEADER in rows[-1]['content'], 'positive control: notice present'
+    api(e, rows)
+    assert [fp for fp, _ in origin_rows(rows)] == expected
+    assert humans(e) == 1
+
+
+def test_real_repair_merging_bare_text_after_a_snapshot_counts(hermes, engine):
+    e = engine
+    row, history = begin_wake(e, [], 'signal')
+    rows = history + [WORKING, owner(hermes_origin('please check the deploy', 'signal'), False, False)]
+    api(e, rows)
+    boundary(hermes, rows, 'check the deploy')
+    rows.append({'role': 'user', 'content': 'and roll back if red'})
+    rows, repairs = hermes[2]._merge_consecutive_users(rows)
+    assert repairs == 1 and rows[-1]['content'].endswith('and roll back if red')
+    api(e, rows)
+    assert humans(e) == 2
