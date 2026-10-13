@@ -8,7 +8,7 @@ from . import governor
 from . import cache
 from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested
 from .schedule import parse_duration, quiet_end, local_day
-from .tool import session_env
+from .tool import session_env, Infeasible
 
 HELP = ('/pulse status | list | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
@@ -16,13 +16,14 @@ HELP = ('/pulse status | list | ledger [7d] | why <id> | add in 2h <note> | '
         'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
 
 
-def quiet_until(engine, session_key, *, urgent=False):
+def quiet_until(engine, session_key, *, urgent=False, now=None):
     if urgent and engine.policy.quiet_hours_urgent: return None
+    now = engine.clock.now() if now is None else now
     override = json.loads(engine.store.get_meta('quiet:'+session_key) or '{}')
-    if override.get('until', 0) > engine.clock.now(): return override['until']
+    if override.get('until', 0) > now: return override['until']
     if 'range' in override:
-        return quiet_end(engine.clock.now(), override['range'], engine.policy.resolved_timezone())
-    return engine.policy.quiet_until(urgent=urgent)
+        return quiet_end(now, override['range'], engine.policy.resolved_timezone())
+    return engine.policy.quiet_until(urgent=urgent, now=now)
 
 
 def _activation(engine, session, wake):
@@ -49,6 +50,12 @@ def resume_timed(engine):
         try:
             _activation(engine, session, wake)
             candidate = _reschedule(engine,wake).wake
+        except Infeasible:
+            if engine.store.cas_wake(wake.id,'paused',expected_version=wake.version,status='expired',status_reason='expired'):
+                engine.cancel_occurrences(wake.id,'expired')
+                engine.store.set_meta('resume_after:'+wake.id,'')
+                engine.notice(wake.session_key,f'A paused wake ({wake.id}) could not resume before it expires, so it ended.')
+            continue
         except (ValueError, TypeError, KeyError):
             continue
         if engine.store.cas_wake(wake.id, 'paused', expected_version=wake.version,

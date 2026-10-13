@@ -1,6 +1,7 @@
 """Arming feasibility and receipts: real store/tool/command paths, fake time."""
 from dataclasses import replace
 from datetime import datetime
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 
 from heartbeat2 import commands, governor
 from heartbeat2.model import Wake
+from heartbeat2.schedule import parse_at
 from heartbeat2.tool import DESCRIPTION
 from test_engine import engine, session, KEY, arm
 from test_v0113 import owner_turn
@@ -40,7 +42,7 @@ def local(e, epoch):
 def test_beyond_maximum_tool_and_command_do_not_store(engine, command):
     result = create(engine, {'kind':'at','at':'in 30d'})
     assert result.get('error') == 'invalid_request', result
-    assert 'maximum lifetime' in result['detail']
+    assert 'maximum lifetime' in result['detail'] and 'until.expires' not in result['detail']
     assert command('add in 30d Check the report.').startswith('Error:')
     assert not engine.store.list_wakes(KEY)
 
@@ -157,9 +159,9 @@ def test_quiet_implicit_extension_and_recurring_skip(engine):
     w = engine.store.get_wake(result['wake']['id'])
     engine.store.cas_wake(w.id, w.status, expires_at=w.next_due_at+3600)
     updated = engine.tool.handle({'action':'update','id':w.id,'title':'Report'}, session_id='sid')
-    assert updated.get('ok'), updated
-    changed = engine.store.get_wake(w.id)
-    assert changed.expires_at == w.next_due_at+10*3600
+    assert updated.get('error') == 'invalid_request', updated
+    assert updated['detail'].endswith('; set until.expires to extend it')
+    assert engine.store.get_wake(w.id).expires_at == w.next_due_at+3600
     # Recurring ticks in quiet hours are skipped, not held until the release.
     recurring = create(engine, {'kind':'every','every':'1d at 23:00'},
                        until={'expires':'tomorrow 07:00'})
@@ -167,7 +169,7 @@ def test_quiet_implicit_extension_and_recurring_skip(engine):
     assert 'Quiet' not in receipt(recurring)
 
 
-@pytest.mark.parametrize('kind', ['command', 'subagent_done', 'owner_silent'])
+@pytest.mark.parametrize('kind', ['command', 'subagent_done'])
 @pytest.mark.parametrize('explicit', [False, True])
 def test_watcher_deadline_implicit_and_explicit(engine, kind, explicit):
     engine.policy = replace(engine.policy, max_lifetime_days=30)
@@ -182,16 +184,16 @@ def test_watcher_deadline_implicit_and_explicit(engine, kind, explicit):
         assert result.get('ok'), result
         w = engine.store.get_wake(result['wake']['id'])
         assert w.deadline_at < w.expires_at <= w.created_at+30*DAY
-        # An implicit stored expiry is allowed to stretch to the deadline.
+        text = receipt(result)
+        assert f'until {local(engine,w.deadline_at)}' in text
+        # Stored expiries stay fixed even if their provenance is unknown.
         engine.store.cas_wake(w.id,w.status,expires_at=engine.clock.now()+7*DAY)
         changed = engine.tool.handle({'action':'update','id':w.id,'title':'Report'}, session_id='sid')
-        assert changed.get('ok'), changed
-        assert engine.store.get_wake(w.id).expires_at == w.deadline_at+3600
-        text = receipt(changed)
-        assert f'until {local(engine,w.deadline_at)}' in text
+        assert changed.get('error') == 'invalid_request', changed
+        assert engine.store.get_wake(w.id).expires_at == engine.clock.now()+7*DAY
 
 
-@pytest.mark.parametrize('kind', ['command', 'subagent_done', 'owner_silent'])
+@pytest.mark.parametrize('kind', ['command', 'subagent_done'])
 def test_deadline_beyond_maximum_rejected(engine, kind):
     fields = {'command':['git','status']} if kind == 'command' else {'after':'1d'} if kind == 'owner_silent' else {}
     result = create(engine, {'kind':kind,'deadline':'in 20d', **fields})
@@ -200,7 +202,7 @@ def test_deadline_beyond_maximum_rejected(engine, kind):
     assert not engine.store.list_wakes(KEY)
 
 
-@pytest.mark.parametrize('path', ['tool', 'ok', 'resume', 'timed'])
+@pytest.mark.parametrize('path', ['tool', 'ok', 'resume'])
 def test_irreconcilable_resume_does_not_change_wake(engine, command, path):
     w = arm(engine, next_due_at=engine.clock.now()+30*DAY,
             status='proposed' if path == 'ok' else 'paused', status_reason='command')
@@ -208,31 +210,23 @@ def test_irreconcilable_resume_does_not_change_wake(engine, command, path):
     if path == 'tool':
         result = engine.tool.handle({'action':'resume','id':w.id}, session_id='sid')
         assert result.get('error') == 'invalid_request', result
-        assert 'maximum lifetime' in result['detail']
-    elif path == 'timed':
-        commands.resume_timed(engine)
-        assert engine.store.get_meta('resume_after:'+w.id)
+        assert 'due after expiry' in result['detail']
     else:
         assert command(path+' '+w.id).startswith('Error:')
     assert engine.store.get_wake(w.id) == w
 
 
-@pytest.mark.parametrize('path', ['tool', 'ok', 'resume', 'timed'])
-def test_resumed_implicit_expiry_stretches_and_is_stored(engine, command, path):
+@pytest.mark.parametrize('path', ['tool', 'ok', 'resume'])
+def test_resume_preserves_stored_expiry_and_refuses_later_due(engine, command, path):
     w = arm(engine, next_due_at=engine.clock.now()+10*DAY, expires_at=engine.clock.now()+7*DAY,
             status='proposed' if path == 'ok' else 'paused', status_reason='command')
     if path == 'tool':
         result = engine.tool.handle({'action':'resume','id':w.id}, session_id='sid')
-        assert result.get('ok'), result
-        assert 'Fires once' in receipt(result)
-    elif path == 'timed':
-        engine.store.set_meta('resume_after:'+w.id,str(engine.clock.now()-1))
-        commands.resume_timed(engine)
+        assert result.get('error') == 'invalid_request', result
+        assert result['detail'].endswith('; set until.expires to extend it')
     else:
-        assert 'Fires once' in command(path+' '+w.id)
-    changed = engine.store.get_wake(w.id)
-    assert changed.status == 'active'
-    assert changed.expires_at == changed.next_due_at+3600
+        assert command(path+' '+w.id).startswith('Error:')
+    assert engine.store.get_wake(w.id) == w
 
 
 def test_resume_checks_final_occurrence_key(engine):
@@ -240,7 +234,7 @@ def test_resume_checks_final_occurrence_key(engine):
     engine.store.add_occurrence(w.id,f't:{w.next_due_at:.17g}')
     result = engine.tool.handle({'action':'resume','id':w.id}, session_id='sid')
     assert result.get('error') == 'invalid_request', result
-    assert 'maximum lifetime' in result['detail']
+    assert 'due after expiry' in result['detail']
     assert engine.store.get_wake(w.id) == w
 
 
@@ -248,15 +242,10 @@ def test_resume_checks_final_occurrence_key(engine):
 def test_governor_checks_its_final_due_and_rolls_back(engine, command, answer):
     w = arm(engine,'every',status='paused',status_reason='governor:noop',
             base_interval_s=10*DAY,eff_interval_s=10*DAY,expires_at=engine.clock.now()+7*DAY)
-    if answer == 'keep':
-        assert 'active' in command('keep '+w.id)
-        changed = engine.store.get_wake(w.id)
-        assert changed.expires_at == changed.next_due_at+3600
-    else:
-        engine.store.set_meta('card:'+w.id,'noop')
-        assert command('slow '+w.id).startswith('Error:')
-        assert engine.store.get_wake(w.id) == w
-        assert engine.store.get_meta('card:'+w.id) == 'noop'
+    engine.store.set_meta('card:'+w.id,'noop')
+    assert command(answer+' '+w.id).startswith('Error:')
+    assert engine.store.get_wake(w.id) == w
+    assert engine.store.get_meta('card:'+w.id) == 'noop'
 
 
 def test_proposal_and_paused_receipts_do_not_promise_fire(engine):
@@ -305,7 +294,7 @@ def test_id_all_returns_receipts_and_rolls_back_on_reject(engine):
     good = arm(engine,status='paused')
     result = engine.tool.handle({'action':'resume','id':'all'}, session_id='sid')
     assert result.get('ok'), result
-    assert all('Fires once' in receipt(item) for item in result['results'])
+    assert all('Due now' in receipt(item) for item in result['results'])
     engine.tool.handle({'action':'pause','id':'all'}, session_id='sid')
     before = engine.store.get_wake(good.id)
     bad = arm(engine,status='paused',next_due_at=engine.clock.now()+30*DAY)
@@ -357,7 +346,147 @@ def test_docs_and_version():
     assert 'receipt' in skill and 'awaiting your OK' in skill
     readme = (root/'README.md').read_text()
     assert 'receipt' in readme
-    assert 'A wake that could not fire before it expires is refused; an implicit lifetime stretches to fit, up to the maximum.' in readme
+    assert 'On create, an implicit lifetime stretches to fit, up to the maximum.' in readme
     changelog = (root/'CHANGELOG.md').read_text()
     assert '## 0.1.14 — 2026-10-14' in changelog
     assert '#56' in changelog.split('## 0.1.13')[0]
+
+
+def test_update_without_until_keeps_explicit_expiry(engine):
+    result = create(engine, until={'expires':'in 90m'})
+    assert result.get('ok'), result
+    w = engine.store.get_wake(result['wake']['id'])
+    updated = engine.tool.handle({'action':'update','id':w.id,
+        'trigger':{'kind':'at','at':'in 2h'}}, session_id='sid')
+    assert updated.get('error') == 'invalid_request', updated
+    assert updated['detail'].endswith('; set until.expires to extend it')
+    assert engine.store.get_wake(w.id) == w
+
+
+def test_governor_slow_keeps_explicit_expiry(engine, command):
+    result = create(engine, {'kind':'every','every':'1h'}, until={'expires':'in 90m'})
+    assert result.get('ok'), result
+    wid = result['wake']['id']
+    assert engine.store.cas_wake(wid,'active',status='paused',status_reason='governor:noop')
+    w = engine.store.get_wake(wid)
+    output = command('slow '+wid)
+    assert output.startswith('Error:'), output
+    assert output.endswith('; set until.expires to extend it')
+    assert engine.store.get_wake(wid) == w
+
+
+@pytest.mark.parametrize('bypass', ['none','urgent','off','range','timed'])
+def test_watcher_deadline_accounts_for_quiet_release(engine, command, bypass):
+    engine.policy = replace(engine.policy, quiet_hours='22:00-08:00', quiet_hours_urgent=True)
+    if bypass == 'off': command('quiet off')
+    if bypass == 'range': command('quiet 09:00-10:00')
+    if bypass == 'timed': command('quiet for 2d')
+    expiry = datetime.fromtimestamp(parse_at('tomorrow 23:00',now=engine.clock.now(),
+        timezone=engine.policy.resolved_timezone())+3600,engine.policy.resolved_timezone()).isoformat()
+    result = create(engine, {'kind':'command','command':['git','status'],'deadline':'tomorrow 23:00'},
+                    until={'expires':expiry}, urgent=bypass=='urgent')
+    if bypass in {'none','timed'}:
+        assert result.get('error') == 'invalid_request', result
+        assert 'deadline after expiry' in result['detail']
+        assert not engine.store.list_wakes(KEY)
+    else:
+        assert result.get('ok'), result
+
+
+@pytest.mark.parametrize('trigger', [
+    {'kind':'every','every':'1h'}, {'kind':'at','at':'in 1h'},
+    {'kind':'owner_silent','after':'1h'},
+])
+def test_deadline_refused_on_non_watchers(engine, trigger):
+    result = create(engine, {**trigger,'deadline':'in 2h'})
+    assert result.get('error') == 'invalid_request', result
+    assert result['detail'] == 'deadline works only for watchers (file, process, url, command and event kinds)'
+    assert not engine.store.list_wakes(KEY)
+
+
+def test_watcher_deadline_accepted_and_bad_conversion_preserves_row(engine):
+    result = create(engine, {'kind':'command','command':['git','status'],'deadline':'in 2h'})
+    assert result.get('ok'), result
+    w = engine.store.get_wake(result['wake']['id'])
+    updated = engine.tool.handle({'action':'update','id':w.id,
+        'trigger':{'kind':'at','at':'in 1h','deadline':'in 2h'}}, session_id='sid')
+    assert updated.get('error') == 'invalid_request', updated
+    assert engine.store.get_wake(w.id) == w
+
+
+def test_owner_silent_receipt_has_no_deadline(engine):
+    w = arm(engine,'owner_silent',deadline_at=engine.clock.now()+3600)
+    text = receipt({'receipt':engine.tool.receipt(w,engine.store.get_session(KEY))})
+    assert 'until' not in text
+
+
+def test_owner_silent_receipt_includes_spacing(engine):
+    engine.policy = replace(engine.policy, wake_spacing_minutes=10)
+    result = create(engine, {'kind':'owner_silent','after':'1h'})
+    assert result.get('ok'), result
+    text = receipt(result)
+    assert 'Wakes are at least 10 min apart, so it can land a few minutes late.' in text
+
+
+def test_infeasible_timed_resume_expires_once_with_notice(engine):
+    w = arm(engine,status='paused',status_reason='command',
+            next_due_at=engine.clock.now()+7200,expires_at=engine.clock.now()+3600)
+    engine.store.add_occurrence(w.id,'t:pending')
+    engine.store.set_meta('resume_after:'+w.id,str(engine.clock.now()-1))
+    commands.resume_timed(engine)
+    changed = engine.store.get_wake(w.id)
+    assert changed.status == changed.status_reason == 'expired'
+    assert not engine.store.get_meta('resume_after:'+w.id)
+    occurrence = engine.store.get_occurrence(w.id,'t:pending')
+    assert occurrence.state == 'superseded' and occurrence.error == 'expired'
+    expected = [f'A paused wake ({w.id}) could not resume before it expires, so it ended.']
+    assert json.loads(engine.store.get_meta('notice:'+KEY)) == expected
+    commands.resume_timed(engine)
+    assert engine.store.get_wake(w.id) == changed
+    assert json.loads(engine.store.get_meta('notice:'+KEY)) == expected
+
+
+def test_off_chat_timed_resume_stays_paused_and_retries(engine):
+    w = arm(engine,status='paused',status_reason='command')
+    timer = str(engine.clock.now()-1)
+    engine.store.set_meta('resume_after:'+w.id,timer)
+    session(engine, enabled=False)
+    commands.resume_timed(engine)
+    assert engine.store.get_wake(w.id) == w
+    assert engine.store.get_meta('resume_after:'+w.id) == timer
+    assert not engine.store.get_meta('notice:'+KEY)
+    session(engine, enabled=True)
+    commands.resume_timed(engine)
+    assert engine.store.get_wake(w.id).status == 'active'
+    assert not engine.store.get_meta('resume_after:'+w.id)
+
+
+@pytest.mark.parametrize('age', [2*DAY, 300])
+def test_past_one_shot_refused_or_due_now(engine, age):
+    when = datetime.fromtimestamp(engine.clock.now()-age,engine.policy.resolved_timezone()).isoformat()
+    result = create(engine, {'kind':'at','at':when})
+    if age == 2*DAY:
+        assert result.get('error') == 'invalid_request', result
+        assert result['detail'] == 'that time has already passed'
+        assert not engine.store.list_wakes(KEY)
+    else:
+        assert result.get('ok'), result
+        assert receipt(result).startswith('Due now; it fires on the next check.')
+
+
+def test_resume_past_one_shot_is_due_now(engine):
+    w = arm(engine,status='paused',next_due_at=engine.clock.now()-2*DAY)
+    result = engine.tool.handle({'action':'resume','id':w.id}, session_id='sid')
+    assert result.get('ok'), result
+    assert receipt(result).startswith('Due now; it fires on the next check.')
+    assert engine.store.get_wake(w.id).next_due_at >= engine.clock.now()
+
+
+def test_stretched_expiry_clamp_describes_stored_expiry(engine):
+    result = create(engine, {'kind':'every','every':'10d'})
+    assert result.get('ok'), result
+    w = engine.store.get_wake(result['wake']['id'])
+    stale = str(engine.clock.now()+7*DAY)
+    assert all(stale not in str(value) for value in result['clamped'].values())
+    assert str(w.expires_at) in result['clamped']['expires']
+    assert 'covers the first due time' in result['clamped']['expires']

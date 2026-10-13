@@ -147,7 +147,7 @@ Watchers available to the agent:
 
 Hermes events are selected by `trigger.kind`: `kanban_completed`, `kanban_blocked`, `kanban_worker_exited`, `subagent_done`, `api_error`, `reaction` (with an optional `emojis` filter) and `message_edited`.
 
-Any watcher can carry a `deadline`, so "nothing happened by Friday" fires once, too.
+Only probe and event watchers can carry a `deadline`, so "nothing happened by Friday" fires once, too. Quiet hours can hold that deadline wake.
 
 ## Settings
 These live under `plugins.entries.heartbeat2.settings` and appear in **Settings ▸ Plugins**. The agent's tool can't change them. When a request goes past a bound, the tool tells the agent exactly what it clamped.
@@ -196,7 +196,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 Every guardrail is configurable:
 - Recurring timers repeat at most every 15 minutes, or every 55 minutes when the agent arms one without a watcher. Watchers check at most once a minute.
 - Every wake expires after 14 days at most.
-- A wake that could not fire before it expires is refused; an implicit lifetime stretches to fit, up to the maximum.
+- A wake that could not fire before it expires is refused. On create, an implicit lifetime stretches to fit, up to the maximum. Existing wakes keep their expiry; an edit past it is refused with a hint to set `until.expires`. Quiet hours count for one-shot times and watcher deadlines. A one-shot outside the catch-up window is refused; one due now fires on the next check. A timed resume that cannot fit ends the wake with a notice.
 - Daily caps hold watchers until capacity frees, including on a new local day; your unedited one-shot reminders, including one-time reminders you ask for in chat, bypass both caps.
 - After 2 unanswered messages, agent watchers hold until you write; other agent timers and built-in check-ins drop their occurrence. Wakes you armed, and one-time reminders you ask for in chat (the agent marks them `owner_asked`), still fire unless the agent edited their trigger, timing or note; a watcher-only conversion you requested with `/pulse watch` keeps owner status. Held matches merge, keeping the latest payload; pauses preserve them and expiry is visible in `/pulse why`.
 - A wake turn that carries untrusted data, such as a log line or a web page, cannot arm new recurring work.
