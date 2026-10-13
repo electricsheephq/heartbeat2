@@ -290,7 +290,8 @@ def test_governor_card_uses_tool_cache_label(engine, kind):
 def test_settings_descriptions_and_draft_version():
     root = Path(__file__).resolve().parents[1]
     manifest = yaml.safe_load((root / 'plugin.yaml').read_text())
-    assert manifest['version'] == '0.1.4'
+    top = next(l for l in (root / 'CHANGELOG.md').read_text().splitlines() if l.startswith('## '))
+    assert top.split()[1] == manifest['version'], (top, manifest['version'])
     for key, field in manifest['config_schema'].items():
         assert field['description'].rstrip('.') != field['label'], key
 

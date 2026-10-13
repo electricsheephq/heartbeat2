@@ -255,7 +255,7 @@ class PulseRig:
                 if attempt == attempts - 1:
                     log = self.gateway.hermes_home / "logs/agent.log"
                     if text == "/pulse status" and log.exists() and "flush-cancelled" in log.read_text():
-                        raise AssertionError("Hermes Telegram duplicate /stop wedge (upstream)\n" + self.ctx()) from None
+                        raise AssertionError("Hermes Telegram duplicate /stop wedge (upstream NousResearch/hermes-agent#137545)\n" + self.ctx()) from None
                     raise
         self.gateway.wait_idle(timeout=30)
         return inbound

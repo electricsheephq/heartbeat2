@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.5 — 2026-10-13
+
+- Eight numeric settings have upper bounds (ledger history 100 years, wake lifetime 10 years, interval floors and slowed intervals one year, watcher floor one week, slow-down multiplier 100). A larger value is reported by `/pulse status` and ignored, instead of crashing every tick.
+- The E2E `/stop` cell names the upstream Telegram duplicate-`/stop` wedge, NousResearch/hermes-agent#137545.
+
 ## 0.1.4 — 2026-10-13
 
 - At start a rejected setting falls back to its default; on a live change it keeps its last good value, and your other changes still apply. `/pulse status` and pulse tool results name the ignored setting.
