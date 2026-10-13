@@ -223,3 +223,28 @@ def test_stop_without_a_turn_id_keeps_the_anchor_for_the_unwinding_turn(engine):
     assert humans(e) == before + 1
     e.intake.on_session_end(session_id='sid', turn_id='turn', interrupted=True)  # the finalizer names the turn
     assert 'sid' not in e.intake.anchors
+
+
+def test_new_uid_row_repeating_a_present_legacy_row_counts(engine):
+    """T4: the legacy uid-less row is still there, so the uid row is a new message, not its adoption."""
+    e = engine
+    legacy = owner('same')
+    anchor(e, [legacy])
+    before = humans(e)
+    api(e, [legacy, owner('same', 'n1')])
+    assert humans(e) == before + 1
+
+
+@pytest.mark.parametrize('adopt', [False, True], ids=['rewritten-uidless', 'rewritten-then-adopted'])
+def test_rewrite_retires_the_original_fingerprint(engine, adopt):
+    """T5: after a tracked row is rewritten, a later message matching its old text is new."""
+    e = engine
+    legacy = owner('old request')
+    anchor(e, [legacy])
+    legacy['content'] += '\n\ninternal wake text'  # Hermes merges the wake row in place
+    if adopt:
+        legacy['message_uid'] = 'l1'
+    api(e, [legacy])
+    before = humans(e)
+    api(e, [legacy, owner('old request', 'm1')])
+    assert humans(e) == before + 1
