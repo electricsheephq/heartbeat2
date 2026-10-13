@@ -59,6 +59,18 @@ def test_reconcile_preserves_another_local_pollers_busy_flag(busy_engine, offset
     assert busy_pair(e) == before
 
 
+@pytest.mark.parametrize('offset', [3605, -60], ids=['future_after_step_back', 'before_boot'])
+def test_unloaded_runtime_busy_flag_is_cleared_on_reregistration(busy_engine, offset):
+    """A closed poller's turns are abandoned: re-registration in the same process clears them."""
+    e = busy_engine
+    stamp(e, e.boot_at + offset, e.epoch)
+    e.close()
+    assert e.epoch not in LOCAL_EPOCHS
+    e.clock.advance(5)
+    recover(e)
+    assert busy_pair(e) == (None, None)
+
+
 @pytest.mark.parametrize('offset', [-60, 3600], ids=['past', 'future'])
 def test_reconcile_clears_legacy_busy_without_epoch(busy_engine, offset):
     e = busy_engine

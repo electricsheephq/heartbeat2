@@ -119,6 +119,8 @@ class Poller:
 
     def close(self):
         self.closed=True
+        # A closed poller's turns are abandoned; a re-registered runtime must not treat them as live.
+        LOCAL_EPOCHS.discard(self.epoch)
         self.release()
 
     def reconcile(self):

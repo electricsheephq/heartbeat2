@@ -2,7 +2,7 @@
 
 ## 0.1.8 — 2026-10-13
 
-- After a restart, a busy flag left by the previous gateway process is always cleared, even when the system clock moved backwards. Before, a flag that looked newer than the restart could block wakes into that chat for up to 5 hours, and a clock step back could clear the busy flag of a turn this process was still running. Busy flags now record which process set them (#22).
+- After a restart, a busy flag left by the previous gateway process is always cleared, even when the system clock moved backwards. Before, a flag that looked newer than the restart could block wakes into that chat for up to 5 hours, and a clock step back could clear the busy flag of a turn this process was still running. Busy flags now record which process set them, and a plugin runtime that unloads gives up its flags (#22).
 
 ## 0.1.7 — 2026-10-13
 
