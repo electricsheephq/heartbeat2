@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.15 — 2026-10-14
+
+- **Unsupported event filters are refused (#57).** Select the event with `trigger.kind`; `trigger.event` is no longer advertised or accepted. At startup, existing active, paused or proposed event watchers using it are stopped (a stray `event` key on other kinds is ignored, as before) with `invalid_trigger_event`, pending occurrences are cancelled, and one notice per chat asks you to set the watcher up again. Stored task and board filters keep working.
+- **First-fire feasibility counts both holds (#68).** Owner-silence waits and event watchers without a deadline now account for quiet hours, and feasibility includes the chat's active wake-spacing window before quiet hours. A wake whose first possible fire is at or after expiry is refused; receipts report the holds.
+- The bundled skill tells the agent to set `owner_asked: true` when your current message asks for a one-time reminder, never for its own follow-ups, and to repeat the receipt.
+
 ## 0.1.14 — 2026-10-14
 
 - **The agent can tell you when a wake will really arrive (#56).** Arming, updating or resuming a wake now returns a one-line `receipt`, at most 240 characters. It names the owner-silence duration and describes a watcher deadline as a one-time "nothing happened" fallback. It covers when the wake fires; whether quiet hours will hold it and until when; whether the unanswered mute will hold or drop it; the spacing between wakes; when it expires; and whether a reply cancels it. Long receipts end at a sentence boundary where possible, with an ellipsis. The bundled skill tells the agent to repeat the receipt instead of promising its own timing. A proposed wake reads "awaiting /pulse ok", never "armed". `/pulse add`, `/pulse ok` and `/pulse resume` print the same line. Before, an agent could say "fires in 3 minutes" for a reminder that quiet hours would hold until 08:00.

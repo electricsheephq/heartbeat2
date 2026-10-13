@@ -126,6 +126,14 @@ class Poller:
     def reconcile(self):
         s=self.store
         with s.atomic():
+            noticed=set()
+            for w in s.list_wakes() if self.process_start else []:
+                if w.kind in EVENT_KINDS and w.status in {'active','paused','proposed'} and 'event' in w.trigger_json:
+                    if s.cas_wake(w.id,w.status,expected_version=w.version,status='failed',status_reason='invalid_trigger_event'):
+                        self.cancel_occurrences(w.id,'invalid_trigger_event',preserve_started=True)
+                        if w.session_key not in noticed:
+                            self.notice(w.session_key,f'A watcher ({w.id}) used an unsupported event filter and could never fire, so it was stopped. Ask me to set it up again.')
+                            noticed.add(w.session_key)
             for o in s.list_occurrences() if self.process_start else []:
                 if o.state=='claimed':
                     s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error='restart_refund')
@@ -308,7 +316,7 @@ class Poller:
         payload=event['payload_json']
         filters=w.trigger_json
         if w.kind=='reaction' and filters.get('emojis') and not set(filters['emojis']) & set(payload.get('emojis',[])): return
-        if any(filters.get(k) is not None and payload.get(k)!=filters[k] for k in ('event','task_id','board')): return
+        if any(filters.get(k) is not None and payload.get(k)!=filters[k] for k in ('task_id','board')): return
         if w.kind=='api_error':
             last=float(s.get_meta('api_cooldown:'+w.id) or 0)
             if last and self.clock.now()-last<1800: return

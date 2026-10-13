@@ -18,7 +18,7 @@ BOOL = {'type': 'boolean'}
 PARAMETERS = obj({
     'action': {'type': 'string', 'enum': ['create', 'list', 'update', 'pause', 'resume', 'cancel', 'respond', 'off']},
     'id': STR, 'title': STR, 'note': STR, 'reason': STR,
-    'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','fire_on','event','check_every','deadline','cwd')},
+    'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','fire_on','check_every','deadline','cwd')},
                     'pid': {'type':'integer'}, 'command': {'type':'array','items':STR},
                     'emojis': {'type':'array','items':STR}}),
     'until': obj({'expires':STR, 'max_fires':{'type':'integer'}, 'owner_replies':BOOL}),
@@ -253,14 +253,17 @@ class Tool:
             raise Infeasible('that time has already passed')
         watcher=w.kind in PROBE_KINDS | EVENT_KINDS
         if watcher:
-            point,label=(w.deadline_at,'deadline') if w.deadline_at is not None else (w.next_due_at if w.kind in PROBE_KINDS else None,'due')
+            point,label=(w.deadline_at,'deadline') if w.deadline_at is not None else (w.next_due_at if w.kind in PROBE_KINDS else e.clock.now(),'due')
         elif w.kind=='owner_silent':
             if w.trigger_json.get('builtin'): return w
             last=getattr(e.store.get_session(w.session_key),'last_human_at',None) or e.clock.now()
             point=max(e.clock.now(),last+parse_duration(w.trigger_json.get('after',p.checkin_after_hours*3600)))
         elif w.kind not in TIME_KINDS: return w
         if point is None or w.expires_at is None: return w
-        if w.kind=='at' or watcher:
+        session=e.store.get_session(w.session_key)
+        if p.wake_spacing_minutes>0 and session and session.last_wake_turn_at is not None:
+            point=max(point,session.last_wake_turn_at+p.wake_spacing_minutes*60)
+        if w.kind in {'at','owner_silent'} or watcher:
             from .commands import quiet_until
             point=max(point,e.clock.now())
             point=quiet_until(e,w.session_key,urgent=w.urgent,now=point) or point
@@ -295,10 +298,16 @@ class Tool:
                   f'Waits for {duration(parse_duration(w.trigger_json.get("after",p.checkin_after_hours*3600)))} of owner silence')
             parts=[lead+(f'; if nothing happens by {local(w.deadline_at)}, it tells you once' if watcher and w.deadline_at is not None else '')+'.']
         if w.status not in {'proposed','paused'}:
-            if w.kind=='at' or watcher and w.deadline_at is not None:
+            if w.kind=='at' or watcher or w.kind=='owner_silent' and not w.trigger_json.get('builtin'):
                 from .commands import quiet_until
-                due=(w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind=='at' else w.deadline_at
+                due=((s.last_human_at or e.clock.now())+parse_duration(w.trigger_json.get('after',p.checkin_after_hours*3600)) if w.kind=='owner_silent' else
+                     (w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind=='at' else
+                     w.deadline_at if w.deadline_at is not None else w.next_due_at if w.kind in PROBE_KINDS and w.next_due_at is not None else e.clock.now())
                 due=max(due,e.clock.now())
+                if p.wake_spacing_minutes>0 and s.last_wake_turn_at is not None:
+                    spacing=s.last_wake_turn_at+p.wake_spacing_minutes*60
+                    if spacing>due: parts.append(f'Wake spacing holds it until {local(spacing)}.')
+                    due=max(due,spacing)
                 release=quiet_until(e,w.session_key,urgent=w.urgent,now=due)
                 if release and release>due: parts.append(f'Quiet hours hold it until {local(release)}.')
             if not owner_class(w) and s.unanswered_count>=p.max_unanswered:
@@ -331,6 +340,8 @@ class Tool:
         e=self.engine
         updates={k:args[k] for k in ('title','note','reason','babysit','urgent') if k in args}
         trigger=dict(args.get('trigger',w.trigger_json))
+        if 'trigger' in args and 'event' in trigger:
+            raise ValueError('trigger.event is not supported; choose the event with trigger.kind (for example kanban_completed)')
         if 'trigger' in args and set(trigger) - set(PARAMETERS['properties']['trigger']['properties']):
             raise ValueError('unknown trigger parameter')
         if w.trigger_json.get('builtin'):
