@@ -162,7 +162,7 @@ def test_pricing_ttl_uses_call_route_mode_platform(engine, monkeypatch):
     monkeypatch.setattr(cache,'cost',lambda *a,**k: costs.append(k['ttl']) or .1)
     engine.intake.post_api_request(session_id='sid',turn_id='turn',usage={'input_tokens':100},
         started_at=engine.clock.now(),provider='new',model='claude-new',base_url='https://new.example',api_mode='new-mode')
-    assert ttls[-1]==('new|claude-new|new.example','new-mode','telegram') and costs==[3600]
+    assert ttls[-1]==('new|claude-new|https://new.example','new-mode','telegram') and costs==[3600]
 
 
 def test_cache_observation_only_after_cas_success(engine, monkeypatch):
