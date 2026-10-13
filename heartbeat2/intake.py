@@ -79,25 +79,41 @@ def row_text(content):
 
 
 # tools/todo_tool.py TODO_INJECTION_HEADER, identical at v0.21.6, v0.21.7 and main
-# 04eb00c. After a compaction Hermes appends the live task list to the trailing real
-# user row (conversation_compression._fold_todo_snapshot) and strips it again at the
-# next boundary, so the snapshot is never part of what the owner wrote.
+# 04eb00c. After a compaction Hermes appends the live task list (a blank line, this
+# header, one "- [ ] ..." line per task, maybe a skill-reload notice) to the trailing
+# real user row (conversation_compression._fold_todo_snapshot) and strips it again at
+# the next boundary, so the snapshot is never part of what the owner wrote.
 TODO_HEADER='[Your active task list was preserved across context compression]'
+TODO_SNAPSHOT=re.compile(r'(?:\n\n|^)'+re.escape(TODO_HEADER)+r'\n- \[[^\]\n]\] ')
+# Hermes' pre-call repair (agent_runtime_helpers._merge_consecutive_users) joins
+# consecutive user rows with a blank line, so a later owner row can follow a snapshot.
+OWNER_ROW_STARTS=('\n\n'+ORIGIN,'\n\n[OUT-OF-BAND USER MESSAGE')
+
+
+def without_snapshots(text):
+    match=TODO_SNAPSHOT.search(text)
+    while match:
+        rest=text[match.end():]
+        ends=[i for i in (rest.find(start) for start in OWNER_ROW_STARTS) if i!=-1]
+        text=text[:match.start()]+rest[min(ends,default=len(rest)):]
+        match=TODO_SNAPSHOT.search(text,match.start())
+    return text
 
 
 def owner_text(content):
-    """Row text without a todo snapshot (as Hermes' _strip_stale_todo_snapshot) or trailing space."""
+    """Row text without Hermes' todo snapshots; any other row is returned byte for byte."""
     if isinstance(content,list):
         kept=[]
         for part in content:
-            text=part.get('text') if isinstance(part,dict) and part.get('type')=='text' else None
-            idx=text.find(TODO_HEADER) if isinstance(text,str) else -1
-            if idx==-1: kept.append(part)
-            elif text[:idx].rstrip(): kept.append({**part,'text':text[:idx].rstrip()})
+            if isinstance(part,dict) and part.get('type')=='text' and isinstance(part.get('text'),str):
+                text=without_snapshots(part['text'])
+                if not text and part['text']: continue
+                part={**part,'text':text}
+            kept.append(part)
         content=kept
-    elif isinstance(content,str) and TODO_HEADER in content:
-        content=content[:content.find(TODO_HEADER)]
-    return row_text(content).rstrip()
+    elif isinstance(content,str):
+        content=without_snapshots(content)
+    return row_text(content)
 
 
 COMPACTION_MARKERS = ('--- END OF CONTEXT SUMMARY', '[STILL IN PROGRESS — this is the active request')

@@ -135,9 +135,9 @@ def test_new_owner_steers_still_count_after_a_fold(engine, platform, mid):
 def test_snapshot_text_is_never_owner_text():
     # A task list quoting the origin header is scaffolding, not an owner message.
     quoted = hermes_origin('reply to the deploy thread', 'signal')
-    assert not list(origin_rows([{'role': 'user', 'content': TODO + '\n- [ ] ' + quoted,
+    assert not list(origin_rows([{'role': 'user', 'content': TODO + '\n- [ ] 1. ' + quoted,
                                   '_todo_snapshot_synthetic': True}]))
-    assert not list(origin_rows([{'role': 'user', 'content': 'plain owner text\n\n' + TODO + '\n- ' + quoted}]))
+    assert not list(origin_rows([{'role': 'user', 'content': 'plain owner text\n\n' + TODO + '\n- [>] 1. ' + quoted}]))
 
 
 @pytest.mark.parametrize('suffix', ['', '  ', '\n', ' quoting ' + TODO + ' inline', '\n' + TODO + ' on its own line'])

@@ -15,7 +15,8 @@ from test_v016 import api, begin_wake, silent_reply
 def hermes():
     try:
         return (importlib.import_module('agent.conversation_compression'),
-                importlib.import_module('tools.todo_tool'))
+                importlib.import_module('tools.todo_tool'),
+                importlib.import_module('agent.agent_runtime_helpers'))
     except ImportError:
         if os.environ.get('HEARTBEAT2_REQUIRE_HERMES') == '1':
             pytest.fail('Hermes compression is not importable at the required pin')
@@ -24,11 +25,15 @@ def hermes():
 
 def boundary(hermes, rows, task):
     """Run Hermes' own post-compaction fold with a live, non-empty task list."""
-    compression, todo = hermes
+    compression, todo, _ = hermes
     store = todo.TodoStore()
     store.write([{'id': '1', 'content': task, 'status': 'in_progress'}])
     compression._fold_todo_snapshot(SimpleNamespace(_todo_store=store, _repair_message_sequence=lambda _: None), rows)
     return rows
+
+
+# The wake turn's assistant row, so Hermes' repair never merges the wake row itself.
+WORKING = {'role': 'assistant', 'content': 'working on it'}
 
 
 def owner(text, wrapped, parts):
@@ -56,16 +61,23 @@ def test_real_fold_keeps_counted_steer_once(hermes, engine, wrapped, parts, tail
     boundary(hermes, rows, 'check the deploy')
     assert TODO_HEADER in str(rows[-1]['content']), 'positive control: Hermes folded the snapshot'
     api(e, rows)
-    boundary(hermes, rows, 'roll back if red')
-    api(e, rows)
     assert [fp for fp, _ in origin_rows(rows)] == expected
+    if not tail or wrapped:
+        # A repeat boundary re-strips with rstrip(); a plain row ending in whitespace
+        # changes then and may be recounted once, as in v0.1.5.
+        boundary(hermes, rows, 'roll back if red')
+        api(e, rows)
+        assert [fp for fp, _ in origin_rows(rows)] == expected
     # A new steer takes the next snapshot; Hermes strips the old one from the first row.
     second = owner(hermes_origin('and the docs', 'signal'), wrapped, parts)
     rows.append(second)
     boundary(hermes, rows, 'update the docs')
     assert TODO_HEADER not in str(rows[-2]['content']) and TODO_HEADER in str(rows[-1]['content'])
     api(e, rows)
-    assert humans(e) == 2
+    # On string content that strip uses rstrip(), so a plain row ending in whitespace
+    # changes and is recounted once (v0.1.5 recounted it at every fold). List content
+    # loses only the snapshot part. Never a missed message.
+    assert humans(e) == (3 if tail and not wrapped and not parts else 2)
 
 
 @pytest.mark.parametrize('parts', [False, True], ids=['text', 'parts'])
@@ -79,3 +91,29 @@ def test_real_fold_on_carried_row_keeps_wake_silent(hermes, engine, parts):
     api(e, rows)
     assert humans(e) == 0
     assert silent_reply(e) == '[SILENT]'
+
+
+@pytest.mark.parametrize('wrapped', [False, True], ids=['origin', 'steer'])
+def test_real_repair_merging_an_owner_row_after_a_snapshot_counts(hermes, engine, wrapped):
+    # Hermes' pre-call repair joins consecutive user rows; the snapshot sits between them.
+    e = engine
+    row, history = begin_wake(e, [], 'signal')
+    rows = history + [WORKING, owner(hermes_origin('please check the deploy', 'signal'), False, False)]
+    api(e, rows)
+    boundary(hermes, rows, 'check the deploy')
+    rows.append(owner(hermes_origin('and roll back if red', 'signal'), wrapped, False))
+    rows, repairs = hermes[2]._merge_consecutive_users(rows)
+    assert repairs == 1 and TODO_HEADER in rows[-1]['content'], 'positive control: Hermes merged after the snapshot'
+    api(e, rows)
+    assert humans(e) == 2
+
+
+def test_real_repair_after_a_quoted_header_counts(hermes, engine):
+    e = engine
+    row, history = begin_wake(e, [], 'signal')
+    rows = history + [WORKING, {'role': 'user', 'content': 'please explain ' + TODO_HEADER + ' literally'},
+                      owner(hermes_origin('new follow-up', 'signal'), False, False)]
+    rows, repairs = hermes[2]._merge_consecutive_users(rows)
+    assert repairs == 1
+    api(e, rows)
+    assert humans(e) == 1
