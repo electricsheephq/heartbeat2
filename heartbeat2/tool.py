@@ -314,7 +314,7 @@ class Tool:
                 skip=w.kind in RECURRING_KINDS  # Poller.gate drops a recurring tick in quiet hours before spacing
                 release=quiet_until(e,w.session_key,urgent=w.urgent,now=due) if skip else None
                 if release and release>due: parts.append(f'Quiet hours skip its ticks until {local(release)}.'); due=release
-                if p.wake_spacing_minutes>0 and s.last_wake_turn_at is not None:
+                if p.wake_spacing_minutes>0 and s.last_wake_turn_at is not None and not (release and skip and due==release):
                     spacing=s.last_wake_turn_at+p.wake_spacing_minutes*60
                     if spacing>due: parts.append(f'Wake spacing holds it until {local(spacing)}.')
                     due=max(due,spacing)

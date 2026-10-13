@@ -27,7 +27,7 @@ def parse_duration(value: str | float) -> float:
         result, pos = 0.0, 0
         for match in _DURATION.finditer(text):
             gap = text[pos:match.start()]
-            if (not pos and gap.strip()) or (pos and not re.fullmatch(r"\s*,?\s*(?:and\s*)?", gap, re.I)):
+            if (not pos and gap.strip()) or (pos and not re.fullmatch(r"\s*(?:,\s*)?(?:and\s*)?", gap, re.I)):
                 raise ValueError(error)
             result += float(match[1]) * {"s": 1, "m": 60, "h": 3600,
                                         "d": 86400, "w": 604800}[match[2][0].lower()]

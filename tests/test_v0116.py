@@ -205,9 +205,9 @@ def test_other_malformed_inputs_do_not_leak_python_errors(engine, args):
 @pytest.mark.parametrize('kind', ['every', 'cron', 'self'])
 @pytest.mark.parametrize('hold,spacing,lines', [
     ('neither', 10, []), ('spacing', 180, ['spacing']), ('quiet', 10, ['quiet']),
-    # Poller.gate drops a recurring tick in quiet hours before spacing is checked:
-    # spacing that ends inside quiet hours is not named; spacing past them is.
-    ('quiet', 180, ['quiet']), ('quiet', 720, ['quiet', 'spacing'])])
+    # Poller.gate drops a recurring tick in quiet hours before spacing is checked, and the
+    # next real tick after the skip is not known here, so no spacing hold is claimed for it.
+    ('quiet', 180, ['quiet']), ('quiet', 720, ['quiet'])])
 def test_recurring_receipt_names_holds(engine, kind, hold, spacing, lines):
     now = night(engine, 21 if hold == 'quiet' else 8)
     engine.policy = replace(engine.policy, wake_spacing_minutes=spacing)
@@ -267,3 +267,15 @@ def test_version_changelog_and_skill():
     skill = (root/'skills/heartbeat2-usage/SKILL.md').read_text()
     assert all(x in skill for x in ['HH:MM', 'tomorrow HH:MM', 'in 10 minutes', 'ISO', 'kind: at'])
     assert 'set `owner_asked: true` on the `at` create' in skill
+
+
+@pytest.mark.parametrize('text', ['in 1h'+' '*40000+'x', 'every 1h'+' '*40000+'x', 'in 1h'+' '*40000,
+                                  'when silent 1h'+' '*40000+'x', 'in 1h,'+' '*40000+'and'+' '*40000+'x'])
+def test_command_duration_patterns_are_linear(text):
+    import time
+    from heartbeat2.commands import DURATIONS
+    start = time.perf_counter()
+    for head in ('in ', 'every ', 'when silent '):
+        re.fullmatch(head+'(?P<duration>'+DURATIONS+r'|\S+)\s+(?P<note>.+)', text, re.I|re.DOTALL)
+    with pytest.raises(ValueError): parse_duration('1h'+' '*40000+'y')
+    assert time.perf_counter()-start < 1.0
