@@ -157,11 +157,14 @@ class Tool:
                                 return {'error':'not_resumable'}
                             if w.status == 'paused' and (sum(x.status in {'active','proposed'} for x in e.store.list_wakes(s.session_key)) >= e.policy.max_active or sum(x.status in {'active','proposed'} for x in e.store.list_wakes()) >= 50):
                                 return {'error':'max_active'}
-                        result = self.reschedule(w) if action=='resume' else self.prepare(w,args,reschedule='trigger' in args)
+                        # An update without a trigger keeps a stored relative deadline instead of re-reading it.
+                        fresh = 'trigger' in args
+                        result = self.reschedule(w) if action=='resume' else self.prepare(w,args,reschedule=fresh,reparse_deadline=fresh)
                         candidate, clamps = result.wake, result.clamped
                         until = args.get('until') if isinstance(args.get('until'),dict) else {}
-                        timing = ('trigger_json','kind','next_due_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s')
-                        edited = [*timing,'note']
+                        timing = ('trigger_json','kind','next_due_at','deadline_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s')
+                        # Urgency changes quiet-hours behaviour; title and reason are cosmetic and keep owner status.
+                        edited = [*timing,'note','urgent']
                         # Lifetime fields revoke only when the agent set them, never via a policy re-clamp.
                         edited += [f for f,present in (('expires_at','expires' in until),('max_fires','max_fires' in until),
                                                         ('cancel_on_reply','owner_replies' in until),('babysit','babysit' in args)) if present]
@@ -172,11 +175,11 @@ class Tool:
                                 and all(getattr(candidate,k) == getattr(w,k) for k in ('title','reason','urgent')))
                             if w.creator == 'user' and changed and not watch_conversion:
                                 candidate = replace(candidate,agent_edited=True)
-                                result = self.prepare(candidate,{},reschedule='trigger' in args)
+                                result = self.prepare(candidate,{},reschedule=fresh,reparse_deadline=fresh)
                                 # The raised floor also covers the occurrence already due at the owner's cadence.
                                 if ('trigger' not in args and candidate.kind in RECURRING_KINDS
                                         and (result.wake.eff_interval_s or 0) > (w.eff_interval_s or 0)):
-                                    due = self.prepare(result.wake,{}).wake.next_due_at
+                                    due = self.prepare(result.wake,{},reparse_deadline=False).wake.next_due_at
                                     boundary = e.clock.now() + result.wake.eff_interval_s
                                     anchor = result.wake.trigger_json.get('at') if candidate.kind == 'every' else None
                                     if anchor and due < boundary:  # Stay on the anchor grid, past the raised floor.
@@ -222,7 +225,7 @@ class Tool:
             result=replace(result,wake=replace(result.wake,next_due_at=due))
         return result
 
-    def prepare(self,w,args,*,reschedule=True):
+    def prepare(self,w,args,*,reschedule=True,reparse_deadline=True):
         e=self.engine
         updates={k:args[k] for k in ('title','note','reason','babysit','urgent') if k in args}
         trigger=dict(args.get('trigger',w.trigger_json))
@@ -260,7 +263,7 @@ class Tool:
             updates['expires_at']=parse_at(until['expires'],now=e.clock.now(),timezone=e.policy.resolved_timezone())
         if 'max_fires' in until: updates['max_fires']=until['max_fires']
         if 'owner_replies' in until: updates['cancel_on_reply']=until['owner_replies']
-        if 'deadline' in trigger:
+        if 'deadline' in trigger and reparse_deadline:
             updates['deadline_at']=parse_at(trigger['deadline'],now=e.clock.now(),timezone=e.policy.resolved_timezone())
         if kind=='command':
             argv=trigger.get('command')

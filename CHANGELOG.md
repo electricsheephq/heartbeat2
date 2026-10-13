@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.11 — 2026-10-13
+
+- **Wake replies lead with the result.** When a wake is set to notify you, the agent is now told to lead with what it found, to not describe what it checked or looked up, and that `notify` must be set to true or false. In a live-model bench, wake replies with nothing to report that opened by describing the check went from 3 of 3 to 1 of 3 (read by hand; 0 of 3 by the bench's pattern). Silent wakes and delivered results were unchanged.
+- **Moving a wake's deadline or marking it urgent counts as an agent edit (#43).** Before, an agent could change either on a wake you armed, and the wake kept its exemption from the unanswered mute. A `/pulse watch` conversion that sets a deadline still stays yours. Title and reason changes stay cosmetic.
+- **An update that doesn't change a wake's trigger keeps its deadline.** Before, any later update, even a title change, re-read a relative deadline such as "in 1h" and quietly pushed it out.
+
 ## 0.1.10 — 2026-10-13
 
 - Owner messages are recognised by Hermes' own row id (`message_uid`) instead of by their text (#16). Before, when Hermes rewrote history inside a turn (compaction, merged consecutive messages, task-list snapshots), heartbeat2 could count an old owner message again. That reset the unanswered mute, cancelled owner-reply wakes and suppressed the silence check-in. It could also miss a new message that repeated an earlier one word for word. A row that Hermes has not stored yet (the current message, a fresh steer) keeps the text match until Hermes assigns its id. Platforms without platform message ids, such as Signal and SimpleX, benefit most.
