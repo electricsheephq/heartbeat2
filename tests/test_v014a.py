@@ -271,12 +271,13 @@ def test_owner_add_cache_matches_tool(engine, monkeypatch, add):
     monkeypatch.setattr(commands, 'session_env', lambda n: KEY if n == 'HERMES_SESSION_KEY' else '')
     out = commands.handle('add ' + add, SimpleNamespace(get_engine=lambda: engine))
     w, = engine.store.list_wakes(KEY)
-    assert out.splitlines()[-1] == engine.tool.cache_result(w)
+    assert out.splitlines()[-2] == engine.tool.cache_result(w)
+    assert out.splitlines()[-1] == engine.tool.receipt(w, engine.store.get_session(KEY))
     assert 'this wake warm' not in out
     if w.kind == 'at':
         assert '120m cold' in out
     else:
-        assert 'warm' not in out.splitlines()[-1] and 'cold' not in out.splitlines()[-1]
+        assert 'warm' not in out.splitlines()[-2] and 'cold' not in out.splitlines()[-2]
 
 
 @pytest.mark.parametrize('kind', ['command', 'at', 'owner_silent'])

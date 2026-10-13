@@ -3,6 +3,7 @@
 The no-op digest idea follows Hermes hermes_cli/loops.py::_digest_response;
 all value and pause decisions here use structured occurrence fields.
 """
+from dataclasses import replace
 from .model import RECURRING_KINDS, PROBE_KINDS
 from .schedule import local_day, next_cron, next_every, parse_duration
 
@@ -60,6 +61,8 @@ def owner_answer(engine,wake,answer):
             interval=max(p.probe_floor_seconds,parse_duration(w.trigger_json.get('check_every',p.probe_floor_seconds)))
             interval=max(interval,min(interval*2,p.noop_max_backoff_hours*3600,w.pacing_max_s or float('inf')))
             updates.update(trigger_json={**w.trigger_json,'check_every':interval},next_due_at=engine.clock.now()+interval)
+        candidate=engine.tool.feasible(replace(w,**updates))
+        updates['expires_at']=candidate.expires_at
         if not s.cas_wake(w.id,'paused',expected_version=w.version,**updates): return {'error':'concurrent_change'}
         if answer=='keep': s.set_meta('ratio_since:'+w.id,str(engine.clock.now()))
         s.set_meta('card:'+w.id,'')

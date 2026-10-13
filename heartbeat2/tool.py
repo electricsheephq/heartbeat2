@@ -1,9 +1,11 @@
 """Session-bound pulse tool. No setting writes or destination arguments."""
 from dataclasses import asdict, replace
+from datetime import datetime
+import json
 import re
 
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS
-from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS
+from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS, owner_class
 from .schedule import parse_at, parse_duration, next_every, next_cron
 
 
@@ -30,6 +32,7 @@ DESCRIPTION = ('Use create to arm a wake/watcher (note and trigger.kind required
                'cancel to end it; off to stop checks for this chat. During a wake turn, use respond to set '
                'outcome and notify, optionally scratch/next_check. Bounds and clamps are reported. Never type silence markers. '
                'Results include a `cache` line; pick intervals the line marks warm. '
+               'Results include a receipt line; tell the owner what it says, not a promise of your own. '
                'For a one-time "at" wake the owner asks for in their current message, set owner_asked=true: '
                "it then fires like the owner's own reminder (not muted, not capped). Never set it for your own follow-ups.")
 SCHEMA = {'name':'pulse','description':DESCRIPTION,'parameters':PARAMETERS}
@@ -49,6 +52,10 @@ def session_env(name):
         return get_session_env(name, '')
     except Exception:
         return ''
+
+
+class Infeasible(ValueError):
+    pass
 
 
 class Tool:
@@ -129,7 +136,7 @@ class Tool:
                     w = e.store.create_wake(result.wake)
                     if child_key:
                         e.store.set_meta(child_key,'1')
-                    item = {'ok':True,'wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w)}
+                    item = {'ok':True,'wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w),'receipt':self.receipt(w,s)}
                     if args.get('owner_asked') is True and not requested:
                         item['owner_asked_ignored'] = 'wake_turn' if flight is not None else 'not_owner_turn' if not evidence else 'not_one_shot'
                     return item
@@ -190,11 +197,11 @@ class Tool:
                                 and all(getattr(candidate,k) == getattr(w,k) for k in ('title','reason','urgent')))
                             if w.creator == 'user' and changed and not watch_conversion:
                                 candidate = replace(candidate,agent_edited=True)
-                                result = self.prepare(candidate,{},reschedule=fresh,reparse_deadline=fresh)
+                                result = self.prepare(candidate,{'until':until},reschedule=fresh,reparse_deadline=fresh)
                                 # The raised floor also covers the occurrence already due at the owner's cadence.
                                 if ('trigger' not in args and candidate.kind in RECURRING_KINDS
                                         and (result.wake.eff_interval_s or 0) > (w.eff_interval_s or 0)):
-                                    due = self.prepare(result.wake,{},reparse_deadline=False).wake.next_due_at
+                                    due = self.prepare(result.wake,{'until':until},reparse_deadline=False).wake.next_due_at
                                     boundary = e.clock.now() + result.wake.eff_interval_s
                                     anchor = result.wake.trigger_json.get('at') if candidate.kind == 'every' else None
                                     if anchor and due < boundary:  # Stay on the anchor grid, past the raised floor.
@@ -213,6 +220,7 @@ class Tool:
                                 candidate = replace(candidate,owner_requested=False)
                         if action == 'resume':
                             candidate = replace(candidate,status='active',status_reason='')
+                        candidate = self.feasible(candidate,explicit_expiry='expires' in until)
                     else:
                         candidate = replace(w,status='paused' if action=='pause' else 'cancelled',status_reason='agent')
                     updates = {k:v for k,v in asdict(candidate).items() if k not in {'id','session_key','created_at','updated_at','version'} and v != getattr(w,k)}
@@ -223,6 +231,7 @@ class Tool:
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
                     w=e.store.get_wake(w.id)
                     item={'ok':True,'wake':asdict(w),'clamped':clamps,'cache':self.cache_result(w)}
+                    if action in {'update','resume'}: item['receipt']=self.receipt(w,s)
                     results.append(item)
                 return results[0] if args.get('id') != 'all' and results else {'ok':True,'results':results}
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
@@ -236,15 +245,87 @@ class Tool:
         seconds = max(0,w.next_due_at-self.engine.clock.now()) if w.kind=='at' and w.next_due_at is not None else w.eff_interval_s
         return self.engine.cache_line(w,seconds=seconds,watcher=is_watcher(w) or w.kind=='owner_silent')
 
+    def feasible(self,w,*,explicit_expiry=False):
+        """Check the final due/deadline against the bounded lifetime before storing."""
+        e,p=self.engine,self.engine.policy
+        point,label=w.next_due_at,'due'
+        if w.kind=='at' and point is not None and point<e.clock.now()-p.catch_up_hours*3600:
+            raise Infeasible('that time has already passed')
+        watcher=w.kind in PROBE_KINDS | EVENT_KINDS
+        if watcher:
+            point,label=(w.deadline_at,'deadline') if w.deadline_at is not None else (w.next_due_at if w.kind in PROBE_KINDS else None,'due')
+        elif w.kind=='owner_silent':
+            if w.trigger_json.get('builtin'): return w
+            last=getattr(e.store.get_session(w.session_key),'last_human_at',None) or e.clock.now()
+            point=max(e.clock.now(),last+parse_duration(w.trigger_json.get('after',p.checkin_after_hours*3600)))
+        elif w.kind not in TIME_KINDS: return w
+        if point is None or w.expires_at is None: return w
+        if w.kind=='at' or watcher:
+            from .commands import quiet_until
+            point=max(point,e.clock.now())
+            point=quiet_until(e,w.session_key,urgent=w.urgent,now=point) or point
+        max_life=min(p.max_lifetime_days*86400,4*3600) if w.babysit else p.max_lifetime_days*86400
+        hard_end=(w.created_at or e.clock.now())+max_life
+        if point>=hard_end: raise Infeasible(f'{label} after the maximum lifetime of {max_life/86400:g} days')
+        if point<w.expires_at: return w
+        if explicit_expiry or e.store.get_wake(w.id) is not None:
+            local=lambda t: datetime.fromtimestamp(t,p.resolved_timezone()).strftime('%a %d %b %H:%M')
+            raise Infeasible(f'{label} after expiry: {local(point)} >= {local(w.expires_at)}; set until.expires to extend it')
+        end=min(hard_end,point+3600)
+        return replace(w,expires_at=end)
+
+    def receipt(self,w,s):
+        """One truthful line from the stored wake and current chat limits."""
+        e,p=self.engine,self.engine.policy
+        local=lambda t: datetime.fromtimestamp(t,p.resolved_timezone()).strftime('%a %d %b %H:%M')
+        def duration(seconds):
+            for unit,size in (('d',86400),('h',3600),('m',60)):
+                if seconds>=size and seconds%size==0: return f'{seconds/size:g}{unit}'
+            return f'{seconds:g}s'
+        watcher=w.kind in PROBE_KINDS | EVENT_KINDS
+        if w.status=='proposed': parts=[f'Proposed, not armed: awaiting /pulse ok {w.id}.']
+        elif w.status=='paused': parts=['Paused.']
+        elif w.kind=='at': parts=['Already due; awaiting its wake turn.' if w.next_due_at is None else
+            'Due now; it fires on the next check.' if w.next_due_at<=e.clock.now() else f'Fires once at {local(w.next_due_at)}.']
+        elif w.kind in RECURRING_KINDS:
+            parts=[f'Next at {local(w.next_due_at)}'+(' (cron).' if w.kind=='cron' else f', then every {duration(w.eff_interval_s)}.')]
+        else:
+            lead=(f'Checks every {duration(w.trigger_json["check_every"])}' if w.kind in PROBE_KINDS else
+                  f'Waits for {w.kind} events' if watcher else
+                  f'Waits for {duration(parse_duration(w.trigger_json.get("after",p.checkin_after_hours*3600)))} of owner silence')
+            parts=[lead+(f'; if nothing happens by {local(w.deadline_at)}, it tells you once' if watcher and w.deadline_at is not None else '')+'.']
+        if w.status not in {'proposed','paused'}:
+            if w.kind=='at' or watcher and w.deadline_at is not None:
+                from .commands import quiet_until
+                due=(w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind=='at' else w.deadline_at
+                due=max(due,e.clock.now())
+                release=quiet_until(e,w.session_key,urgent=w.urgent,now=due)
+                if release and release>due: parts.append(f'Quiet hours hold it until {local(release)}.')
+            if not owner_class(w) and s.unanswered_count>=p.max_unanswered:
+                parts.append('Muted: it waits for your reply.' if watcher else 'Muted: it is dropped unless you reply first.')
+            if p.wake_spacing_minutes>0 and (w.kind in TIME_KINDS or watcher or w.kind=='owner_silent'):
+                parts.append(f'Wakes are at least {p.wake_spacing_minutes:g} min apart, so it can land a few minutes late.')
+        if w.expires_at is not None: parts.append(f'Expires {local(w.expires_at)}.')
+        if w.cancel_on_reply: parts.append('Cancels if you reply.')
+        text=' '.join(parts)
+        if len(text)>240: text=text.replace('Wakes are at least ','Wakes at least ').replace(' min apart, so it can land a few minutes late.',' min apart; may land a few minutes late.')
+        if len(text)>240: text=' '.join(x for x in parts if not x.startswith('Wakes are at least '))
+        if len(text)>240:
+            text=text[:239]
+            boundary=text.rfind('. ')
+            text=(text[:boundary+1] if boundary>=0 else text)+'…'
+        return text
+
     def reschedule(self,w):
         """Shared tool/command resume: preserve stored one-shot due, fresh key."""
-        result=self.prepare(w,{},reschedule=w.kind!='at')
+        if w.kind=='at': w=replace(w,next_due_at=max(w.next_due_at or self.engine.clock.now(),self.engine.clock.now()))
+        result=self.prepare(w,{},reschedule=w.kind!='at',reparse_deadline=False)
         if w.kind=='at':
             due=max(w.next_due_at or self.engine.clock.now(),self.engine.clock.now())
             while self.engine.store.get_occurrence(w.id,f't:{due:.17g}') is not None:
                 due+=.001
             result=replace(result,wake=replace(result.wake,next_due_at=due))
-        return result
+        return replace(result,wake=self.feasible(result.wake))
 
     def prepare(self,w,args,*,reschedule=True,reparse_deadline=True):
         e=self.engine
@@ -255,6 +336,8 @@ class Tool:
         if w.trigger_json.get('builtin'):
             trigger['builtin'] = True
         kind=trigger.get('kind',w.kind)
+        if 'deadline' in args.get('trigger',{}) and kind not in PROBE_KINDS | EVENT_KINDS:
+            raise ValueError('deadline works only for watchers (file, process, url, command and event kinds)')
         if kind in {'file','url'} and 'pattern' in trigger:
             pattern=trigger['pattern']
             if not isinstance(pattern,str) or len(pattern)>512: raise ValueError('pattern exceeds 512 characters')
@@ -329,7 +412,10 @@ class Tool:
             elif kind in PROBE_KINDS: due=now
             else: due=None
             w=replace(w,next_due_at=due)
-        return replace(result,wake=w)
+        feasible=self.feasible(w,explicit_expiry='expires' in until)
+        if feasible.expires_at!=w.expires_at:
+            result.clamped['expires']=f'{feasible.expires_at} (covers the first due time)'
+        return replace(result,wake=feasible)
 
     def respond(self,args,flight):
         e=self.engine
