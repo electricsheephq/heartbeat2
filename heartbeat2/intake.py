@@ -154,7 +154,9 @@ def blocks(row):
     text=owner_text(row.get('content',''))
     # Only a header with its JSON line starts a block; a quoted header is owner text.
     heads=list(origin_headers(text))
-    return [(mid,hashlib.sha256(text[at:heads[i+1][0] if i+1<len(heads) else len(text)].encode()).hexdigest()[:16])
+    # Trailing whitespace is dropped: Hermes joins merged rows with a blank line, so a block keeps its identity
+    # whatever follows it.
+    return [(mid,hashlib.sha256(text[at:heads[i+1][0] if i+1<len(heads) else len(text)].rstrip().encode()).hexdigest()[:16])
             for i,(at,mid) in enumerate(heads)]
 
 

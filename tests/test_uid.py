@@ -35,8 +35,10 @@ def test_pure_helpers():
     row['content'] += '\n\n' + owner('second')['content']
     parts = intake.blocks(row)
     first, second = row['content'].split('\n\n' + intake.ORIGIN)
-    assert parts == [('1', hashlib.sha256((first + '\n\n').encode()).hexdigest()[:16]),
+    # The joining blank line is not part of the first block, so it matches the standalone row's block.
+    assert parts == [('1', hashlib.sha256(first.encode()).hexdigest()[:16]),
                      (None, hashlib.sha256((intake.ORIGIN + second).encode()).hexdigest()[:16])]
+    assert parts[0][1] == intake.blocks(owner('first', 'u', '1'))[0][1]
     assert intake.uid(row) == 'u'
     for value in [None, '', 3, [], {}]:
         assert intake.uid({'message_uid': value}) is None
