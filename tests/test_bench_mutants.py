@@ -69,7 +69,8 @@ def scratch_run(tmp_path,mutations,driver=DRIVER):
         p=tmp_path/path; text=p.read_text()
         assert text.count(old)>=1,(path,old)
         p.write_text(text.replace(old,new))
-    result=subprocess.run([sys.executable,'-B','-c',driver],cwd=tmp_path,capture_output=True,text=True,timeout=12)
+    # A hang guard, not a speed bar: the control run takes ~1 s locally but has exceeded 12 s on a slow shared CI runner.
+    result=subprocess.run([sys.executable,'-B','-c',driver],cwd=tmp_path,capture_output=True,text=True,timeout=60)
     assert result.returncode==0,result.stderr
     return json.loads(result.stdout)
 
