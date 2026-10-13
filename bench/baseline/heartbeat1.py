@@ -84,7 +84,8 @@ class Heartbeat1:
         task['fires']+=1
         self.turns.append({'t':self.gateway.t,'inject_t':self.gateway.t,'due_t':due,'session_key':owner['key'],
                            'wake_id':'b_'+ref,'ref':ref,'occurrence':occurrence,'valid':True,'outcome':step['outcome'],
-                           'lateness_s':max(0,self.gateway.t-due),'deferred_s':0})
+                           'lateness_s':max(0,self.gateway.t-due),'deferred_s':0,
+                           'tokens':self.gateway.tokens.turn((owner['profile'],owner['key']),self.gateway.t)})
         raw=self.model.raw(step)
         text='' if raw.strip().casefold()=='heartbeat_ok' else raw
         identity=(ref,occurrence)

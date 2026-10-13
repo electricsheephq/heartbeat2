@@ -1,0 +1,56 @@
+id: command-trigger
+title: Allowlisted read-only command change fires exactly once after a stable baseline
+cites:
+- 'B1 realism: Allowlisted read-only command change fires exactly once after a stable
+  baseline'
+settings:
+  probe_commands: $FIXTURES/read-status
+arms:
+- ref: command
+  args:
+    note: Report useful news for command
+    trigger:
+      kind: command
+      command:
+      - $FIXTURES/read-status
+      - $HOME/status.txt
+      check_every: 5m
+      fire_on: change
+timeline:
+- t: 0
+  event: file
+  path: status.txt
+  text: 'pending
+
+    '
+- t: 600
+  event: file
+  path: status.txt
+  text: 'final
+
+    '
+  append: false
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Complete.
+duration: 1500
+expectations:
+  required_fires:
+  - wake: command
+    window:
+    - 600
+    - 615
+  forbidden_deliveries: []
+  bars:
+    command:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+      wake_fields: {}
+heartbeat_checklist:
+- ref: command
+  session: owner
+  note: Report useful news for command
+baseline_interval_s: 1800

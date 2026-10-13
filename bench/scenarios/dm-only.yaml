@@ -1,0 +1,53 @@
+id: dm-only
+title: Group arming is refused while the DM wake delivers
+cites:
+- 'B1 realism: Group arming is refused while the DM wake delivers'
+settings: {}
+arms:
+- ref: group
+  args:
+    note: Report useful news for group
+    trigger:
+      kind: at
+      at: in 1m
+  session: group
+  expect_error: dm_only
+- ref: dm
+  args:
+    note: Report useful news for dm
+    trigger:
+      kind: at
+      at: in 1m
+timeline: []
+model_policy:
+  default:
+  - outcome: done
+    notify: true
+    summary: Complete.
+duration: 120
+expectations:
+  required_fires:
+  - wake: dm
+    window:
+    - 60
+    - 75
+  forbidden_deliveries: []
+  bars:
+    dm:
+      deliveries: 1
+      model_wakes: 1
+      status: done
+      wake_fields: {}
+  observations:
+  - event: arm_result
+    ref: group
+    error: dm_only
+heartbeat_checklist:
+- ref: dm
+  session: owner
+  note: Report useful news for dm
+baseline_interval_s: 1800
+sessions:
+- name: owner
+- name: group
+  chat_type: group

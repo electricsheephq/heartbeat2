@@ -1,0 +1,69 @@
+id: cache-snap
+title: Agent interval above a learned one-hour TTL snaps to the warm edge
+cites:
+- 'B1 realism: Agent interval above a learned one-hour TTL snaps to the warm edge'
+settings:
+  max_unanswered: 10
+arms: []
+timeline:
+- t: 0
+  event: cache
+  ttl_s: 3600
+- t: 0
+  event: arm
+  arm:
+    ref: warm
+    args:
+      note: Report useful news for warm
+      trigger:
+        kind: every
+        every: 61m
+model_policy:
+  default:
+  - outcome: progress
+    notify: true
+    summary: Fresh news 0
+  - outcome: progress
+    notify: true
+    summary: Fresh news 1
+  - outcome: progress
+    notify: true
+    summary: Fresh news 2
+  - outcome: progress
+    notify: true
+    summary: Fresh news 3
+  - outcome: progress
+    notify: true
+    summary: Fresh news 4
+  - outcome: progress
+    notify: true
+    summary: Fresh news 5
+duration: 10300
+expectations:
+  required_fires:
+  - wake: warm
+    window:
+    - 3420
+    - 3435
+  - wake: warm
+    window:
+    - 6840
+    - 6855
+  - wake: warm
+    window:
+    - 10260
+    - 10275
+  forbidden_deliveries: []
+  bars:
+    warm:
+      deliveries: 3
+      model_wakes: 3
+      status: active
+      wake_fields:
+        base_interval_s: 3420
+        eff_interval_s: 3420
+        warm_wakes: 3
+        cold_wakes: 0
+heartbeat_checklist: []
+baseline_interval_s: 1800
+cache_ttl_s: 3600
