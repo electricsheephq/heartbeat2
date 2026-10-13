@@ -16,9 +16,16 @@ The bars below are frozen once this file merges. The soak code that runs them co
 
 - **Profile:**
   - a test Hermes profile with a Telegram DM to the owner's account;
-  - HeartBeat 2.0 at **v0.1.15 or later**, on plugin defaults except `timezone`;
+  - HeartBeat 2.0 at **v0.1.15 or later**, with `plugins.entries.heartbeat2.allow_gateway_injection: true` (required for any wake to be armed) and plugin settings at their defaults except `timezone`;
   - the profile's normal model; the model and provider are recorded at the start.
-- **Frozen during the soak:** the plugin version, the plugin's settings, the model and the gateway's plugin set. A change aborts the run (see Voids).
+- **Frozen during the soak:** the plugin version, the plugin's entry (settings and `allow_gateway_injection`), the model and the gateway's plugin set. A change aborts the run (see Voids).
+- **Baseline before day 1** (logged as setup):
+  - the chat is enabled;
+  - no non-built-in wake is active or proposed (any found is cancelled with `/pulse cancel <id>`);
+  - the stored unanswered count is 0;
+  - day 1 starts on a fresh calendar day, so no daily usage is carried over.
+
+  Any check that fails after cleanup stops the start.
 - **Scripted owner:** a runner sends from the owner's Telegram account through a user client, so the gateway sees ordinary owner messages.
 - **Hours:** the first send is at 08:30 or later, every due time is at 21:30 or earlier, and every episode window closes by 21:45 (profile timezone). No episode crosses quiet hours (default 22:00–08:00).
 - **Schedule:** deterministic from the registered seed **20261014**.
@@ -27,7 +34,8 @@ The bars below are frozen once this file merges. The soak code that runs them co
     - Day `d` (1–7) draws from Python's `random.Random(f"20261014:{d}")`. Global choices draw from `random.Random("20261014:0")`, in this order:
       - the 4 C-reply days, `sample(range(1, 8), 4)`;
       - the R kind for days 3 and 6, `choice` per day;
-      - the task order, one `shuffle` of the 14 tasks, each used exactly once by the 14 reminder requests in schedule order.
+      - the task order, one `shuffle` of the 14 tasks, each used exactly once by the 14 reminder requests in schedule order;
+      - the N texts: one `shuffle` of the 6 texts, used by days 1–6 in order, then one `choice` among them for day 7.
     - Each day shuffles its episode list with `shuffle`, keeping S last, then draws its placeholders in episode order (`choice` from each listed set; HH:MM offsets and flip delays by `randint` over the listed minute ranges, rounded where stated).
   - **Timing:**
     - The first send is at 08:30. Each later send comes after the previous window's latest close plus a gap drawn by `randint(5, 30)` minutes.
@@ -38,7 +46,6 @@ The bars below are frozen once this file merges. The soak code that runs them co
     - W: flip + 30 min;
     - N: send + 10 min;
     - S: send + 245 min. S is last, so this only bounds the day.
-  - **Overruns:** if a W window actually runs longer, because the watcher chose `check_every` over 25 min, the runner delays the rest of that day by the overrun and logs the shift. The scorer accepts only logged shifts.
   - **Unlike B2, nothing is compressed:** a 60-minute reminder waits 60 real minutes.
 
 ## Evidence the runner keeps
@@ -75,14 +82,14 @@ Placeholders `<…>` are filled from the seeded schedule:
 |---|---|---|---|---|
 | R-clock | `remind me at <HH:MM> to <task>` | MUST_ARM | one `at` wake due at HH:MM; one delivery about the task | due + 15 min |
 | R-rel | `in <N> minutes, remind me to <task>`, N ∈ {15, 30, 45, 60} | MUST_ARM | one `at` wake due at send + N; one delivery about the task | due + 15 min |
-| W | `the <job> job writes its status to <path>; tell me when it says DONE`. Before the send, the runner creates the file with the exact bytes `RUNNING\n`; at the seeded flip, 10–30 min after the send, it appends `DONE\n` | MUST_ARM | one `file` watcher on the path, whose pattern matches the line `DONE` and not `RUNNING`; one delivery after the flip | flip + max(30 min, `check_every` + 5 min) |
+| W | `the <job> job writes its status to <path>; tell me when it says DONE`. Before the send, the runner creates the file with the exact bytes `RUNNING\n`; at the seeded flip, 10–30 min after the send, it appends `DONE\n` | MUST_ARM | one `file` watcher on the path, whose pattern matches the line `DONE` and not `RUNNING`, checking at least every 25 min; one delivery after the flip | flip + 30 min |
 | C-reply | `check back in <N> minutes unless I've replied by then`, N ∈ {30, 45, 60}; the runner sends `all good, no need` at N/2 | MUST_ARM | one `at` wake due at send + N with `cancel_on_reply`; the reply cancels it, and nothing is delivered from it | due + 15 min |
 | C-silent | the same message; the runner stays silent | MUST_ARM | the same wake; exactly one delivery at about N | due + 15 min |
 | M | `remind me in 20 minutes to <task1>`, `remind me in 40 minutes to <task2>` and `remind me in 60 minutes to <task3>`, sent 1 minute apart; the runner does not answer the first two deliveries | MUST_ARM (3 requests) | three `at` wakes, all delivered; the third is delivered while the stored unanswered count is ≥ 2 | last due + 15 min |
 | S | `check on me every hour today`; 5 min after the first check-in arrives, the runner sends `stop checking in on me` | MUST_ARM + STOP | one recurring hourly wake (see S matching); after the stop it ends (cancelled, paused, or the chat turned off), and nothing more is delivered from it | stop + 2 h; or, with no first check-in, send + 120 min |
 | N | one of `thanks, that's all for now` · `what's 15% of 80?` · `I'll remind myself later, no need` · `the meeting moved to 4pm` · `how do reminders work here?` · `can you remind me what we talked about this morning?` | MUST_NOT_ARM | no wake created | send + 10 min |
 
-**Replies.** After each expected delivery, the runner replies `thanks` 1–5 minutes later, except in C-reply, the first two deliveries of M, and S's first check-in, which is answered by the stop.
+**Replies.** After each expected delivery, the runner replies `thanks` 1–5 minutes later, except in C-reply, the first two deliveries of M, and S's first check-in, which is answered by the stop. A reply is sent only while the delivery's own episode window is open; a delivery that arrives after its window gets no reply, and the skip is logged, so it cannot touch the next episode.
 
 **Day plan.** Each day's order is shuffled by the seed, except that **S is always the last episode of its day**:
 - days 1, 4 and 7: R-clock, R-rel, W, C, N;
@@ -91,12 +98,12 @@ Placeholders `<…>` are filled from the seeded schedule:
 
 C alternates by seed: 4 C-reply and 3 C-silent.
 
-**Between-episode setup.** After S's window closes and its evidence is archived, the runner:
-- sends `/pulse cancel <id>` for any S wake still active;
-- sends `/pulse on` if the chat is off;
-- checks that the chat is enabled before the next day's first episode.
+**Between-episode setup.** After each episode's window closes and its evidence is archived, the runner:
+- sends `/pulse cancel <id>` for every wake created in that episode that is still active (a delivered watcher, an S wake, or any non-matching wake);
+- after S, also sends `/pulse on` if the chat is off;
+- checks that the chat is enabled before the next episode.
 
-These are logged as setup, never as an episode reply or a void.
+These are logged as setup, never as an episode reply or a void. Leftover wakes therefore never carry into a later episode or toward the active-wake limit.
 
 **Totals:**
 - **26 MUST_ARM episodes, 30 requested wakes:** 8 R, 2 M (6 reminders), 7 W, 7 C and 2 S.
@@ -108,11 +115,12 @@ These are logged as setup, never as an episode reply or a void.
 - **Exactly one** wake created per owner request turn, and it is still `active` when that turn ends.
 - **Note term:** the wake's note contains the task's match term, case-insensitive (W: `DONE`; C and S: `check`). The note term is checked on the wake only, never on the delivered text.
 - **`cancel_on_reply`:** set only on C.
-- **No `deadline`** on W.
+- **W:** no `deadline`, and a stored `check_every` of at most 25 minutes. "Tell me when" asks for a prompt answer, and the 30-minute window must contain one check after the flip.
 - **Time (R, M, C):** due within ±2 minutes of the requested time; R-clock is checked against the clock time.
 - **S:**
   - the wake is `every` with an interval of 55–60 minutes (the plugin may snap 60 minutes to just under the cache lifetime), or an hourly `cron`;
-  - its stored first due time is at or before send + 115 minutes (the agent floor of 55 minutes plus the wait for the next full hour);
+  - its stored first due time is between send + 55 minutes (the agent floor) and send + 115 minutes (the floor plus the wait for the next full hour);
+  - it keeps going: `max_fires` is unset or at least 3, and its expiry is no earlier than its first due time plus two intervals;
   - S is scored against that stored first due, not against send + 60;
   - immediately before the stop, the S wake must still be active, with its next fire due within 2 hours. Otherwise S fails: a wake that ends itself, for example `max_fires: 1`, is not an hourly check-in.
 
@@ -130,7 +138,7 @@ A delivery is a bot message in the DM, matched to a wake turn:
 
 - **B3-1 capture:**
   - at most 1 of 26 MUST_ARM episodes fails to produce its matching wake(s); an M episode fails once if any of its three requests misses;
-  - `owner_requested` is set on all 21 R, M and C matching wakes but at most one.
+  - `owner_requested` is set on at least 20 of the 21 R, M and C matching wakes.
 - **B3-2 precision:** 0 false arms. A false arm is any wake created in an N episode or by a stop message, or any extra wake in a MUST_ARM episode beyond its matching wake(s).
 - **B3-3 delivery:**
   - every armed R, M, C-silent and W, and every S first check-in, produces exactly one delivery (26 of 26 when all arm);
@@ -174,12 +182,17 @@ Rules:
 - Deliberate intervention by the operator never voids an episode.
 - **Re-queueing:**
   - a void episode is re-queued after day 7, as an extra day 8 at most;
+  - **Day 8 is deterministic:**
+    - void episodes run in their original order and keep their filled texts, tasks and minute offsets (R-clock's HH:MM keeps its offset from the send);
+    - sends follow the generation timing rules from 08:30, with gaps drawn from `random.Random("20261014:8")`;
+    - a replacement keeps its episode id with the suffix `-r`;
+    - a replacement that is itself void stays void, with no further replacement;
   - every original attempt and replacement is published with its reason;
   - missing required non-void coverage at the end of day 8 makes the affected bars **INCOMPLETE**, never PASS.
 
-**Aborts.** The run is aborted, reported as ABORTED, and restarted from day 1 when:
-- a frozen setting changes (plugin version, plugin settings, model or plugin set);
-- or a hard bar fails: a B3-5 or B3-6 violation ends the soak as **FAIL**; fix it, release, and restart from day 1.
+**Aborts and hard failures.**
+- **Abort:** a change to a frozen setting (plugin version, plugin entry, model or plugin set) aborts the run. It is reported as **ABORTED** and may be restarted from day 1.
+- **Hard failure:** a B3-5 or B3-6 violation ends the soak. The run is reported as **FAIL**, and stays FAIL even if a fixed release is later soaked in a fresh run.
 
 ## Adjudication
 
