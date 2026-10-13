@@ -85,7 +85,10 @@ def test_todo_fold_on_counted_steer_is_not_a_new_message(engine, platform, mid, 
     api(e, history + [owner])
     assert humans(e) == 1
     api(e, [row, fold(owner, SNAPSHOT + reload)])
-    api(e, [row, fold(fold(owner), SNAPSHOT + reload)])
+    if not tail:
+        # Hermes re-strips a stale snapshot with rstrip(), so a row ending in
+        # whitespace changes; that row may be recounted once, as in v0.1.5.
+        api(e, [row, fold(fold(owner), SNAPSHOT + reload)])
     assert humans(e) == 1
 
 
@@ -106,7 +109,7 @@ def test_restripped_stale_snapshot_is_not_a_new_message(engine, parts):
     # A later boundary strips an older snapshot from a carried row (and rstrips it)
     # while the new snapshot lands elsewhere.
     e = engine
-    owner = fold(owner_row(hermes_origin('earlier request  \n', 'signal'), True, parts))
+    owner = fold(owner_row(hermes_origin('earlier request', 'signal'), True, parts))
     row, history = begin_wake(e, [owner], 'signal')
     api(e, [{**owner, 'content': strip(owner['content'])}, row,
             {'role': 'user', 'content': SNAPSHOT, '_todo_snapshot_synthetic': True}])
@@ -137,9 +140,11 @@ def test_snapshot_text_is_never_owner_text():
     assert not list(origin_rows([{'role': 'user', 'content': 'plain owner text\n\n' + TODO + '\n- ' + quoted}]))
 
 
+@pytest.mark.parametrize('suffix', ['', '  ', '\n', ' quoting ' + TODO + ' inline', '\n' + TODO + ' on its own line'])
 @pytest.mark.parametrize('prefix', ['', 'preamble\n', '  '])
-def test_fingerprint_unchanged_without_snapshot_or_trailing_space(prefix):
-    text = prefix + hermes_origin('steady text', 'signal')
+def test_fingerprint_unchanged_without_a_snapshot(prefix, suffix):
+    # Only a real snapshot block is removed; every other row is fingerprinted byte for byte.
+    text = prefix + hermes_origin('steady text' + suffix, 'signal')
     for content in (text, [{'type': 'text', 'text': text}]):
         (fp, seen), = origin_rows([{'role': 'user', 'content': content}])
         assert seen == text and fp == hashlib.sha256(text.encode()).hexdigest()[:16]
@@ -162,3 +167,35 @@ def test_carrier_holding_a_snapshot_stays_skipped(metadata):
     if metadata:
         carrier['_compressed_summary'] = True
     assert not list(origin_rows([carrier]))
+
+
+def merge_users(first, second):
+    """agent_runtime_helpers._merge_consecutive_users: plain-text user rows joined by a blank line."""
+    return {**first, 'content': first['content'] + '\n\n' + second['content']}
+
+
+@pytest.mark.parametrize('wrapped', [False, True], ids=['origin', 'steer'])
+def test_owner_row_merged_after_a_snapshot_still_counts(engine, wrapped):
+    # Hermes' pre-call repair can append a new owner row after a folded snapshot.
+    e = engine
+    row, history = begin_wake(e, [], 'signal')
+    first = {'role': 'user', 'content': hermes_origin('please check the deploy', 'signal')}
+    api(e, history + [first])
+    folded = fold(first, SNAPSHOT + RELOAD)
+    api(e, [row, folded])
+    second = owner_row(hermes_origin('and roll back if red', 'signal'), wrapped, False)
+    api(e, [row, merge_users(folded, second)])
+    assert humans(e) == 2
+    assert e.intake.flights['sid'].owner_replied
+
+
+@pytest.mark.parametrize('first,second', [(' ' + TODO + ' one', ' ' + TODO + ' two'), (' ', '\n'), ('', '  ')],
+                         ids=['quoted-header', 'whitespace', 'trailing-space'])
+def test_new_message_that_differs_only_after_a_quote_or_in_space_counts(engine, first, second):
+    # The earlier message has left history (summarised), so only distinct fingerprints count it.
+    e = engine
+    row, history = begin_wake(e, [], 'signal')
+    api(e, history + [{'role': 'user', 'content': hermes_origin('shared prefix' + first, 'signal')}])
+    carrier = {'role': 'user', 'content': 'summary --- END OF CONTEXT SUMMARY', '_compressed_summary': True}
+    api(e, [carrier, row, {'role': 'user', 'content': hermes_origin('shared prefix' + second, 'signal')}])
+    assert humans(e) == 2
