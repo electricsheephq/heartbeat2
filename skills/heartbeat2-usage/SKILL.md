@@ -67,7 +67,10 @@ Paced PR CI polling with explicit bounds and a configured read-only command:
 {"action":"create","title":"PR 123 CI","note":"Check the changed CI result for PR 123 and say whether the required checks passed or failed.","trigger":{"kind":"command","command":["gh","pr","checks","123","--repo","example/project","--json","name,state"],"fire_on":"change","check_every":"5m","deadline":"in 2h"},"until":{"expires":"in 3h","max_fires":8}}
 ```
 
-The first successful command result is a silent baseline; `change` fires only
+Run the same check yourself before arming. If CI has already finished, tell the
+owner the result now instead of arming: the first successful command result is a
+silent baseline, so a `change` watcher armed after the final state never fires.
+Arm it only while checks are still pending; `change` fires only
 when a later successful result differs. Nonzero exits are errors in `change`/`json` mode. Use `failure` for a
 command whose failure exit is the intended signal; CLI exit conventions differ.
 A configured JSON observer may print exactly `{"fire":bool,"message":str,
