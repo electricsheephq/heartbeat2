@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.10 — 2026-10-13
+
+- Owner messages are recognised by Hermes' own row id (`message_uid`) instead of by their text (#16). Before, when Hermes rewrote history inside a turn (compaction, merged consecutive messages, task-list snapshots), heartbeat2 could count an old owner message again. That reset the unanswered mute, cancelled owner-reply wakes and suppressed the silence check-in. It could also miss a new message that repeated an earlier one word for word. A row that Hermes has not stored yet (the current message, a fresh steer) keeps the text match until Hermes assigns its id. Platforms without platform message ids, such as Signal and SimpleX, benefit most.
+
 ## 0.1.9 — 2026-10-13
 
 - A watcher you ask the agent to set up with `/pulse watch` stays yours. When the agent turns your paused wake into a watcher (a new trigger or schedule only), the unanswered mute no longer holds it. Before, the conversion counted as an agent edit, so your watcher waited for a reply you had no reason to send.
