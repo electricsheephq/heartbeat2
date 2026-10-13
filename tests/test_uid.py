@@ -262,3 +262,81 @@ def test_rewrite_and_new_uid_row_with_the_old_text_in_one_request(engine, rewrit
     for _ in range(2):
         api(e, [legacy, owner('old', 'fresh')])
         assert humans(e) == before + expected
+
+
+PAIR_OPS = ['keep', 'adopt-rebuilt', 'adopt-in-place', 'wake', 'append-twin', 'append-new', 'drop',
+            'adopt-in-place-and-append']
+
+
+def pair_cases():
+    for twins in (True, False):
+        for op_a in PAIR_OPS:
+            for op_b in PAIR_OPS:
+                for fresh in ('none', 'uid-twin', 'uid-new', 'uidless-twin', 'uidless-new'):
+                    for reverse in (False, True):
+                        yield twins, op_a, op_b, fresh, reverse
+
+
+def run_pair_case(e, twins, op_a, op_b, fresh, reverse):
+    """Counts for one case: (expected, [first hook, repeated hook, after every row is stamped]) or None if ambiguous."""
+    c = f'{twins}-{op_a}-{op_b}-{fresh}-{reverse}'
+    text = {'A': f'{c}-same' if twins else f'{c}-a', 'B': f'{c}-same' if twins else f'{c}-b'}
+    rows = {'A': owner(text['A']), 'B': owner(text['B'])}
+    turn = f'pairs-{c}'
+    anchor(e, list(rows.values()), turn)
+    history, expected, introduced = [], 0, []
+    for name, op in (('A', op_a), ('B', op_b)):
+        row = rows[name]
+        if op == 'drop':
+            continue
+        if op == 'adopt-rebuilt':
+            row = dict(row, message_uid=f'{c}-{name}')
+        if op in ('adopt-in-place', 'adopt-in-place-and-append'):
+            row['message_uid'] = f'{c}-{name}'
+        if op == 'wake':
+            row['content'] += '\n\ninternal wake text'
+        if op == 'append-twin':
+            row['content'] += '\n\n' + owner(text['A'])['content']
+            expected += 1
+            introduced.append(text['A'])
+        if op in ('append-new', 'adopt-in-place-and-append'):
+            row['content'] += '\n\n' + owner(f'{c}-{name}-new')['content']
+            expected += 1
+        history.append(row)
+    if fresh != 'none':
+        body = text['A'] if fresh.endswith('twin') else f'{c}-fresh'
+        history.append(owner(body, f'{c}-fresh' if fresh.startswith('uid-') else None))
+        expected += 1
+        introduced.append(body)
+    # Without a uid, a dropped legacy row and a new block with its text are indistinguishable.
+    if {text[n] for n, op in (('A', op_a), ('B', op_b)) if op == 'drop'} & set(introduced):
+        return None
+    if reverse:
+        history.reverse()
+    before = humans(e)
+    observed = []
+    for _ in range(2):
+        api(e, history, turn)
+        observed.append(humans(e) - before)
+    for row in history:
+        row.setdefault('message_uid', f'{c}-stamped-{id(row)}')
+    api(e, history, turn)
+    observed.append(humans(e) - before)
+    return expected, observed
+
+
+def test_two_row_operation_pairs_count_each_new_block_once(engine):
+    """Every pair of same-request operations on two accounted uid-less rows, plus an optional fresh row:
+    each new owner block counts once on the first hook, and never again (repeat hook, later uid stamping)."""
+    wrong = []
+    checked = 0
+    for case in pair_cases():
+        result = run_pair_case(engine, *case)
+        if result is None:
+            continue
+        checked += 1
+        expected, observed = result
+        if observed != [expected] * 3:
+            wrong.append((case, expected, observed))
+    assert checked > 1000
+    assert not wrong, (len(wrong), wrong[:12])
