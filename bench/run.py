@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 
+import math
 import os
 from .baseline.heartbeat1 import LABEL
 from .sim.metrics import percentile, latency_samples, TOKEN_KEYS
@@ -20,7 +21,14 @@ CLAIM='deterministic simulation on this suite (advisory); not live gateway deliv
 
 def runtime_budget():
     """Seconds the engine arm may take; shared CI runners are several times slower than a workstation."""
-    return float(os.environ.get('HEARTBEAT2_BENCH_RUNTIME_BUDGET_S', '30'))
+    raw = os.environ.get('HEARTBEAT2_BENCH_RUNTIME_BUDGET_S', '30')
+    try:
+        budget = float(raw)
+    except ValueError:
+        budget = math.nan
+    if not math.isfinite(budget) or budget <= 0:
+        raise SystemExit(f'HEARTBEAT2_BENCH_RUNTIME_BUDGET_S must be a positive number of seconds, got {raw!r}')
+    return budget
 
 def load_scenarios(selected=None):
     # PyYAML is a development/test dependency, never a runtime plugin dependency.
@@ -69,7 +77,7 @@ def markdown(report):
            'Baseline: **'+LABEL+'**. Its numbers are never measurements of OpenClaw.', '',
            f'Source HEAD: `{report["source"]["head"]}`; dirty working copy: `{report["source"]["dirty"]}`. Engine content digest: `{report["source"]["engine_digest"]}`.', '',
            'Latency samples cover fires that happened. Lateness excludes observed designed gate deferrals; deferred_s reports those separately. Open ticks have 15 s resolution. Missing fires have no latency sample.', '',
-           f'B1 runtime: **{report["engine_runtime_s"]:.3f} s**; all requested arms including baseline: **{report["runtime_s"]:.3f} s**.', '',
+           f'B1 runtime: **{report["engine_runtime_s"]:.3f} s** (budget {report.get("runtime_budget_s",30):g} s); all requested arms including baseline: **{report["runtime_s"]:.3f} s**.', '',
            'Message attempts include failed sends; resent_messages counts retries of existing output, without a new model turn. Accepted but lost sends are not retried.', '',
            'est_tokens is total input (calls × context), also reported as est_input_tokens; cache reads + writes partition that input. Output is separate. Both arms use identical scenario assumptions.', '',
            '| Scenario | HeartBeat 2.0 bars | Naive emulator bars (reported only) | Model wakes HB2 / naive | Wake messages HB2 / naive | Message attempts HB2 / naive | Resent messages HB2 / naive | Est. input tokens HB2 / naive |',
@@ -123,9 +131,10 @@ def main(argv=None):
         if path.is_file() and path.suffix in {'.py','.yaml'}:
             bench_digest.update(str(path.relative_to(ROOT)).encode());bench_digest.update(path.read_bytes())
     failures=[f'{row["id"]}: {failure}' for row in results for failure in row['heartbeat2']['failures']]
-    if engine_time>=runtime_budget():failures.append(f'B1 runtime_s={engine_time:.3f} (required <{runtime_budget():g})')
+    budget=runtime_budget()
+    if engine_time>=budget:failures.append(f'B1 runtime_s={engine_time:.3f} (required <{budget:g})')
     report={'claim_class':CLAIM,'baseline_label':LABEL,'source':{'head':head,'dirty':dirty,'engine_digest':digest.hexdigest(),'bench_digest':bench_digest.hexdigest()},
-            'runtime_s':time.perf_counter()-started,'engine_runtime_s':engine_time,'scenarios':results,
+            'runtime_s':time.perf_counter()-started,'engine_runtime_s':engine_time,'runtime_budget_s':budget,'scenarios':results,
             'totals':{'heartbeat2':totals(results,'heartbeat2'),'baseline':totals(results,'baseline')},'failures':failures}
     args.out.mkdir(parents=True,exist_ok=True)
     path=args.out/(datetime.now(timezone.utc).strftime('%Y%m%d')+'-'+head[:7])
