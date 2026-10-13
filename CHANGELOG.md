@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.14 — 2026-10-14
+
+- **The agent can tell you when a wake will really arrive (#56).** Arming, updating or resuming a wake now returns a one-line `receipt`. It covers when the wake fires; whether quiet hours will hold it and until when; whether the unanswered mute will hold or drop it; the spacing between wakes; when it expires; and whether a reply cancels it. The bundled skill tells the agent to repeat the receipt instead of promising its own timing. A proposed wake reads "awaiting /pulse ok", never "armed". `/pulse add`, `/pulse ok` and `/pulse resume` print the same line. Before, an agent could say "fires in 3 minutes" for a reminder that quiet hours would hold until 08:00.
+- **A wake that could never fire is refused (#56).** A reminder due after its own expiry was accepted, then expired silently. For example, "in 30 days" against the 14-day maximum. This also covers a one-time wake that quiet hours would hold past its expiry, and a watcher deadline after expiry. An expiry you or the agent set explicitly is kept, and an impossible request is refused with a clear reason. A default lifetime stretches to fit, up to your maximum.
+- Resuming a paused wake keeps its stored deadline instead of re-reading a relative one ("in 2h") from the moment of resume, the same rule v0.1.11 applied to updates.
+
 ## 0.1.13 — 2026-10-14
 
 - **A reminder you ask for in chat fires like your own (#55).** When you said "remind me at 4" in chat, the agent armed the reminder as its own follow-up, so after two unanswered messages, or at a daily cap, it was dropped. Only `/pulse add` reminders were safe. Now a one-time reminder the agent arms because you asked in your current message (it marks the call `owner_asked`) bypasses the unanswered mute and both daily caps. HeartBeat 2.0 checks that the turn really carries your message; a reminder the agent sets on its own, or arms from a wake turn, keeps the agent's limits. A later agent edit or resume without a new request from you removes the exemption. Quiet hours, spacing and expiry still apply.

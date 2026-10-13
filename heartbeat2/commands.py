@@ -52,7 +52,8 @@ def resume_timed(engine):
         except (ValueError, TypeError, KeyError):
             continue
         if engine.store.cas_wake(wake.id, 'paused', expected_version=wake.version,
-            status='active', status_reason='', next_due_at=candidate.next_due_at):
+            status='active', status_reason='', **{name:getattr(candidate,name) for name in
+                ('next_due_at','deadline_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s','expires_at','max_fires','trigger_json')}):
             engine.store.set_meta('resume_after:'+wake.id, '')
 
 
@@ -121,7 +122,7 @@ def _add(engine, session, text):
     _activation(engine,session,wake)
     result = engine.tool.prepare(wake, {'trigger':trigger})
     created = engine.store.create_wake(result.wake)
-    return _item(engine, created)+_clamps(result.clamped)+'\n'+engine.tool.cache_result(created)
+    return _item(engine, created)+_clamps(result.clamped)+'\n'+engine.tool.cache_result(created)+'\n'+engine.tool.receipt(created,session)
 
 
 def _clamps(clamped):
@@ -276,5 +277,6 @@ def _transition(engine,session,wake,action,seconds):
     if changes['status'] in {'paused','cancelled'}: engine.cancel_occurrences(wake.id,changes['status'])
     engine.store.set_meta('card:'+wake.id,'')
     output=_item(engine,engine.store.get_wake(wake.id))+_clamps(clamps)
+    if action in {'ok','resume'}: output+='\n'+engine.tool.receipt(engine.store.get_wake(wake.id),session)
     if action=='watch': output+='\nPaused. Ask your agent to turn it into a watcher (pulse update with a file, process, url or command trigger).'
     return output

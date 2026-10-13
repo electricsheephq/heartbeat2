@@ -133,6 +133,8 @@ pulse tool results name the ignored setting.
 - prefer a watcher to a timer whenever a deterministic check can tell "changed";
 - answer every wake with `respond`: `outcome` (no_change · progress · done · blocked · needs_attention), `notify`, a one-line `summary`, and optionally `next_check` and `scratch` notes for its next wake.
 
+Every arm returns a receipt with timing, any quiet-hour hold or unanswered mute, and expiry. The agent relays that receipt instead of promising exact timing; a proposed wake is awaiting your OK.
+
 Watchers available to the agent:
 
 | Watcher | Fires when |
@@ -194,6 +196,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 Every guardrail is configurable:
 - Recurring timers repeat at most every 15 minutes, or every 55 minutes when the agent arms one without a watcher. Watchers check at most once a minute.
 - Every wake expires after 14 days at most.
+- A wake that could not fire before it expires is refused; an implicit lifetime stretches to fit, up to the maximum.
 - Daily caps hold watchers until capacity frees, including on a new local day; your unedited one-shot reminders, including one-time reminders you ask for in chat, bypass both caps.
 - After 2 unanswered messages, agent watchers hold until you write; other agent timers and built-in check-ins drop their occurrence. Wakes you armed, and one-time reminders you ask for in chat (the agent marks them `owner_asked`), still fire unless the agent edited their trigger, timing or note; a watcher-only conversion you requested with `/pulse watch` keeps owner status. Held matches merge, keeping the latest payload; pauses preserve them and expiry is visible in `/pulse why`.
 - A wake turn that carries untrusted data, such as a log line or a web page, cannot arm new recurring work.
