@@ -41,7 +41,7 @@ def test_readonly_transcript_and_pulse(tmp_path, clock):
                 ('s', 'user', 'next', 120, None, None, None, '18')]
         con.executemany('INSERT INTO messages (session_id,role,content,timestamp,tool_calls,tool_name,tool_call_id,platform_message_id) VALUES (?,?,?,?,?,?,?,?)', rows)
     transcript = Transcript(state, now=lambda: 115)
-    assert transcript.owner('s', 17)['timestamp'] == 100
+    assert transcript.owner('s', 'request',100)['timestamp'] == 100
     assert len(transcript.turn('s', 100)) == 3
     assert transcript.pulse_results('s', 100) == [{'args': {'action': 'create'}, 'result': {'error': 'refused', 'receipt': {'due': 200}}}]
     assert transcript.turn_done('s', 100)

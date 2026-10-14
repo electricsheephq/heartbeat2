@@ -20,7 +20,7 @@ The bars below are frozen once this file merges. The soak code that runs them co
   - the profile's normal model; the model and provider are recorded at the start.
 - **Frozen during the soak:** the plugin version, the plugin's entry (settings and `allow_gateway_injection`), the model, the gateway's plugin set, and the Hermes version and commit. A change aborts the run (see Voids).
 - **Baseline before day 1** (logged as setup):
-  - send `/new` in the DM, verify that it starts a fresh Hermes session, and archive and hash the starting transcript;
+  - send `/new`, verify its confirmation prompt, send `/approve` once, verify the fresh DM session from Hermes state, and archive and hash the old session transcript; never send `always`;
   - the chat is enabled;
   - no non-built-in wake is active, proposed or paused (any found is cancelled with `/pulse cancel <id>`);
   - run `/pulse quiet default` and record the effective quiet window; it must be 22:00–08:00 or setup fails;
@@ -29,6 +29,7 @@ The bars below are frozen once this file merges. The soak code that runs them co
 
   Any check that fails after cleanup stops the start.
 - **Scripted owner:** a runner sends from the owner's Telegram account through a user client, so the gateway sees ordinary owner messages.
+- **Timezone:** both the registered schedule and the plugin's resolved timezone must be Asia/Tokyo; setup fails closed otherwise.
 - **Hours:** the first send is at 08:30 or later, every due time is at 21:30 or earlier, and every episode window closes by 21:45 (profile timezone). No episode crosses quiet hours (default 22:00–08:00).
 - **Schedule:** deterministic from the registered seed **20261014**.
   - The generator is code committed to this repository and reviewed before day 1. The run declaration records the generator's commit, the seed, the first day's date and the schedule's SHA-256. The scorer regenerates the schedule and refuses a mismatch.
@@ -67,7 +68,7 @@ It also archives:
 - **Arming turns:**
   - for every owner turn, the turn's `pulse` calls and results from the profile's own transcript store, including refused calls, `error`, and `receipt`;
   - a snapshot of the plugin's wakes when the turn ends.
-- **Gate state:** before each tested dispatch, the session's stored unanswered count, the wake's status and its next due time. For M's third reminder this is read at least 30 s before its due time, with no owner message after.
+- **Gate state:** before each tested dispatch, the session's stored unanswered count, the wake's status and its next due time. For M's third reminder plan the read at due − 45 s; refuse a read later than due − 30 s (INCOMPLETE), with no owner message after the gate through the due time.
 - **Watcher baseline:** for W, the watcher's first probe time (its baseline) before the flip.
 - **Restarts and configuration:** gateway start records and hashes of the plugin settings, plugin version, model and plugin set at each episode start. These are recorded independently of any outcome.
 
@@ -105,11 +106,12 @@ Placeholders `<…>` are filled from the seeded schedule:
 C alternates by seed: 4 C-reply and 3 C-silent.
 
 **Between-episode setup.** After each episode's window closes and its evidence is archived, the runner:
-- sends `/pulse cancel <id>` for every wake created in that episode that is still active (a delivered watcher, an S wake, or any non-matching wake);
+- sends `/pulse cancel <id>` for every wake created in that episode that is active, proposed or paused and non-built-in, including wakes created inside wake turns (a delivered watcher, an S wake, or any non-matching wake);
+- confirmation of each setup command requires its transport reply and read-only state (cancelled wake, enabled chat, or effective default quiet window); slash commands have no transcript turn; waits are bounded and mismatches stop setup;
 - after S, also sends `/pulse on` if the chat is off;
 - checks that the chat is enabled before the next episode.
 
-These are logged as setup, never as an episode reply or a void. Leftover wakes therefore never carry into a later episode or toward the active-wake limit.
+These are logged as setup, never as an episode reply or a void. An episode's close time locks when cleanup starts. A late delivery remains attributed to that episode, but never reopens it or causes a stop, flip or thanks. Leftover wakes therefore never carry into a later episode or toward the active-wake limit.
 
 **Totals:**
 - **26 MUST_ARM episodes, 30 requested wakes:** 8 R, 2 M (6 reminders), 7 W, 7 C and 2 S.
@@ -124,16 +126,19 @@ These are logged as setup, never as an episode reply or a void. Leftover wakes t
 - **W:** no `deadline`, and a stored `check_every` of at most 25 minutes. "Tell me when" asks for a prompt answer, and the 30-minute window must contain one check after the flip.
 - **Time (R, M, C):** due within ±2 minutes of the requested time; R-clock is checked against the clock time.
 - **S:**
-  - the wake is `every` with an interval of 55–60 minutes (the plugin may snap 60 minutes to just under the cache lifetime), or an hourly `cron`;
+  - the wake is `every` with an interval of 55–60 minutes (the plugin may snap 60 minutes to just under the cache lifetime), or a `cron` with one fixed minute, wildcard day/month/weekday fields, and fires 60 minutes apart throughout the S observation window;
   - its stored first due time is between send + 55 minutes (the agent floor) and send + 115 minutes (the floor plus the wait for the next full hour);
   - it keeps going: `max_fires` is unset or at least 3, and its expiry is no earlier than its first due time plus two intervals;
   - S is scored against that stored first due, not against send + 60;
-  - immediately before the stop, the S wake must still be active, with its next fire due within 2 hours. Otherwise S fails: a wake that ends itself, for example `max_fires: 1`, is not an hourly check-in.
+  - immediately before the stop, the S wake must still be active, with its next fire due within 2 hours. Otherwise S has a B3-1 matching miss, not a hard B3-5 failure: a wake that ends itself, for example `max_fires: 1`, is not an hourly check-in.
 
 ## Attribution and timing
 
 A delivery is a bot message in the DM, matched to a wake turn:
-- **Matching:** its Telegram message id and final text are matched to that turn's recorded output. Occurrence start and end times only narrow the candidates.
+- **Owner turn:** match exact owner text after whitespace normalization in the current Hermes DM session, with timestamp in [send − 5 s, send + 120 s]; transport and transcript message ids are different namespaces. The turn ends at the next user row, including a pulse wake.
+- **Arming reply:** match every non-empty assistant text to transport replies after the send, before the next owner send or wake delivery.
+- **Matching delivery:** require an exact `⟦pulse o:<wake_id>/` marker and the contiguous wake turn's final non-empty assistant text inside [started_at, ended_at], equal to transport text dated inside [started_at − 5 s, ended_at + 60 s]. Deployed marker timestamps may precede started_at by a fraction of a second; allow at most 5 s for that marker only.
+- **Display normalization:** strip `**`, `__`, backticks, code fences and `~~`; convert `[t](u)` to `t`; collapse whitespace. Equality is required, never a prefix or suffix match. Blank transport text stays unresolved.
 - **Excluded:** ordinary replies to owner messages (arming replies, acknowledgements).
 - **Late, duplicate, or after cancel/stop:** a message from a wake counts against its episode, even outside the episode's window.
 - **Unresolved:** a message that cannot be attributed is listed, and makes B3-3 and B3-5 **INCOMPLETE** if it could belong to an episode under test.
@@ -143,7 +148,7 @@ A delivery is a bot message in the DM, matched to a wake turn:
 ## Bars (all must hold)
 
 - **B3-1 capture:**
-  - a W with no recorded baseline by its seeded flip + 30 min is a capture failure, never a void;
+  - a W with no recorded baseline by its seeded flip + 30 min is a capture failure, never a void; with no flip it is excluded from B3-3 and B3-8;
   - at most 1 of 26 MUST_ARM episodes fails to produce its matching wake(s); an M episode fails once if any of its three requests misses;
   - `owner_requested` is set on at least 20 of the 21 R, M and C matching wakes.
 - **B3-2 precision:** 0 false arms. A false arm is any wake created in an N episode or by a stop message, or any extra wake in a MUST_ARM episode beyond its matching wake(s).
@@ -183,10 +188,11 @@ A delivery is a bot message in the DM, matched to a wake turn:
 - a send or read failure of the user client;
 - a Telegram or network outage of 5 minutes or more;
 - an M arming turn is still running 5 min after its send (void and requeue the M episode; do not send its remaining requests);
+- an episode's scheduled first send passed by more than 2 minutes while the runner was down or started late (do not send it late; requeue it);
 - the runner process stopped while the window was open (a crash or host restart, recorded by the runner's own start line on resume), so a scheduled action may have been missed.
 
 Rules:
-- **An observed bar violation is irreversible.** A later void event in the same window cannot erase it.
+- **An observed bar violation is irreversible.** A later void event in the same window cannot erase it. For a void episode, count only violations observed strictly before its first void; a void-caused missing delivery is not a violation.
 - Deliberate intervention by the operator never voids an episode.
 - **Re-queueing:**
   - a void episode is re-queued after day 7, as an extra day 8 at most;
@@ -195,7 +201,7 @@ Rules:
     - sends follow the generation timing rules from 08:30, with gaps drawn from `random.Random("20261014:8")`, one `randint(5, 30)` after each accepted replacement except the last; no placeholder draws;
     - a replacement keeps its episode id with the suffix `-r`;
     - a replacement that is itself void stays void, with no further replacement;
-  - at most 5 cap-consuming deliveries (W and S) run on day 8; accept replacements in original order, leaving excess cap-consuming replacements INCOMPLETE and unrun;
+  - day 8 budgets every expected delivery of every kind against `max_messages_per_day` (default 6); accept replacements in original order, leaving excess replacements INCOMPLETE and unrun;
   - every original attempt and replacement is published with its reason;
   - missing required non-void coverage at the end of day 8 makes the affected bars **INCOMPLETE**, never PASS.
 
@@ -225,3 +231,7 @@ Rules:
 9. **2026-10-14 (runner PR): Serialized M turns.** Wait for the previous arming turn, then one minute. A turn still running at send + 5 min voids and requeues M.
 10. **2026-10-14 (runner PR): C snapshot.** Score cancellation immediately after the reply turn ends, before cleanup.
 11. **2026-10-14 (runner PR): Hermes freeze.** Record Hermes version and commit with frozen hashes; a change aborts the soak (ABORTED, exit 3).
+12. **2026-10-14 (runner PR): Deployed evidence.** Distinct id spaces, exact display-normalized texts, contiguous marker-anchored wake turns, fractional marker/start skew, command replies plus read-only state, and bounded per-chat cursor reads with edit overlap.
+13. **2026-10-14 (runner PR): Timing and void ordering.** Due − 45 s gate scheduling with the due − 30 s deadline, latched cleanup, late-start void/requeue, and only pre-void violations. M acknowledgements follow request:2 occurrences.
+14. **2026-10-14 (runner PR): Scoring scope.** B3-5 covers the matching S wake only; before-stop recurrence belongs to B3-1; no-baseline W has capture-only scoring; B3-7 set claims cover arming replies only; hourly cron covers the observation window.
+15. **2026-10-14 (runner PR): Setup and cap tightening.** Amendments 5–8 now require the plugin's total daily delivery cap, explicit /new confirmation via /approve and Hermes session proof, all non-terminal episode wakes cancelled, and matching Tokyo timezones. No scoring bar is relaxed.

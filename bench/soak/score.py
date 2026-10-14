@@ -6,8 +6,8 @@ from pathlib import Path
 import re
 from bench.live.round3 import set_claim
 from heartbeat2.schedule import parse_duration
-from .evidence import decoded
-from .schedule import build, canonical, digest
+from .evidence import decoded, display
+from .schedule import build, canonical, digest, smoke_schedule
 
 
 def epoch(t):
@@ -15,12 +15,12 @@ def epoch(t):
 
 
 def norm(text):
-    return ' '.join((text or '').split())
+    return display(text)
 
 
 def text_matches(text, output):
     a, b = norm(text), norm(output)
-    return bool(a and b and (a == b or b.startswith(a) or b.endswith(a)))
+    return bool(a and b and a == b)
 
 
 def created(turn):
@@ -42,7 +42,17 @@ def matching(wake, e, n=0, path=None):
                     'deadline' not in trigger and 0 < parse_duration(trigger['check_every']) <= 1500 and bool(re.search(trigger['pattern'], 'DONE')) and not re.search(trigger['pattern'], 'RUNNING'))
         if k == 'S':
             from croniter import croniter
-            hourly = wake['kind'] == 'cron' and croniter.expand(trigger['cron'])[0] == [[0], ['*'], ['*'], ['*'], ['*']]
+            hourly = False
+            if wake['kind'] == 'cron':
+                fields = trigger['cron'].split()
+                expanded = croniter.expand(trigger['cron'])[0]
+                from zoneinfo import ZoneInfo
+                cursor = croniter(trigger['cron'], datetime.fromtimestamp(sent, ZoneInfo(e.get('tz', 'Asia/Tokyo'))))
+                fires = [cursor.get_next(float)]
+                while fires[-1] < sent+14700: fires.append(cursor.get_next(float))
+                hourly = (len(fields) == 5 and re.fullmatch(r'[0-5]?\d', fields[0]) is not None and
+                          len(expanded[0]) == 1 and len(fires) >= 2 and fires[0] <= sent+3600 and fields[2:] == ['*', '*', '*'] and
+                          all(b-a == 3600 for a,b in zip(fires, fires[1:])))
             interval = 3600 if hourly else wake.get('eff_interval_s')
             due = wake['next_due_at']
             return ((hourly or wake['kind'] == 'every' and interval is not None and 3300 <= interval <= 3600) and
@@ -52,55 +62,103 @@ def matching(wake, e, n=0, path=None):
     return False
 
 
+def correlate(rows):
+    """Sweep time windows once; compare only exact display text in active windows."""
+    from bisect import bisect_left, bisect_right
+    from heapq import heappush, heappop
+    messages = {r['message']['id']: r['message'] for r in rows if r['kind'] == 'dm'}
+    wakes = list({r.get('key', str((r['occurrence']['wake_id'], r['occurrence'].get('dedupe_key')))): r
+                  for r in rows if r['kind'] == 'wake_turn'}.values())
+    dates_by_text = {}
+    for m in messages.values():
+        if not m['out']: dates_by_text.setdefault(norm(m['text']), []).append(epoch(m['date']))
+    for dates in dates_by_text.values(): dates.sort()
+    wake_deliveries = set()
+    for t in wakes:
+        o = t['occurrence']; dates = dates_by_text.get(norm(t['final_text']), [])
+        i = bisect_left(dates,o['started_at']-5)
+        if o.get('delivered') and i < len(dates) and dates[i] <= o['ended_at']+60: wake_deliveries.add(dates[i])
+    boundaries = sorted({epoch(r['message']['date']) for r in rows if r['kind'] == 'send'} |
+                        {epoch(m['date']) for m in messages.values() if m['out']} |
+                        wake_deliveries)
+    events, replies = [], {}
+    for i,t in enumerate(r for r in rows if r['kind'] == 'turn' and r.get('owner')):
+        start = t.get('sent_at', t['owner']['timestamp'])
+        next_i = bisect_right(boundaries, start)
+        end = boundaries[next_i] if next_i < len(boundaries) else float('inf')
+        texts = {norm(r.get('content')) for r in t.get('rows', []) if r['role'] == 'assistant' and r.get('content')}
+        for text in texts: events.append((start, end, text, 'a', i, t))
+    for i,t in enumerate(wakes):
+        o = t['occurrence']; text = norm(t['final_text'])
+        if o.get('delivered') and text: events.append((o['started_at']-5, o['ended_at']+60, text, 'd', i, t))
+    events.sort(key=lambda x:x[0]); active, expiries, cursor = {}, [], 0
+    commands = {m['id'] for r in rows if r['kind'] == 'command_reply' for m in r['replies']}
+    deliveries, unresolved = [], []
+    for m in sorted(messages.values(), key=lambda m:epoch(m['date'])):
+        if m['out'] or m['id'] in commands: continue
+        at = epoch(m['date'])
+        while cursor < len(events) and events[cursor][0] <= at:
+            _, end, text, kind, i, t = events[cursor]; token = (kind,i)
+            active.setdefault(text, {})[token] = t
+            heappush(expiries, (end, cursor, text, token)); cursor += 1
+        while expiries and expiries[0][0] < at:
+            _, _, text, token = heappop(expiries); active[text].pop(token, None)
+        candidates = active.get(norm(m['text']), {}) if norm(m['text']) else {}
+        arms = [t for (kind,_),t in candidates.items() if kind == 'a' and
+                at < (boundaries[bisect_right(boundaries,t.get('sent_at',t['owner']['timestamp']))] if bisect_right(boundaries,t.get('sent_at',t['owner']['timestamp'])) < len(boundaries) else float('inf'))]
+        ds = [t for (kind,_),t in candidates.items() if kind == 'd']
+        if len(arms) == 1 and not ds:
+            t = arms[0]; replies.setdefault((t['episode'],t['key']), []).append(m); continue
+        if len(ds) != 1 or arms:
+            unresolved.append(dict(message=m, candidates=[t.get('key') for t in ds])); continue
+        t = ds[0]
+        deliveries.append(dict(message=m, wake_id=t['occurrence']['wake_id'], occurrence=t['occurrence'],
+                               final_text=t['final_text'], rows=t.get('rows'), visible_at=epoch(m.get('edit_date') or m['date']),
+                               text_unreadable=False))
+    return deliveries, unresolved, replies
+
+
 def arming_message(turn, message, turns):
-    if message['out'] or not turn.get('owner') or not turn.get('rows'): return False
-    start = turn['owner']['timestamp']
-    following = [t['owner']['timestamp'] for t in turns if t.get('owner') and t['owner']['timestamp'] > start]
-    end = min([turn['rows'][-1]['timestamp']+60] + following)
-    identity = any(str(r.get('platform_message_id')) == str(message['id']) for r in turn['rows'])
-    return start <= epoch(message['date']) < end and (identity or text_matches(message['text'], turn['final_text']))
+    # Compatibility helper; bulk callers use the single sweep above.
+    rows = turns + [dict(kind='dm',message=message)]
+    return message in correlate(rows)[2].get((turn['episode'],turn['key']), [])
 
 
 def attribute(rows):
-    messages = {r['message']['id']: r['message'] for r in rows if r['kind'] == 'dm'}
-    turns = list({r.get('key', str((r['occurrence']['wake_id'], r['occurrence'].get('dedupe_key')))): r for r in rows if r['kind'] == 'wake_turn'}.values())
-    turns = [r for r in turns if r['occurrence'].get('delivered')]
-    owner_turns = [r for r in rows if r['kind'] == 'turn']
-    deliveries, unresolved = [], []
-    for m in messages.values():
-        if m['out']: continue
-        at = epoch(m['date'])
-        if any(arming_message(t, m, owner_turns) for t in owner_turns): continue
-        candidates = [t for t in turns if t['occurrence']['started_at']-60 <= at <= t['occurrence']['ended_at']+60 and
-                      (text_matches(m['text'], t['final_text']) or not m['text'] and not m.get('media'))]
-        if len(candidates) != 1:
-            unresolved.append(dict(message=m, candidates=[t.get('key') for t in candidates])); continue
-        t = candidates[0]
-        deliveries.append(dict(message=m, wake_id=t['occurrence']['wake_id'], occurrence=t['occurrence'],
-                               final_text=t['final_text'], rows=t.get('rows'), visible_at=epoch(m.get('edit_date') or m['date']),
-                               text_unreadable=not bool(m['text'])))
-    return deliveries, unresolved
+    return correlate(rows)[:2]
 
 
-def hard_failure(rows):
-    deliveries, _ = attribute(rows)
+def before_void(logs, at):
+    void = min((epoch(r['t']) for r in logs if r['kind'] == 'void'), default=float('inf'))
+    return epoch(at) < void
+
+
+def hard_failure(rows, deliveries=None):
+    deliveries = attribute(rows)[0] if deliveries is None else deliveries
+    logs_by_episode, by_wake, holds = {}, {}, {}
+    for d in deliveries: by_wake.setdefault(d['wake_id'], []).append(d)
+    for r in rows:
+        logs_by_episode.setdefault(r.get('episode'), []).append(r)
+        for o in r.get('snapshot', {}).get('occurrences', []):
+            if o.get('held_reason') in ('unanswered','held_unanswered') or o.get('error') in ('unanswered','held_unanswered'):
+                holds.setdefault(o['wake_id'], r['t'])
     for start in (r for r in rows if r['kind'] == 'episode_start'):
-        e, eid = start['schedule'], start['episode']
-        turns = [r for r in rows if r['kind'] in ('turn', 'partial_arming') and r['episode'] == eid and r['key'].startswith('request:')]
-        ids = {w['id'] for t in turns for w in created(t)}
+        e, eid = start['schedule'], start['episode']; logs = logs_by_episode[eid]
+        turns = [r for r in logs if r['kind'] in ('turn','partial_arming') and r['key'].startswith('request:')]
+        ids = {w['id'] for t in turns for w in created(t) if e['kind'] != 'S' or matching(w,e)}
         if e['kind'] == 'S':
-            stops = [r for r in rows if r['kind'] == 'send' and r['episode'] == eid and r['key'] == 'stop']
-            if stops and any(d['wake_id'] in ids and d['visible_at'] > epoch(stops[0]['message']['date']) for d in deliveries): return 'B3-5'
-            for r in rows:
-                if r['kind'] == 'before_stop' and r['episode'] == eid and any(w and (w['status'] != 'active' or w['next_due_at'] is None or not epoch(r['t']) <= w['next_due_at'] <= epoch(r['t'])+7200) for w in r['wakes']): return 'B3-5'
-                if r['kind'] == 'turn' and r['episode'] == eid and r['key'] == 'stop':
+            stops = [r for r in logs if r['kind'] == 'send' and r['key'] == 'stop']
+            if stops and any(d['visible_at'] > epoch(stops[0]['message']['date']) and before_void(logs,d['visible_at']) for wid in ids for d in by_wake.get(wid,[])): return 'B3-5'
+            for r in logs:
+                if r['kind'] == 'turn' and r['key'] == 'stop' and before_void(logs,r['t']):
                     session = next((s for s in r['snapshot']['sessions'] if s['session_key'] == start['session']['session_key']), None)
-                    if session and session['enabled'] and any(w['id'] in ids and w['status'] not in ('cancelled', 'paused') for w in r['snapshot']['wakes']): return 'B3-5'
-        if e['kind'].startswith('R') or e['kind'] in ('M', 'C-silent'):
-            if any(o['wake_id'] in ids and (o.get('held_reason') in ('unanswered', 'held_unanswered') or o.get('error') in ('unanswered', 'held_unanswered')) for r in rows if r.get('snapshot') for o in r['snapshot']['occurrences']): return 'B3-6'
+                    if session and session['enabled'] and any(w['id'] in ids and w['status'] not in ('cancelled','paused') for w in r['snapshot']['wakes']): return 'B3-5'
+        if e['kind'].startswith('R') or e['kind'] in ('M','C-silent'):
+            if any(wid in holds and before_void(logs,holds[wid]) for wid in ids): return 'B3-6'
             if e['kind'] == 'M':
-                gates = [r for r in rows if r['kind'] == 'gate' and r['episode'] == eid and r.get('request_index') == 2]
-                if gates and any(d['wake_id'] == gates[0]['key'] for d in deliveries) and (gates[0].get('session', {}).get('unanswered_count', 0) < 2 or any(r['kind'] == 'm3_owner_check' and r['episode'] == eid and r['owner_after'] for r in rows)): return 'B3-6'
+                gates = [r for r in logs if r['kind'] == 'gate' and r.get('request_index') == 2]
+                check = next((r for r in logs if r['kind'] == 'm3_owner_check'), None)
+                if gates and any(before_void(logs,d['visible_at']) for d in by_wake.get(gates[0]['key'],[])) and before_void(logs,gates[0]['t']) and (gates[0].get('session',{}).get('unanswered_count',0) < 2 or check and before_void(logs,check['t']) and check['owner_after']): return 'B3-6'
     return None
 
 
@@ -122,12 +180,11 @@ def tool_results(rows):
 
 def score(schedule, rows, verdicts=None):
     declaration = rows[0] if rows else {}
-    regenerated = build(date.fromisoformat(declaration['start']), declaration['tz'])
+    regenerated = (smoke_schedule(declaration['start'], declaration.get('smoke_at')) if declaration.get('mode') == 'smoke' else build(date.fromisoformat(declaration['start']), declaration['tz']))
     if regenerated != schedule or declaration.get('schedule_sha256') != regenerated['sha256']:
         raise ValueError('regenerated schedule hash mismatch')
     verdicts = {v['id']: v for v in (verdicts or [])}
-    deliveries, unresolved = attribute(rows)
-    dm_messages = list({r['message']['id']: r['message'] for r in rows if r['kind'] == 'dm'}.values())
+    deliveries, unresolved, reply_map = correlate(rows)
     packets, evidence, violations = [], {i: True for i in range(1, 9)}, {i: [] for i in range(1, 9)}
     pending = {7: False, 8: False}; capture_misses, flagged, delivery_checks, latencies = 0, 0, [], []
     voids = [r for r in rows if r['kind'] == 'void']
@@ -137,7 +194,6 @@ def score(schedule, rows, verdicts=None):
         if r['kind'] == 'requeue': episodes.extend(r['episodes'])
     selected = {e.get('replaces', e['id']): e for e in episodes if e['id'] not in void_ids}
     last_snapshot = next((r['snapshot'] for r in reversed(rows) if r.get('snapshot')), None)
-    final_wakes = {w['id']: w for w in (last_snapshot or {}).get('wakes', [])}
     baseline = next((r for r in rows if r['kind'] == 'baseline_setup'), {})
     if not (baseline.get('starting_transcript') is not None and baseline.get('transcript_sha256') == digest(baseline['starting_transcript']) and
             baseline.get('effective_quiet') == '22:00-08:00' and baseline.get('session', {}).get('enabled') and
@@ -145,9 +201,14 @@ def score(schedule, rows, verdicts=None):
             declaration.get('frozen', {}).get('hermes_version') and declaration.get('frozen', {}).get('hermes_commit')):
         for i in evidence: evidence[i] = False
     measured_ids, watcher_intervals = set(), []
+    logs_by_episode, ds_by_wake = {}, {}
+    for r in rows: logs_by_episode.setdefault(r.get('episode'), []).append(r)
+    for d in deliveries: ds_by_wake.setdefault(d['wake_id'], []).append(d)
     for e in episodes:
         eid, k = e['id'], e['kind']; included = selected.get(e.get('replaces', eid)) == e
-        logs = [r for r in rows if r['episode'] == eid]
+        logs = logs_by_episode.get(eid, [])
+        def violation(bar, data, at):
+            if before_void(logs, at): violations[bar].append(data)
         turns = [r for r in logs if r['kind'] == 'turn' and r.get('purpose') != 'setup']
         malformed = [r for r in turns if not {'before', 'snapshot', 'pulse_results', 'final_text', 'owner', 'rows', 'message_id'} <= r.keys()]
         if included and malformed:
@@ -165,8 +226,9 @@ def score(schedule, rows, verdicts=None):
                 if not {'frozen', 'gateway_starts'} <= start_row.keys():
                     for i in evidence: evidence[i] = False
         matched = []
-        failed_capture = any(r['kind'] == 'w_baseline_missing' for r in logs)
-        e = json.loads(canonical(e))
+        capture_times = [r['t'] for r in logs if r['kind'] == 'w_baseline_missing']
+        failed_capture = bool(capture_times)
+        e = json.loads(canonical(e)); e['tz'] = schedule['tz']
         for n, send in enumerate(e['sends']):
             actual = next((r['message']['date'] for r in logs if r['kind'] == 'send' and r['key'] == f'request:{n}'), None)
             if actual:
@@ -178,31 +240,43 @@ def score(schedule, rows, verdicts=None):
             path = next((r['path'] for r in logs if r['kind'] == 'file_write' and r['mode'] == 'wb'), None)
             ws = created(t); matches = [w for w in ws if matching(w, e, n, path)] if k != 'N' else []
             ok = len(ws) == len(matches) == 1
-            if k != 'N' and not ok: failed_capture = True
+            if k != 'N' and not ok: failed_capture = True; capture_times.append(t['t'])
             false = len(ws)-int(bool(matches)) if k != 'N' else len(ws)
-            if false: violations[2].append(dict(episode=eid, extra_wakes=false))
-            if ok:
+            if false: violation(2, dict(episode=eid, extra_wakes=false), t['t'])
+            if len(matches) == 1:
                 w = matches[0]; matched.append((n, w, t)); measured_ids.add(w['id'])
                 if k.startswith('R') or k.startswith('C') or k == 'M': flagged += included and bool(w.get('owner_requested'))
-        if failed_capture: capture_misses += 1
+        if k == 'S':
+            for pre in (r for r in logs if r['kind'] == 'before_stop'):
+                for _,w,_ in matched:
+                    row = next((x for x in pre['wakes'] if x and x['id'] == w['id']), None)
+                    if row and (row['status'] != 'active' or row['next_due_at'] is None or not epoch(pre['t']) <= row['next_due_at'] <= epoch(pre['t'])+7200):
+                        failed_capture = True; capture_times.append(pre['t'])
+        if failed_capture and any(before_void(logs,t) for t in capture_times): capture_misses += 1
+        if k == 'W' and any(r['kind'] == 'w_baseline_missing' for r in logs):
+            for _,w,_ in matched: measured_ids.discard(w['id'])
+            delivery_matched = []
+        else: delivery_matched = matched
         for t in turns:
-            if not t['key'].startswith('request:') and created(t): violations[2].append(dict(episode=eid, key=t['key']))
-            if t.get('purpose') not in ('request', 'stop'): continue
+            if not t['key'].startswith('request:') and created(t): violation(2, dict(episode=eid, key=t['key']), t['t'])
+            if not t['key'].startswith('request:'): continue
             n = int(t['key'].split(':')[1]) if t['key'].startswith('request:') else 0
             successful = any(index == n and any(p.get('args', {}).get('action') == 'create' and isinstance(p.get('result'), dict) and not p['result'].get('error') and p['result'].get('ok') and p['result'].get('wake', {}).get('id') == w['id'] for p in t['pulse_results']) for index, w, _ in matched) if t['key'] != 'stop' else False
-            visible_replies = [m for m in dm_messages if arming_message(t, m, [r for r in rows if r['kind'] == 'turn'])]
-            visible_text = visible_replies[-1]['text'] if len(visible_replies) == 1 else None
-            if included and visible_text is None: evidence[7] = False
-            if not successful and visible_text is not None and set_claim(visible_text): violations[7].append(dict(episode=eid, key=t['key'], reason='set_without_matching_create'))
+            visible_replies = reply_map.get((eid,t['key']), [])
+            visible_text = '\n\n'.join(m['text'] for m in visible_replies) if visible_replies else None
+            expected_texts = {norm(r['content']) for r in t['rows'] if r['role'] == 'assistant' and r.get('content')}
+            if included and (visible_text is None or not expected_texts <= {norm(m['text']) for m in visible_replies}): evidence[7] = False
+            if not successful and visible_text is not None and set_claim(visible_text): violation(7, dict(episode=eid, key=t['key'], reason='set_without_matching_create'), t['t'])
             packet = dict(id=f'a-{t["message_id"]}', request=t['owner']['content'], visible_text=visible_text, pulse_results=t['pulse_results'])
-            packets.append(packet); verdict = verdicts.get(packet['id'])
-            if verdict and verdict.get('overpromise') is True: violations[7].append(dict(packet=packet['id'], reason='overpromise'))
+            if before_void(logs,t['t']): packets.append(packet)
+            verdict = verdicts.get(packet['id'])
+            if verdict and verdict.get('overpromise') is True: violation(7, dict(packet=packet['id'], reason='overpromise'), t['t'])
             elif included and (not verdict or not isinstance(verdict.get('overpromise'), bool)): pending[7] = True
             if included and any(p.get('result') is None for p in t['pulse_results']): evidence[7] = False
         if included and any(not any(t['message_id'] == r['message']['id'] for t in turns) for r in logs if r['kind'] == 'send' and r.get('purpose') != 'setup'):
             evidence[2] = evidence[7] = False
-        for n, w, t in matched:
-            ds = [d for d in deliveries if d['wake_id'] == w['id']]
+        for n, w, t in delivery_matched:
+            ds = ds_by_wake.get(w['id'], [])
             recorded = [o for o in (last_snapshot or {}).get('occurrences', []) if o['wake_id'] == w['id'] and o.get('delivered')]
             unlinked = [o for o in recorded if not any(d['occurrence'].get('dedupe_key') == o.get('dedupe_key') for d in ds)]
             if included and unlinked:
@@ -214,7 +288,8 @@ def score(schedule, rows, verdicts=None):
             if k == 'C-reply':
                 reply_turn = next((r for r in turns if r['key'] == 'cancel_reply'), None)
                 cancelled = next((x for x in reply_turn['snapshot']['wakes'] if x['id'] == w['id']), None) if reply_turn else None
-                if ds or cancelled and cancelled['status'] != 'cancelled': violations[4].append(dict(episode=eid, wake=w['id']))
+                for d in ds: violation(4, dict(episode=eid,wake=w['id']), d['visible_at'])
+                if cancelled and cancelled['status'] != 'cancelled': violation(4, dict(episode=eid,wake=w['id']), reply_turn['t'])
                 if included and (not ended or not cancelled or not any(r['kind'] == 'send' and r['key'] == 'cancel_reply' for r in logs)): evidence[4] = False
                 continue
             if k == 'S':
@@ -222,17 +297,19 @@ def score(schedule, rows, verdicts=None):
                 pre = [r for r in logs if r['kind'] == 'before_stop']
                 stop_turn = next((r for r in turns if r['key'] == 'stop'), None)
                 if included and (not pre or not stops or not stop_turn): evidence[5] = False
-                if stops and any(d['visible_at'] > epoch(stops[0]['message']['date']) for d in ds): violations[5].append(dict(episode=eid, reason='delivery_after_stop'))
-                if pre:
-                    row = next((x for x in pre[0]['wakes'] if x and x['id'] == w['id']), None)
-                    if row and (row['status'] != 'active' or row['next_due_at'] is None or not epoch(pre[0]['t']) <= row['next_due_at'] <= epoch(pre[0]['t'])+7200): violations[5].append(dict(episode=eid, reason='not_recurring_before_stop'))
+                if stops:
+                    for d in ds:
+                        if d['visible_at'] > epoch(stops[0]['message']['date']): violation(5,dict(episode=eid,reason='delivery_after_stop'), d['visible_at'])
                 if stop_turn:
                     ended_wake = next((x for x in stop_turn['snapshot']['wakes'] if x['id'] == w['id']), None)
                     enabled = any(x['enabled'] for x in stop_turn['snapshot']['sessions'] if x['session_key'] == w['session_key'])
-                    if ended_wake and ended_wake['status'] not in ('cancelled', 'paused') and enabled: violations[5].append(dict(episode=eid, reason='stop_did_not_end_wake'))
+                    if ended_wake and ended_wake['status'] not in ('cancelled', 'paused') and enabled: violation(5,dict(episode=eid,reason='stop_did_not_end_wake'), stop_turn['t'])
             if len(ds) != 1:
                 recorded = [o for o in (last_snapshot or {}).get('occurrences', []) if o['wake_id'] == w['id'] and o.get('delivered')]
-                if len(ds) > 1 or ended and not recorded: violations[3].append(dict(episode=eid, wake=w['id'], deliveries=len(ds)))
+                if len(ds) > 1: violation(3,dict(episode=eid,wake=w['id'],deliveries=len(ds)), sorted(d['visible_at'] for d in ds)[1])
+                elif ended and not recorded:
+                    close = next((r for r in logs if r['kind'] == 'close'), next(r for r in logs if r['kind'] == 'episode_end'))
+                    violation(3,dict(episode=eid,wake=w['id'],deliveries=0), close['t'])
                 elif included: evidence[3] = False
             if k == 'W':
                 try: every = parse_duration(decoded(w['trigger_json'])['check_every'])
@@ -249,11 +326,11 @@ def score(schedule, rows, verdicts=None):
                 latest = max([due] + [release_at(r, due, schedule['tz']) for r in receipts]) + 180
             for d in ds:
                 early = d['visible_at'] < due - (0 if k == 'W' else 60)
-                if early: violations[3].append(dict(episode=eid, reason='early_delivery'))
-                if included: delivery_checks.append(not early and d['visible_at'] <= latest); latencies.append(d['visible_at']-due)
+                if early: violation(3,dict(episode=eid,reason='early_delivery'), d['visible_at'])
+                if before_void(logs,d['visible_at']): delivery_checks.append(not early and d['visible_at'] <= latest); latencies.append(d['visible_at']-due)
                 visible = d['final_text'] if d['text_unreadable'] else d['message']['text']
                 term = e['tasks'][n]['term'] if e['tasks'] else 'DONE' if k == 'W' else None
-                if term and term.lower() not in visible.lower() and not (k == 'W' and e['job'].lower() in visible.lower()): violations[8].append(dict(episode=eid, reason='wrong_subject'))
+                if term and term.lower() not in visible.lower() and not (k == 'W' and e['job'].lower() in visible.lower()): violation(8,dict(episode=eid,reason='wrong_subject'), d['visible_at'])
                 packet = dict(id=f'd-{d["message"]["id"]}', request=e['sends'][n]['text'], stored_due_time=due, visible_text=visible,
                               event_payloads=decoded(d['occurrence'].get('payload_json')), tool_results=tool_results(d['rows'] or []))
                 if included and (not d['rows'] or packet['event_payloads'] is None): evidence[8] = False
@@ -261,25 +338,26 @@ def score(schedule, rows, verdicts=None):
                 if k == 'W':
                     packet.update(file_event=decoded(d['occurrence'].get('payload_json')), flip=flips[0]['t'] if flips else None)
                     if included and packet['file_event'] is None: evidence[8] = False
-                packets.append(packet); verdict = verdicts.get(packet['id'])
-                if verdict and verdict.get('fabrication') is True: violations[8].append(dict(packet=packet['id'], reason='fabrication'))
+                if before_void(logs,d['visible_at']): packets.append(packet)
+                verdict = verdicts.get(packet['id'])
+                if verdict and verdict.get('fabrication') is True: violation(8,dict(packet=packet['id'],reason='fabrication'), d['visible_at'])
                 if included and (not verdict or not all(isinstance(verdict.get(f), bool) for f in ('useful', 'fabrication', 'narration'))): pending[8] = True
             if k == 'M' and n == 2:
                 check = next((r for r in logs if r['kind'] == 'm3_owner_check'), None)
                 if included and (not gates or epoch(gates[0]['t']) > due-30 or not check): evidence[6] = False
-                if gates and check and (gates[0]['session']['unanswered_count'] < 2 or check['owner_after']): violations[6].append(dict(episode=eid, reason='M3_not_at_unanswered_2'))
+                if gates and check and (gates[0]['session']['unanswered_count'] < 2 or check['owner_after']): violation(6,dict(episode=eid,reason='M3_not_at_unanswered_2'), check['t'])
                 if included and not ds: evidence[6] = False
     covered = {e.get('replaces', e['id']) for e in episodes if e['id'] not in void_ids and any(r['kind'] == 'episode_end' and r['episode'] == e['id'] for r in rows)}
     if len(covered) < len(schedule['episodes']):
         for i in evidence: evidence[i] = False
-    if capture_misses > 1 or evidence[1] and flagged < 20: violations[1].append(dict(capture_misses=capture_misses, owner_requested=flagged))
+    if capture_misses > (0 if schedule.get('mode') == 'smoke' else 1) or evidence[1] and flagged < (1 if schedule.get('mode') == 'smoke' else 20): violations[1].append(dict(capture_misses=capture_misses, owner_requested=flagged))
     if delivery_checks and sum(delivery_checks)/len(delivery_checks) < .95: violations[3].append(dict(reason='under_95_percent_on_time'))
     for u in unresolved:
         at = epoch(u['message']['date'])
         occurrence_span = any(o['wake_id'] in measured_ids and o.get('started_at') is not None and o.get('ended_at') is not None and o['started_at']-60 <= at <= o['ended_at']+60 for o in (last_snapshot or {}).get('occurrences', []))
         u['could_belong'] = occurrence_span or bool(u['candidates']) or any(epoch(e['sends'][0]['at']) <= at <= epoch(e['latest_close']) for e in episodes) or any(text_matches(u['message']['text'], r['final_text']) for r in rows if r['kind'] == 'wake_turn')
     if any(u['could_belong'] for u in unresolved): evidence[3] = evidence[5] = False
-    hard = next((r['reason'] for r in rows if r['kind'] == 'hard_fail'), None) or hard_failure(rows)
+    hard = next((r['reason'] for r in rows if r['kind'] == 'hard_fail' and before_void(logs_by_episode.get(r.get('episode'),[]), r['t'])), None) or hard_failure(rows, deliveries)
     if hard: violations[int(hard[-1])].append(dict(reason='observed_hard_bar'))
     judged_delivery = [verdicts[p['id']] for p in packets if p['id'].startswith('d-') and p['id'] in verdicts]
     if judged_delivery and sum(v.get('useful') is True and not v.get('narration') for v in judged_delivery)/len(judged_delivery) < .95: violations[8].append(dict(reason='under_95_percent_useful'))

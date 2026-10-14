@@ -35,16 +35,26 @@ class FakeClient:
     def send(self, text):
         if self.failed == 'send': raise ClientError('fake')
         now = self.clock.now(); m = self.message(text, True); self.sent.append((now, text))
-        self.row('user', text, now, m['id']); result = None
-        if text == '/new':
-            self.sid = 'fresh'
-            with sqlite3.connect(self.state) as db: db.execute('INSERT OR IGNORE INTO sessions VALUES (?)', (self.sid,))
-            self.store.cas_session('chat', {'current_session_id': 's'}, current_session_id=self.sid, unanswered_count=0)
-        elif text == '/pulse quiet default': self.store.set_meta('quiet:chat', '{}')
-        elif text.startswith('/pulse cancel '):
-            w = self.store.get_wake(text.split()[-1]); self.store.cas_wake(w.id, w.status, status='cancelled')
-        elif text == '/pulse on': self.store.cas_session('chat', {'enabled': False}, enabled=True)
-        elif text == 'stop checking in on me':
+        if text.startswith('/'):
+            if text == '/new': reply = '⚠️ **Confirm /new** — reply `/approve` to approve once'
+            elif text == '/approve':
+                self.sid = 'fresh'
+                with sqlite3.connect(self.state) as db:
+                    db.execute("UPDATE sessions SET ended_at=? WHERE id='s'", (now,))
+                    db.execute('INSERT OR IGNORE INTO sessions VALUES (?,?,?,?)', (self.sid,'chat',now,None))
+                self.store.cas_session('chat', {'unanswered_count':self.store.get_session('chat').unanswered_count}, unanswered_count=0)
+                reply = '✨ Session reset! Starting fresh.\n\nModel: fixture'
+            elif text == '/pulse quiet default':
+                self.store.set_meta('quiet:chat','{}'); reply = 'Quiet hours follow your settings again: 22:00-08:00'
+            elif text.startswith('/pulse cancel '):
+                w=self.store.get_wake(text.split()[-1]);self.store.cas_wake(w.id,w.status,status='cancelled')
+                reply=w.id+' cancelled · fixture wake'
+            elif text == '/pulse on':
+                self.store.cas_session('chat',{'enabled':self.store.get_session('chat').enabled},enabled=True);reply='HeartBeat 2.0 on for this chat.'
+            else: raise AssertionError(text)
+            self.message(reply,False,now+1);return m
+        self.row('user',text,now,m['id']+9000);result=None
+        if text == 'stop checking in on me':
             if self.stop_off: self.store.cas_session('chat', {'enabled': True}, enabled=False)
             else:
                 for w in self.store.list_wakes('chat', status='active'): self.store.cas_wake(w.id, 'active', status='cancelled')
@@ -75,6 +85,8 @@ class FakeClient:
                 self.store.cas_wake(wid, w.status, probe_state_json={'size': 8})
             if self.no_delivery or now < due or w.status != 'active': continue
             text = term+' reminder' if self.e['tasks'] else 'DONE' if w.kind == 'file' else 'Checking in?'
+            self.row('user',f'⟦pulse o:{wid}/t:{due} a:1⟧ fixture wake',due-.2)
+            self.row('assistant','',due+.1)
             self.row('assistant', text, due+1)
             self.deliveries.append(self.message(text, False, due+1))
             self.store._insert_record('occurrences', Occurrence(wake_id=wid, dedupe_key='one', state='done', started_at=due, ended_at=due+2, delivered=True, summary=text, payload_json=[{'message': 'DONE'}]))
@@ -91,11 +103,11 @@ def rig(tmp_path, kind):
     s['episodes'] = [e]; s['start'] = datetime.fromisoformat(e['sends'][0]['at']).date().isoformat(); s['sha256'] = digest({k: v for k, v in s.items() if k != 'sha256'})
     home = tmp_path/'profile'; plugin = home/'plugins/heartbeat2'; plugin.mkdir(parents=True)
     (plugin/'plugin.yaml').write_text('version: 0.1.15\n')
-    (home/'config.yaml').write_text('model: {default: fake, provider: fake}\nplugins: {entries: {heartbeat2: {enabled: true, allow_gateway_injection: true, timezone: UTC}}}\n')
+    (home/'config.yaml').write_text('model: {default: fake, provider: fake}\nplugins: {entries: {heartbeat2: {enabled: true, allow_gateway_injection: true, timezone: Asia/Tokyo}}}\n')
     state = home/'state.db'
     with sqlite3.connect(state) as db:
-        db.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY)')
-        db.execute("INSERT INTO sessions VALUES ('s')")
+        db.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY,session_key TEXT,started_at REAL,ended_at REAL)')
+        db.execute("INSERT INTO sessions VALUES ('s','chat',0,NULL)")
         db.execute('CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_calls TEXT, tool_name TEXT, tool_call_id TEXT, platform_message_id TEXT)')
     clock = FakeClock(epoch(e['sends'][0]['at'])-120)
     store = Store(tmp_path/'pulse.db', clock); store.upsert_session(Session(session_key='chat', current_session_id='s'))
@@ -115,7 +127,7 @@ def test_episode_actions_and_evidence(tmp_path, kind):
     requests = [row for row in r.rows if row['kind'] == 'send' and row['purpose'] == 'request']
     assert [row['message']['text'] for row in requests] == [s['text'].replace('{soak_dir}', str(r.soak_dir)) for s in e['sends']]
     turns = [row for row in r.rows if row['kind'] == 'turn']
-    assert len(turns) == len(c.sent)
+    assert len(turns)+len([x for x in r.rows if x['kind']=='command_reply']) == len(c.sent)
     assert all('pulse_results' in t and 'snapshot' in t and t['final_text'] for t in turns)
     if kind != 'M': assert [epoch(row['t']) for row in requests] == [epoch(s['at']) for s in e['sends']]
     else:
@@ -172,7 +184,7 @@ def test_voids(tmp_path, reason):
         elif reason == 'gateway_restart': (r.home/'gateway-starts.log').write_text('1\n2\n')
         elif reason in ('client_error', 'client_outage_5m'): c.failed = 'read'
     r.clock.callback = tick
-    assert r.run() == 0
+    assert r.run() == (1 if reason in ('client_error','client_outage_5m') else 0)
     assert any(row['kind'] == 'void' and row['reason'] == reason for row in r.rows)
     if reason == 'gateway_restart': assert any(row['kind'] == 'gateway_starts' and row['new'] == [1.0, 2.0] for row in r.rows)
     store.close()

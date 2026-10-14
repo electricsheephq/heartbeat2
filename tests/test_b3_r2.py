@@ -94,7 +94,7 @@ def test_fresh_baseline_paused_proposed_quiet_and_archive(tmp_path):
     assert baseline['effective_quiet'] == '22:00-08:00'
     assert baseline['session']['unanswered_count']==0 and baseline['session']['enabled']
     assert baseline['transcript_sha256'] == schedule.digest(baseline['starting_transcript'])
-    assert baseline['session']['current_session_id'] != 's'
+    assert baseline['session_id'] != baseline['old_session_id']
     store.close()
 
 
@@ -104,7 +104,7 @@ def test_baseline_fails_closed(tmp_path, problem):
     if problem == 'injection':
         p=r.home/'config.yaml'; p.write_text(p.read_text().replace('allow_gateway_injection: true','allow_gateway_injection: false'))
     elif problem == 'quiet':
-        p=r.home/'config.yaml'; p.write_text(p.read_text().replace('timezone: UTC','timezone: UTC, quiet_hours: "21:00-08:00"'))
+        p=r.home/'config.yaml'; p.write_text(p.read_text().replace('timezone: Asia/Tokyo','timezone: Asia/Tokyo, quiet_hours: "21:00-08:00"'))
     elif problem == 'wrong_date': r.clock.wall += 86400
     elif problem == 'revision': r.hermes_version_file = None
     else:
@@ -178,7 +178,7 @@ def test_day8_preserves_texts_offsets_order_caps_and_single_replacement(tmp_path
     originals=[x for x in r.schedule['episodes'] if x['kind']=='W']
     for x in originals:r.emit('void',x['id'],reason='client_error')
     r.requeue(); row=next(x for x in r.rows if x['kind']=='requeue'); replacements=row['episodes']
-    assert len(replacements)==5 and len(row['incomplete'])==2
+    assert len(replacements)==6 and len(row['incomplete'])==1
     rng=random.Random('20261014:8')
     for i,(old,new) in enumerate(zip(originals,replacements)):
         assert new['id']==old['id']+'-r' and new['sends'][0]['text']==old['sends'][0]['text']

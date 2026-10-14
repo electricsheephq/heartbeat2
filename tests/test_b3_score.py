@@ -7,14 +7,14 @@ from bench.soak.score import score, attribute, matching
 
 
 def corpus():
-    s = build(date(2026, 10, 15), 'UTC')
+    s = build(date(2026, 10, 15), 'Asia/Tokyo')
     log, wakes, occurrences, verdicts = [], [], [], []
     session = dict(session_key='chat', current_session_id='s', enabled=1, unanswered_count=0)
     mid = 0
     def snap(): return deepcopy(dict(wakes=wakes, occurrences=occurrences, sessions=[session]))
     def emit(kind, e=None, at=None, **kw):
         log.append(dict(t=datetime.fromtimestamp(at or 1).astimezone().isoformat(), kind=kind, episode=e, **deepcopy(kw)))
-    emit('declaration', start=s['start'], tz=s['tz'], schedule_sha256=s['sha256'], seed=s['seed'], frozen=dict(allow_gateway_injection=True,hermes_version='1.0',hermes_commit='a'*40))
+    emit('declaration', start=s['start'], tz=s['tz'], schedule_sha256=s['sha256'], seed=s['seed'], frozen=dict(allow_gateway_injection=True,hermes_version='1.0',hermes_commit='a'*40,resolved_timezone='Asia/Tokyo'))
     emit('baseline_setup', session=session, effective_quiet='22:00-08:00', starting_transcript=[], transcript_sha256=digest([]))
     for e in s['episodes']:
         eid, k = e['id'], e['kind']; start = datetime.fromisoformat(e['sends'][0]['at']).timestamp()
@@ -39,7 +39,7 @@ def corpus():
             owner = dict(role='user', timestamp=at, content=send['text'])
             message = dict(id=mid, date=send['at'], edit_date=None, out=True, text=send['text'])
             emit('send', eid, at, key=f'request:{n}', purpose='request', message=message, before=before)
-            emit('turn', eid, at+10, key=f'request:{n}', purpose='request', message_id=mid, owner=owner, rows=[dict(role='assistant', timestamp=at+1, content='Set.', tool_calls=None)], final_text='Set.' if w else 'Okay.', pulse_results=ps, snapshot=snap(), before=before)
+            emit('turn', eid, at+10, key=f'request:{n}', purpose='request', message_id=mid, owner=owner, rows=[dict(role='assistant', timestamp=at+1, content='Set.' if w else 'Okay.', tool_calls=None)], final_text='Set.' if w else 'Okay.', pulse_results=ps, snapshot=snap(), before=before)
             verdicts.append(dict(id=f'a-{mid}', useful=True, fabrication=False, narration=False, overpromise=False, why=''))
             mid += 1
             emit('dm', eid, at+30, message=dict(id=mid, date=datetime.fromtimestamp(at+1).astimezone().isoformat(), edit_date=None, out=False, text='Set.' if w else 'Okay.'))
@@ -135,7 +135,7 @@ def test_missing_unresolved_hash_and_void_precedence():
     s, log, v = corpus()
     t = next(r for r in log if r['kind'] == 'turn' and r['key'] == 'stop')
     t['snapshot']['wakes'].append(dict(id='extra', kind='at', status='active', note='extra'))
-    log.append(dict(kind='void', episode=t['episode'], t=t['t'], reason='client_error'))
+    log.append(dict(kind='void', episode=t['episode'], t=datetime.fromtimestamp(datetime.fromisoformat(t['t']).timestamp()+1).astimezone().isoformat(), reason='client_error'))
     assert score(s, log, v)['bars']['B3-2'] == 'FAIL'
 
 
@@ -143,13 +143,12 @@ def test_unreadable_edits_and_retry_rule():
     s, log, v = corpus()
     dm = next(r for r in log if r['kind'] == 'dm' and r['message']['text'] not in ('Set.', 'Okay.', 'Stopped.')); dm['message']['text'] = ''
     ds, _ = attribute(log)
-    assert any(d['text_unreadable'] for d in ds)
-    assert score(s, log, v)['bars']['B3-8'] == 'PASS'
-    assert any(p.get('text_source') == 'recorded_turn_output' for p in score(s, log, v)['packets'])
+    assert not any(d['message']['id']==dm['message']['id'] for d in ds)
+    assert score(s, log, v)['bars']['B3-8'] == 'INCOMPLETE'
     t = next(r for r in log if r['kind'] == 'turn' and r['pulse_results'])
     t['pulse_results'].insert(0, dict(args={'action': 'create'}, result={'error': 'refused'}))
     assert score(s, log, v)['bars']['B3-7'] == 'PASS'
-    final_dm = deepcopy(dm); final_dm['message']['text'] = ds[0]['final_text']; log.append(final_dm)
+    final_dm = deepcopy(dm); final_dm['message']['text'] = next(r['final_text'] for r in log if r['kind']=='wake_turn' and r['occurrence']['wake_id']==dm['episode']+'-0'); log.append(final_dm)
     assert not any(d['text_unreadable'] for d in attribute(log)[0])
 
 

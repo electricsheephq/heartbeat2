@@ -9,6 +9,27 @@ import yaml
 from .schedule import digest
 
 
+def whitespace(text):
+    return ' '.join((text or '').split())
+
+
+def display(text):
+    text = re.sub(r'```[^\n`]*\n', '', text or '')
+    text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)
+    for marker in ('**', '__', '`', '~~'): text = text.replace(marker, '')
+    return whitespace(text)
+
+
+def command_matches(text, reply):
+    reply = display(reply)
+    if text == '/new': return 'Confirm /new' in reply and '/approve' in reply
+    if text == '/approve': return reply.startswith(('✨ Session reset! Starting fresh.', '✨ New session started!'))
+    if text == '/pulse quiet default': return reply == 'Quiet hours follow your settings again: 22:00-08:00'
+    if text == '/pulse on': return reply == 'HeartBeat 2.0 on for this chat.'
+    if text.startswith('/pulse cancel '): return bool(re.match(re.escape(text.split()[-1])+r' cancelled\b', reply))
+    return False
+
+
 def decoded(value):
     if isinstance(value, str):
         try: return json.loads(value)
@@ -32,22 +53,38 @@ class Transcript(Reader):
     def __init__(self, path, now=time.time):
         super().__init__(path); self.now = now
 
-    def owner(self, session_id, message_id):
-        rows = self.rows("SELECT * FROM messages WHERE session_id=? AND role='user' AND CAST(platform_message_id AS TEXT)=? ORDER BY timestamp,id", (session_id, str(message_id)))
-        return rows[0] if rows else None
+    def current_session(self, chat_key):
+        rows = self.rows('SELECT id FROM sessions WHERE session_key=? AND ended_at IS NULL ORDER BY started_at DESC', (chat_key,))
+        return rows[0]['id'] if len(rows) == 1 else None
+
+    def owner(self, session_id, text, sent_at, claimed=()):
+        rows = self.rows("SELECT * FROM messages WHERE session_id=? AND role='user' AND timestamp BETWEEN ? AND ? ORDER BY timestamp,id", (session_id, sent_at-5, sent_at+120))
+        return next((r for r in rows if r['id'] not in claimed and whitespace(r['content']) == whitespace(text)), None)
 
     def turn(self, session_id, after_ts):
-        rows = self.rows('SELECT * FROM messages WHERE session_id=? AND timestamp>? ORDER BY timestamp,id', (session_id, after_ts))
+        owner = self.rows("SELECT id FROM messages WHERE session_id=? AND role='user' AND timestamp=? ORDER BY id LIMIT 1", (session_id, after_ts))
+        rows = self.rows('SELECT * FROM messages WHERE session_id=? AND (timestamp>? OR (timestamp=? AND id>?)) ORDER BY timestamp,id', (session_id, after_ts, after_ts, owner[0]['id'] if owner else 0))
         end = next((i for i, r in enumerate(rows) if r['role'] == 'user'), len(rows))
         return rows[:end]
 
     def pulse_results(self, session_id, after_ts):
-        rows, calls, outputs = self.turn(session_id, after_ts), {}, {}
+        rows, results = self.turn(session_id, after_ts), []
+        outputs = {r.get('tool_call_id'): decoded(r.get('content')) for r in rows if r['role'] == 'tool'}
         for row in rows:
             for call in decoded(row.get('tool_calls')) or []:
-                if call['function']['name'] == 'pulse': calls[call['id']] = decoded(call['function']['arguments'])
-            if row['role'] == 'tool': outputs[row.get('tool_call_id')] = decoded(row.get('content'))
-        return [dict(args=args, result=outputs.get(cid)) for cid, args in calls.items()]
+                name = call['function']['name']; args = decoded(call['function']['arguments']); output = outputs.get(call['id'])
+                if name == 'pulse': results.append(dict(args=args,result=output))
+                elif name == 'tool_call' and isinstance(args,dict):
+                    nested = args.get('calls',[])
+                    pulses = [c for c in nested if isinstance(c,dict) and c.get('name') == 'pulse']
+                    if len(nested) == len(pulses) == 1:
+                        results.append(dict(args=decoded(pulses[0].get('arguments')),result=output))
+                    elif isinstance(output,dict) and output.get('error'):
+                        results.append(dict(args=args,result=output,dispatch='tool_call'))
+                    else:
+                        # A shared wrapper id cannot prove which result belongs to each call.
+                        results.extend(dict(args=decoded(c.get('arguments')),result=None) for c in pulses)
+        return results
 
     def turn_done(self, session_id, after_ts, quiet_s=10):
         rows = self.turn(session_id, after_ts)
@@ -57,9 +94,15 @@ class Transcript(Reader):
         return self.rows('SELECT * FROM messages WHERE session_id=? ORDER BY timestamp,id', (session_id,))
 
     def occurrence_turn(self, session_id, occurrence):
-        rows = self.rows('SELECT * FROM messages WHERE session_id=? AND timestamp>=? AND timestamp<=? ORDER BY timestamp,id',
-                         (session_id, occurrence['started_at'], occurrence['ended_at']))
-        return rows
+        # The injection marker precedes the plugin's started_at by a fraction of a second.
+        owners = self.rows("SELECT * FROM messages WHERE session_id=? AND role='user' AND timestamp BETWEEN ? AND ? AND content LIKE ? ORDER BY timestamp,id",
+                           (session_id, occurrence['started_at']-5, occurrence['ended_at'], '⟦pulse o:'+occurrence['wake_id']+'/%'))
+        owners = [r for r in owners if r['content'].startswith('⟦pulse o:'+occurrence['wake_id']+'/')]
+        if len(owners) != 1: return []
+        rows = self.turn(session_id, owners[0]['timestamp'])
+        final = [r for r in rows if r['role'] == 'assistant' and r.get('content') and not decoded(r.get('tool_calls'))]
+        if not final or not occurrence['started_at'] <= final[-1]['timestamp'] <= occurrence['ended_at']: return []
+        return [owners[0]] + [r for r in rows if r['timestamp'] <= occurrence['ended_at']]
 
 
 class Pulse(Reader):
@@ -109,7 +152,8 @@ def frozen_state(profile_home, hermes_source=None, hermes_version_file=None):
     settings = entry.get('settings', entry) if isinstance(entry, dict) else {}
     return dict(**hermes_revision(hermes_source, hermes_version_file),
                 allow_gateway_injection=isinstance(entry, dict) and entry.get('allow_gateway_injection') is True,
-                quiet_hours=settings.get('quiet_hours', '22:00-08:00'), plugin_version=str(version), settings_sha256=digest(entries.get('heartbeat2', {})),
+                quiet_hours=settings.get('quiet_hours', '22:00-08:00'), resolved_timezone=settings.get('timezone') or config.get('timezone'),
+                max_messages_per_day=settings.get('max_messages_per_day', 6), plugin_version=str(version), settings_sha256=digest(entries.get('heartbeat2', {})),
                 model=config.get('model'), plugin_set_sha256=digest(dict(directories=sorted(p.name for p in (home/'plugins').iterdir() if p.is_dir()), enabled=enabled)))
 
 
