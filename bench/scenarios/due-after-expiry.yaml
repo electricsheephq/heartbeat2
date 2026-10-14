@@ -43,7 +43,7 @@ expectations:
   - event: arm_result
     ref: far
     error: invalid_request
-    detail: due after the maximum lifetime of 14 days
+    detail: due after the maximum lifetime of 14 days (max_lifetime_days setting)
 heartbeat_checklist:
 - ref: long
   session: owner

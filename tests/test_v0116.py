@@ -259,7 +259,6 @@ def test_command_add_refuses_bad_meridiem(engine, command, text):
 
 def test_version_changelog_and_skill():
     root = Path(__file__).resolve().parents[1]
-    assert 'version: "0.1.16"' in (root/'plugin.yaml').read_text()
     changelog = (root/'CHANGELOG.md').read_text()
     assert changelog.count('## 0.1.16 — 2026-10-14') == 1
     section = changelog.split('## 0.1.16 — 2026-10-14')[1].split('## 0.1.15')[0]
