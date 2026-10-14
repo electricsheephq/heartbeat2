@@ -436,7 +436,7 @@ def test_delivery_packet_uses_correlated_owner_text():
     turn['owner']['content'] = turn['owner']['content'].replace('{soak_dir}', 'fixtures')
     assert '{soak_dir}' not in turn['owner']['content']
     packets = scoring.score(s, logs, verdicts)['packets']
-    delivery = next(p for p in packets if p['id'].startswith('d-') and p.get('flip') == e['flip'])
+    delivery = next(p for p in packets if p['id'].startswith('d-') and p.get('flip') is not None and epoch(p['flip']) == epoch(e['flip']))
     assert delivery['request'] == turn['owner']['content']
 
 
@@ -542,3 +542,16 @@ def test_arming_packets_carry_the_owner_reminder_contract():
     rubric = Path(runner.__file__).with_name('RUBRIC.md').read_text()
     judge = Path(runner.__file__).with_name('JUDGE.md').read_text()
     assert '18. **2026-10-14 (runner PR, review round 2): Judge context.**' in rubric and 'tool_contract' in judge
+
+
+def test_disabled_chat_before_day_aborts_instead_of_scoring_a_dead_day(tmp_path):
+    r, c, store, e = shape_rig(tmp_path, 'R-rel')
+    declare(r); r.emit('runner_start', resumed=False); r.emit('baseline_setup')
+    r.clock.callback = lambda: None
+    r.clock.wall = epoch(e['sends'][0]['at'])
+    store.cas_session('chat', {'enabled': True}, enabled=False)
+    r.tick_episode(e); r.tick_episode(e)
+    failed = [x for x in r.rows if x['kind'] == 'cleanup_failed']
+    assert len(failed) == 1 and failed[0]['reason'] == 'chat_disabled_before_day' and failed[0]['episode'] == e['id']
+    assert not r.has('episode_start', e['id']) and not c.sent
+    store.close()

@@ -434,7 +434,10 @@ class Runner:
             if first['id'] == eid:
                 session = self.pulse.session(self.chat_key)
                 self.emit('setup', eid, action='verify_enabled_before_day', session=session)
-                if not session or not session['enabled']: return
+                if not session or not session['enabled']:
+                    # The previous cleanup verified the chat on; an overnight change is external, so abort rather than score a dead day.
+                    if not self.has('cleanup_failed', eid): self.emit('cleanup_failed', eid, key='setup_on', reason='chat_disabled_before_day')
+                    return
             self.emit('episode_start', eid, schedule=deepcopy(e), frozen=self.state(), gateway_starts=gateway_starts(self.home), session=self.pulse.session(self.chat_key),snapshot=self.snapshot())
             if e['kind'] == 'W':
                 path = self.soak_dir/(e['job'] + '.status'); path.parent.mkdir(parents=True, exist_ok=True)
