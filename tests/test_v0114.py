@@ -252,7 +252,7 @@ def test_proposal_and_paused_receipts_do_not_promise_fire(engine):
     result = create(engine, until={'owner_replies':True})
     assert result.get('ok'), result
     text = receipt(result)
-    assert text.startswith(f'Proposed, not armed: awaiting /pulse ok {result["wake"]["id"]}.')
+    assert text.startswith(f'Not set yet: it is armed only after the owner sends /pulse ok {result["wake"]["id"]}.')
     assert 'Fires' not in text and 'Next at' not in text and 'min apart' not in text
     engine.policy = replace(engine.policy, agent_can_create='yes')
     w = arm(engine, status='paused')
