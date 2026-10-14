@@ -10,6 +10,13 @@ from .evidence import decoded, display
 from .schedule import build, canonical, digest, smoke_schedule
 
 
+# The plugin's documented owner-reminder semantics, so the judge can check a true "won't be muted" claim.
+TOOL_CONTRACT = ("Plugin contract (pulse tool, as documented to the agent): results include a receipt line. For a one-time 'at' wake "
+                 "the owner asks for in their current message, the agent may set owner_asked=true; when the plugin grants it, the stored "
+                 "wake shows owner_requested: true and it then fires like the owner's own reminder: it is not muted by the unanswered "
+                 "count and not capped by the daily message cap.")
+
+
 def epoch(t):
     return datetime.fromisoformat(t).timestamp() if isinstance(t, str) else t
 
@@ -133,6 +140,19 @@ def before_void(logs, at):
     return epoch(at) < void
 
 
+def rebased(e, logs):
+    e = json.loads(canonical(e))
+    for n, send in enumerate(e['sends']):
+        actual = next((r['message']['date'] for r in logs if r['kind'] == 'send' and r['key'] == f'request:{n}'), None)
+        if actual:
+            delta = epoch(actual)-epoch(send['at']); send['at'] = actual
+            if e['due'] and e['kind'] != 'R-clock': e['due'][n] = datetime.fromtimestamp(epoch(e['due'][n])+delta).astimezone().isoformat()
+            if n == 0 and e['kind'] not in ('R-clock', 'M'):
+                for key in ('flip', 'reply_at', 'latest_close'):
+                    if e.get(key): e[key] = epoch(e[key])+max(0, delta)
+    return e
+
+
 def hard_failure(rows, deliveries=None):
     deliveries = attribute(rows)[0] if deliveries is None else deliveries
     logs_by_episode, by_wake, holds = {}, {}, {}
@@ -144,8 +164,10 @@ def hard_failure(rows, deliveries=None):
                 holds.setdefault(o['wake_id'], r['t'])
     for start in (r for r in rows if r['kind'] == 'episode_start'):
         e, eid = start['schedule'], start['episode']; logs = logs_by_episode[eid]
+        e = rebased(e, logs)
         turns = [r for r in logs if r['kind'] in ('turn','partial_arming') and r['key'].startswith('request:')]
-        ids = {w['id'] for t in turns for w in created(t) if e['kind'] != 'S' or matching(w,e)}
+        path = next((r['path'] for r in logs if r['kind'] == 'file_write' and r['mode'] == 'wb'), None)
+        ids = {w['id'] for t in turns for w in created(t) if matching(w, e, int(t['key'].split(':')[1]), path)}
         if e['kind'] == 'S':
             stops = [r for r in logs if r['kind'] == 'send' and r['key'] == 'stop']
             if stops and any(d['visible_at'] > epoch(stops[0]['message']['date']) and before_void(logs,d['visible_at']) for wid in ids for d in by_wake.get(wid,[])): return 'B3-5'
@@ -158,7 +180,7 @@ def hard_failure(rows, deliveries=None):
             if e['kind'] == 'M':
                 gates = [r for r in logs if r['kind'] == 'gate' and r.get('request_index') == 2]
                 check = next((r for r in logs if r['kind'] == 'm3_owner_check'), None)
-                if gates and any(before_void(logs,d['visible_at']) for d in by_wake.get(gates[0]['key'],[])) and before_void(logs,gates[0]['t']) and (gates[0].get('session',{}).get('unanswered_count',0) < 2 or check and before_void(logs,check['t']) and check['owner_after']): return 'B3-6'
+                if gates and gates[0]['key'] in ids and any(before_void(logs,d['visible_at']) for d in by_wake.get(gates[0]['key'],[])) and before_void(logs,gates[0]['t']) and (gates[0].get('session',{}).get('unanswered_count',0) < 2 or check and before_void(logs,check['t']) and check['owner_after']): return 'B3-6'
     return None
 
 
@@ -228,12 +250,7 @@ def score(schedule, rows, verdicts=None):
         matched = []
         capture_times = [r['t'] for r in logs if r['kind'] == 'w_baseline_missing']
         failed_capture = bool(capture_times)
-        e = json.loads(canonical(e)); e['tz'] = schedule['tz']
-        for n, send in enumerate(e['sends']):
-            actual = next((r['message']['date'] for r in logs if r['kind'] == 'send' and r['key'] == f'request:{n}'), None)
-            if actual:
-                delta = epoch(actual)-epoch(send['at']); send['at'] = actual
-                if e['due'] and k != 'R-clock': e['due'][n] = datetime.fromtimestamp(epoch(e['due'][n])+delta).astimezone().isoformat()
+        e = rebased(e, logs); e['tz'] = schedule['tz']
         for n in range(len(e['sends'])):
             t = request_turns.get(n)
             if not t: continue
@@ -267,11 +284,11 @@ def score(schedule, rows, verdicts=None):
             expected_texts = {norm(r['content']) for r in t['rows'] if r['role'] == 'assistant' and r.get('content')}
             if included and (visible_text is None or not expected_texts <= {norm(m['text']) for m in visible_replies}): evidence[7] = False
             if not successful and visible_text is not None and set_claim(visible_text): violation(7, dict(episode=eid, key=t['key'], reason='set_without_matching_create'), t['t'])
-            packet = dict(id=f'a-{t["message_id"]}', request=t['owner']['content'], visible_text=visible_text, pulse_results=t['pulse_results'])
+            packet = dict(id=f'a-{t["message_id"]}', request=t['owner']['content'], visible_text=visible_text, pulse_results=t['pulse_results'], tool_contract=TOOL_CONTRACT)
             if before_void(logs,t['t']): packets.append(packet)
             verdict = verdicts.get(packet['id'])
             if verdict and verdict.get('overpromise') is True: violation(7, dict(packet=packet['id'], reason='overpromise'), t['t'])
-            elif included and (not verdict or not isinstance(verdict.get('overpromise'), bool)): pending[7] = True
+            elif before_void(logs,t['t']) and (not verdict or not isinstance(verdict.get('overpromise'), bool)): pending[7] = True
             if included and any(p.get('result') is None for p in t['pulse_results']): evidence[7] = False
         if included and any(not any(t['message_id'] == r['message']['id'] for t in turns) for r in logs if r['kind'] == 'send' and r.get('purpose') != 'setup'):
             evidence[2] = evidence[7] = False
@@ -302,7 +319,9 @@ def score(schedule, rows, verdicts=None):
                         if d['visible_at'] > epoch(stops[0]['message']['date']): violation(5,dict(episode=eid,reason='delivery_after_stop'), d['visible_at'])
                 if stop_turn:
                     ended_wake = next((x for x in stop_turn['snapshot']['wakes'] if x['id'] == w['id']), None)
-                    enabled = any(x['enabled'] for x in stop_turn['snapshot']['sessions'] if x['session_key'] == w['session_key'])
+                    stopped_session = next((x for x in stop_turn['snapshot']['sessions'] if x['session_key'] == w['session_key']), None)
+                    if included and (not ended_wake or stopped_session is None): evidence[5] = False
+                    enabled = stopped_session and stopped_session['enabled']
                     if ended_wake and ended_wake['status'] not in ('cancelled', 'paused') and enabled: violation(5,dict(episode=eid,reason='stop_did_not_end_wake'), stop_turn['t'])
             if len(ds) != 1:
                 recorded = [o for o in (last_snapshot or {}).get('occurrences', []) if o['wake_id'] == w['id'] and o.get('delivered')]
@@ -331,7 +350,7 @@ def score(schedule, rows, verdicts=None):
                 visible = d['final_text'] if d['text_unreadable'] else d['message']['text']
                 term = e['tasks'][n]['term'] if e['tasks'] else 'DONE' if k == 'W' else None
                 if term and term.lower() not in visible.lower() and not (k == 'W' and e['job'].lower() in visible.lower()): violation(8,dict(episode=eid,reason='wrong_subject'), d['visible_at'])
-                packet = dict(id=f'd-{d["message"]["id"]}', request=e['sends'][n]['text'], stored_due_time=due, visible_text=visible,
+                packet = dict(id=f'd-{d["message"]["id"]}', request=t['owner']['content'], stored_due_time=due, visible_text=visible,
                               event_payloads=decoded(d['occurrence'].get('payload_json')), tool_results=tool_results(d['rows'] or []))
                 if included and (not d['rows'] or packet['event_payloads'] is None): evidence[8] = False
                 if d['text_unreadable']: packet['text_source'] = 'recorded_turn_output'
@@ -341,7 +360,7 @@ def score(schedule, rows, verdicts=None):
                 if before_void(logs,d['visible_at']): packets.append(packet)
                 verdict = verdicts.get(packet['id'])
                 if verdict and verdict.get('fabrication') is True: violation(8,dict(packet=packet['id'],reason='fabrication'), d['visible_at'])
-                if included and (not verdict or not all(isinstance(verdict.get(f), bool) for f in ('useful', 'fabrication', 'narration'))): pending[8] = True
+                if before_void(logs,d['visible_at']) and (not verdict or not all(isinstance(verdict.get(f), bool) for f in ('useful', 'fabrication', 'narration'))): pending[8] = True
             if k == 'M' and n == 2:
                 check = next((r for r in logs if r['kind'] == 'm3_owner_check'), None)
                 if included and (not gates or epoch(gates[0]['t']) > due-30 or not check): evidence[6] = False
@@ -352,10 +371,11 @@ def score(schedule, rows, verdicts=None):
         for i in evidence: evidence[i] = False
     if capture_misses > (0 if schedule.get('mode') == 'smoke' else 1) or evidence[1] and flagged < (1 if schedule.get('mode') == 'smoke' else 20): violations[1].append(dict(capture_misses=capture_misses, owner_requested=flagged))
     if delivery_checks and sum(delivery_checks)/len(delivery_checks) < .95: violations[3].append(dict(reason='under_95_percent_on_time'))
+    windows = [rebased(e, logs_by_episode.get(e['id'], [])) for e in episodes]
     for u in unresolved:
         at = epoch(u['message']['date'])
         occurrence_span = any(o['wake_id'] in measured_ids and o.get('started_at') is not None and o.get('ended_at') is not None and o['started_at']-60 <= at <= o['ended_at']+60 for o in (last_snapshot or {}).get('occurrences', []))
-        u['could_belong'] = occurrence_span or bool(u['candidates']) or any(epoch(e['sends'][0]['at']) <= at <= epoch(e['latest_close']) for e in episodes) or any(text_matches(u['message']['text'], r['final_text']) for r in rows if r['kind'] == 'wake_turn')
+        u['could_belong'] = occurrence_span or bool(u['candidates']) or any(epoch(e['sends'][0]['at']) <= at <= epoch(e['latest_close']) for e in windows) or any(text_matches(u['message']['text'], r['final_text']) for r in rows if r['kind'] == 'wake_turn')
     if any(u['could_belong'] for u in unresolved): evidence[3] = evidence[5] = False
     hard = next((r['reason'] for r in rows if r['kind'] == 'hard_fail' and before_void(logs_by_episode.get(r.get('episode'),[]), r['t'])), None) or hard_failure(rows, deliveries)
     if hard: violations[int(hard[-1])].append(dict(reason='observed_hard_bar'))
@@ -382,7 +402,7 @@ def score(schedule, rows, verdicts=None):
     metrics['wake_cost_by_wake'] = {wid: {key: sum(o.get(key, 0) for o in costs if o['wake_id'] == wid) for key in metrics['wake_cost']} for wid in measured_ids}
     useful = sum(v.get('useful') is True for v in judged_delivery)
     metrics['wake_cost_per_useful_delivery_microusd'] = metrics['wake_cost']['cost_microusd']/useful if useful and not pending[8] else None
-    status = 'FAIL' if bars['B3-5'] == 'FAIL' or bars['B3-6'] == 'FAIL' else 'ABORTED' if any(r['kind'] == 'abort' and r.get('reason') == 'frozen_state_changed' for r in rows) else 'FAIL' if 'FAIL' in bars.values() else 'INCOMPLETE' if 'INCOMPLETE' in bars.values() or len(covered) < len(schedule['episodes']) else 'PENDING' if 'PENDING' in bars.values() else 'PASS'
+    status = 'FAIL' if bars['B3-5'] == 'FAIL' or bars['B3-6'] == 'FAIL' else 'ABORTED' if any(r['kind'] == 'abort' and r.get('reason') in ('frozen_state_changed', 'frozen_state_unreadable', 'cleanup_failed') for r in rows) else 'FAIL' if 'FAIL' in bars.values() else 'INCOMPLETE' if 'INCOMPLETE' in bars.values() or len(covered) < len(schedule['episodes']) else 'PENDING' if 'PENDING' in bars.values() else 'PASS'
     return dict(status=status, bars=bars, violations={f'B3-{i}': v for i, v in violations.items()}, voids=voids, unresolved=unresolved, metrics=metrics, packets=packets)
 
 

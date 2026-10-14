@@ -138,16 +138,21 @@ class Pulse(Reader):
 
 
 def hermes_revision(source, version_file):
-    if source is None or version_file is None: return dict(hermes_version=None, hermes_commit=None)
+    if source is None or version_file is None: return dict(hermes_version=None, hermes_commit=None, hermes_source_commit=None)
     text = Path(version_file).read_text().strip()
     try: stamp = json.loads(text)
     except ValueError: stamp = None
     match = re.search(r"(?:__version__|version)\s*=\s*['\"]([^'\"]+)['\"]", text)
     version = (stamp.get('baseVersion') or None if isinstance(stamp, dict) else
                match[1] if match else text if '\n' not in text else None)
-    result = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=source, capture_output=True, text=True, timeout=5)
-    commit = result.stdout.strip() if result.returncode == 0 else None
-    return dict(hermes_version=version, hermes_commit=commit if commit and re.fullmatch('[0-9a-f]{40,64}', commit) else None)
+    try:
+        result = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=source, capture_output=True, text=True, timeout=5)
+        commit = result.stdout.strip() if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError): commit = None
+    commit = commit if commit and re.fullmatch('[0-9a-fA-F]{40,64}', commit) else None
+    installed = stamp.get('commit') if isinstance(stamp, dict) else None
+    installed = installed if isinstance(installed, str) and re.fullmatch('[0-9a-fA-F]{40,64}', installed) else commit
+    return dict(hermes_version=version, hermes_commit=installed, hermes_source_commit=commit)
 
 
 def frozen_state(profile_home, hermes_source=None, hermes_version_file=None):

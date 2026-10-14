@@ -203,7 +203,8 @@ def test_cleanup_transient_client_error_recovers(tmp_path,applied):
         return original(text)
     c.send=send
     assert r.run()==0
-    assert any(x['kind']=='void' and x['reason']=='cleanup_client_error' for x in r.rows)
+    assert any(x['kind']=='client_error' and x['operation']=='send' for x in r.rows)
+    assert not r.has('void',e['id'])  # Amendment 17 locks completed episodes.
     assert not r.has('setup_failed',None)
     assert all(w['status']!='active' for w in r.pulse.wakes('chat'))
     assert restart(r,c).run()==0
@@ -437,8 +438,9 @@ def test_r5_hard_failure_cleanup_and_deadline(tmp_path,monkeypatch):
             assert cancels and builtin.id not in cancels
             assert store.get_wake(builtin.id).status=='active'
             if stalled:
-                incomplete=next(x for x in r.rows if x['kind']=='hard_fail_cleanup_incomplete')
-                assert epoch(incomplete['t'])-epoch(failure['t'])==900
+                incomplete=next(x for x in r.rows if x['kind']=='terminal_cleanup_incomplete')
+                assert 720 <= epoch(incomplete['t'])-epoch(failure['t']) <= 900
+                assert incomplete['cause']=='hard_fail' and r.has('cleanup_failed',e['id'])
                 assert {w['id'] for w in incomplete['wakes']}==created
                 assert any(w['status']=='active' for w in incomplete['wakes'])
                 assert not r.has('episode_end',e['id'])
@@ -448,7 +450,7 @@ def test_r5_hard_failure_cleanup_and_deadline(tmp_path,monkeypatch):
                 end=next(x for x in r.rows if x['kind']=='episode_end')
                 assert r.rows.index(failure)<r.rows.index(end)
                 assert r.has('cleanup_verified',e['id'])
-                assert not r.has('hard_fail_cleanup_incomplete',e['id'])
+                assert not r.has('terminal_cleanup_incomplete',e['id'])
         finally:
             store.close()
 

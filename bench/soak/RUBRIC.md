@@ -111,8 +111,8 @@ C alternates by seed: 4 C-reply and 3 C-silent.
 
 **Between-episode setup.** After each episode's window closes and its evidence is archived, the runner:
 - sends `/pulse cancel <id>` for every wake created in that episode that is active, proposed or paused and non-built-in, including wakes created inside wake turns (a delivered watcher, an S wake, or any non-matching wake);
-- confirmation of each setup command requires its transport reply and read-only state (cancelled wake, enabled chat, or effective default quiet window); slash commands have no transcript turn; waits are bounded and mismatches stop setup;
-- after S, also sends `/pulse on` if the chat is off;
+- confirmation of each setup command requires its transport reply and read-only state (cancelled wake, enabled chat, or effective default quiet window); slash commands have no transcript turn; baseline mismatches stop setup, while episode cleanup retries unresolved targets at most every 2 minutes, up to 6 attempts per runner session;
+- after any episode, also sends `/pulse on` if the chat is off;
 - checks that the chat is enabled before the next episode.
 
 These are logged as setup, never as an episode reply or a void. An episode's close time locks when cleanup starts. A late delivery remains attributed to that episode, but never reopens it or causes a stop, flip or thanks. Leftover wakes therefore never carry into a later episode or toward the active-wake limit.
@@ -192,7 +192,7 @@ A delivery is a bot message in the DM, matched to a wake turn:
 - a send or read failure of the user client;
 - a Telegram or network outage of 5 minutes or more;
 - an M arming turn is still running 5 min after its send (void and requeue the M episode; do not send its remaining requests);
-- another episode turn cannot be correlated within 5 min (`turn_unresolved`), or a cleanup cancel has a transient client error (`cleanup_client_error`); void and requeue where allowed, continuing cleanup with read-only state verification before any bounded idempotent cancel retry;
+- another episode turn cannot be correlated within 5 min (`turn_unresolved`); void and requeue where allowed;
 - an episode's scheduled first send passed by more than 2 minutes while the runner was down or started late (do not send it late; requeue it);
 - a previous episode overran while the runner was up, delaying the next first send more than 2 minutes (`previous_episode_overran`; do not send late; requeue it);
 - the runner process stopped while the window was open (a crash or host restart, recorded by the runner's own start line on resume), so a scheduled action may have been missed.
@@ -212,16 +212,16 @@ Rules:
   - missing required non-void coverage at the end of day 8 makes the affected bars **INCOMPLETE**, never PASS.
 
 **Aborts and hard failures.**
-- **Abort:** a change to a frozen setting (plugin version, plugin entry, model, plugin set, Hermes version or Hermes commit) aborts the run. It is reported as **ABORTED** and may be restarted from day 1.
+- **Abort:** continuous frozen-state mismatch or unreadability for at least 60 s and 3 reads (`frozen_state_changed`, `frozen_state_unreadable`), or exhausted episode cleanup (`cleanup_failed`), aborts the run. It is reported as **ABORTED** and may be restarted from day 1. Frozen state includes plugin version, plugin entry, model, plugin set, Hermes version, installed commit and source HEAD.
 - **Hard failure:** a B3-5 or B3-6 violation ends the soak. The run is reported as **FAIL**, and stays FAIL even if a fixed release is later soaked in a fresh run.
 
 ## Adjudication
 
 - **Packets:** blind packets for every arming reply and every delivery.
-  - Arming replies carry the owner message, the visible text, and the turn's `pulse` results and `receipt`.
+  - Arming replies carry the owner message, the visible text, the turn's `pulse` results and `receipt`, and the plugin's documented owner-reminder contract (`tool_contract`).
   - Every delivery carries the request, the stored due time, visible text, and its wake turn's event payloads and non-`pulse` tool results (including empty lists when no such tools ran). W deliveries also carry the wake turn's file-event payload and the runner's logged actual flip, so a statement that the job reached `DONE` can be checked.
 - **Verdict fields:** `useful`, `fabrication`, `narration`, `overpromise`.
-- The judge is a different model family from the profile's model.
+- The judge is a different model family from the profile's model. Its prompt is registered in `JUDGE.md`.
 - The release owner spot-checks every judge FAIL against its transcript.
 
 ## Amendments
@@ -242,3 +242,5 @@ Rules:
 14. **2026-10-14 (runner PR): Scoring scope.** B3-5 covers the matching S wake only; before-stop recurrence belongs to B3-1; no-baseline W has capture-only scoring; B3-7 set claims cover arming replies only; hourly cron covers the observation window.
 15. **2026-10-14 (runner PR): Setup and cap tightening.** Amendments 5–8 now require total expected deliveries ≤ `max_messages_per_day` − 1, explicit /new confirmation via /approve and Hermes session proof, all non-terminal episode wakes cancelled, and matching Tokyo timezones. No scoring bar is relaxed.
 16. **2026-10-14 (runner PR): Send-free preflight and smoke usage.** Tighten amendment 7: a pre-existing non-built-in active, proposed or paused wake stops both soak and smoke before any send, preserving the owner's wakes; cancel only additions during setup. All read-only predicates run before sends, with specific failure reasons. Built-in start-day usage is recorded and budgeted, not carried-over usage. Smoke is not a soak day and records usage without rejecting it; its owner one-shot bypasses the cap. Five-minute smoke timing and `NOT_EXERCISED` bars prevent unsupported coverage claims. Distinct/edited DM logging, recoverable episode voids and cleanup-only resume preserve evidence without broadening the soak bars.
+17. **2026-10-14 (runner PR, review round 2): Bounded recovery and evidence.** Terminal rows (abort, hard fail) always run bounded cleanup, including after a restart. Episode cleanup re-reads live state and retries idempotent cancels and `/pulse on` at most every 2 minutes, 6 times per runner session, then aborts (ABORTED) with `cleanup_failed`; it never voids a closed episode. Frozen-state checks abort only after 60 s of continuous mismatch and at least 3 reads; preflight re-reads live state before the first send, and the install stamp's commit must equal the source HEAD when both are present. Send-relative actions and windows follow the actual first send (R-clock and M unchanged); a late W baseline still gets its flip and 30-minute window. B3-6 covers matching wakes only; B3-5 needs the stop snapshot's wake and session rows; pre-void packets need verdicts; delivery packets carry the sent owner text.
+18. **2026-10-14 (runner PR, review round 2): Judge context.** Arming packets carry the plugin's documented owner-reminder contract: a granted `owner_asked` stores `owner_requested: true`, and the reminder is then not muted by the unanswered count and not capped. A true "won't be muted" claim is therefore checkable rather than an overpromise. The judge prompt is registered in `JUDGE.md`. Found by blind-judging the live smoke; no bar changes. Cleanup commands wait for Tokyo active hours, and a missing chat session counts as a disabled chat.

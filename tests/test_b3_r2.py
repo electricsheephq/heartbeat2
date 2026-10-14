@@ -65,7 +65,7 @@ def test_exact_rng_order_and_round_up(monkeypatch):
 
 def test_hashseed_process_determinism():
     code = "from bench.soak.schedule import build,canonical; from datetime import date; print(canonical(build(date(2026,10,15),'Asia/Tokyo')))"
-    results = [subprocess.run([sys.executable, '-B', '-c', code], env=dict(os.environ, PYTHONHASHSEED=seed), capture_output=True, text=True, check=True).stdout for seed in ('1','98765')]
+    results = [subprocess.run([sys.executable, '-B', '-c', code], env=dict(os.environ, PYTHONHASHSEED=seed), capture_output=True, text=True, check=True, timeout=120).stdout for seed in ('1','98765')]
     assert results[0] == results[1]
 
 
@@ -318,9 +318,11 @@ def test_cleanup_refusal_cannot_leave_an_active_wake(tmp_path):
     r.active=e;r.send(e,'request:0',e['sends'][0]['text'],'request');r.clock.sleep(15);r.turns()
     w=store.list_wakes('chat')[0]
     r.emit('send_intent',e['id'],key='setup_cancel:'+w.id,text='/pulse cancel '+w.id,purpose='setup')
-    for n in (1,2): r.emit('send_intent',e['id'],key=f'setup_cancel:{w.id}:retry:{n}',text='/pulse cancel '+w.id,purpose='setup')
-    assert r.cleanup(e) is False and r.has('setup_failed',None)
-    assert next(x for x in r.rows if x['kind']=='setup_failed')['reason']=='cleanup_retry_exhausted'
+    for n in range(1,6): r.emit('send_intent',e['id'],key=f'setup_cancel:{w.id}:retry:{n}',text='/pulse cancel '+w.id,purpose='setup')
+    r.clock.sleep(120)
+    assert r.cleanup(e) is False and r.has('cleanup_failed',e['id'])
+    assert not r.has('setup_failed',None)
+    assert next(x for x in r.rows if x['kind']=='cleanup_failed')['reason']=='wake_still_active'
     store.close()
 
 

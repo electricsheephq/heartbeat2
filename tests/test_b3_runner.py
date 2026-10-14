@@ -184,7 +184,9 @@ def test_voids(tmp_path, reason):
         elif reason == 'gateway_restart': (r.home/'gateway-starts.log').write_text('1\n2\n')
         elif reason in ('client_error', 'client_outage_5m'): c.failed = 'read'
     r.clock.callback = tick
-    assert r.run() == (1 if reason in ('client_error','client_outage_5m') else 0)
+    assert r.run() == 0  # Amendment 17: live cleanup proof survives missing command replies.
+    assert not r.has('setup_failed', None) and r.has('episode_end', e['id'])
+    assert all(w['status'] == 'cancelled' for w in r.pulse.wakes('chat'))
     assert any(row['kind'] == 'void' and row['reason'] == reason for row in r.rows)
     if reason == 'gateway_restart': assert any(row['kind'] == 'gateway_starts' and row['new'] == [1.0, 2.0] for row in r.rows)
     store.close()
