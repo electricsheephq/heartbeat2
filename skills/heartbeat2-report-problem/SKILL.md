@@ -85,7 +85,7 @@ If you can write files, also save a short one-line title to its own file (with a
 ## 7. Publish only after an explicit yes to this draft
 
 Show the user exactly what will be published and where; both destinations are public. For a new issue in electricsheephq/heartbeat2, that is the title and the text as saved in the files. For a comment on issue number N there, only the saved text is posted. Without file tools, show the exact title and text from chat that the user will paste. Ask them to confirm it holds no secrets or private messages, then ask whether to publish it, change it, or stop. After any change, update the files (or the chat draft) and show them again before asking.
-An earlier "report it", "just fix it" or an ambiguous reply does not approve this draft. Only a yes after the user has seen it does.
+An earlier "report it", "just fix it", a yes to the secrets question alone, or an ambiguous reply does not approve this draft. Only an explicit yes to publishing, given after the user has seen this text, does.
 
 - New issue, with a signed-in GitHub CLI:
 
