@@ -327,7 +327,7 @@ def test_R3_R10_recording_context_registers_everything(fake_ctx):
     assert set(fake_ctx.tools)=={'pulse'}
     assert set(fake_ctx.hooks)==set(registration.HOOKS)
     assert set(fake_ctx.commands)=={'pulse'}
-    assert set(fake_ctx.skills)=={'heartbeat2-usage'}
+    assert set(fake_ctx.skills)=={'heartbeat2-usage','heartbeat2-report-problem'}
 
 
 def test_R3_R11_slow_probes_alive_no_false_notice(engine):

@@ -247,6 +247,8 @@ def _register_surfaces(ctx,runtime):
     if skill:
         skill('heartbeat2-usage',Path(__file__).resolve().parents[1]/'skills/heartbeat2-usage/SKILL.md',
               'Close named open loops with bounded wakes and deterministic watchers.')
+        skill('heartbeat2-report-problem',Path(__file__).resolve().parents[1]/'skills/heartbeat2-report-problem/SKILL.md',
+              'HeartBeat 2.0: report a bug or problem')
 
 
 def register(ctx,**options):

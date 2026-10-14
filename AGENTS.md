@@ -11,7 +11,7 @@ HeartBeat 2.0 is a standalone Hermes Agent plugin for bounded wakes and determin
 - `plugin.yaml`: manifest, compatibility and settings schema.
 - `__init__.py` and `heartbeat2/registration.py`: plugin loading, hooks and profile runtime.
 - `heartbeat2/`: scheduler, policy, commands, probes and SQLite store.
-- `skills/heartbeat2-usage/SKILL.md`: bundled usage guidance.
+- `skills/heartbeat2-usage/SKILL.md`: bundled usage guidance; `skills/heartbeat2-report-problem/SKILL.md`: the bug-report workflow.
 - `tests/`: network-denied unit tests and separate integration/E2E suites.
 - `bench/`: deterministic simulation and separately operated live benchmarks.
 - `.github/workflows/`: unit matrix, pinned-Hermes loader and gateway E2E CI.

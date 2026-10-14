@@ -144,7 +144,7 @@ class Tool:
                     w = e.store.create_wake(result.wake)
                     if child_key:
                         e.store.set_meta(child_key,'1')
-                    item = {'ok':True,'wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w),'receipt':self.receipt(w,s)}
+                    item = {'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w),'receipt':self.receipt(w,s)}
                     if args.get('owner_asked') is True and not requested:
                         item['owner_asked_ignored'] = 'wake_turn' if flight is not None else 'not_owner_turn' if not evidence else 'not_one_shot'
                     return item
@@ -247,7 +247,7 @@ class Tool:
                         e.cancel_occurrences(w.id,'paused' if action=='pause' else 'cancelled',preserve_started=True)
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
                     w=e.store.get_wake(w.id)
-                    item={'ok':True,'wake':asdict(w),'clamped':clamps,'cache':self.cache_result(w)}
+                    item={'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':clamps,'cache':self.cache_result(w)}
                     if action in {'update','resume'}: item['receipt']=self.receipt(w,s)
                     results.append(item)
                 return results[0] if args.get('id') != 'all' and results else {'ok':True,'results':results}
@@ -316,7 +316,7 @@ class Tool:
                 if seconds>=size and seconds%size==0: return f'{seconds/size:g}{unit}'
             return f'{seconds:g}s'
         watcher=w.kind in PROBE_KINDS | EVENT_KINDS
-        if w.status=='proposed': parts=[f'Proposed, not armed: awaiting /pulse ok {w.id}.']
+        if w.status=='proposed': parts=[f'Not set yet: it is armed only after the owner sends /pulse ok {w.id}.']
         elif w.status=='paused': parts=['Paused.']
         elif w.kind=='at': parts=['Already due; awaiting its wake turn.' if w.next_due_at is None else
             'Due now; it fires on the next check.' if w.next_due_at<=e.clock.now() else f'Fires once at {local(w.next_due_at)}.']

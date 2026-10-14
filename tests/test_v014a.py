@@ -294,7 +294,8 @@ def test_governor_card_uses_tool_cache_label(engine, kind):
 def test_settings_descriptions_and_draft_version():
     root = Path(__file__).resolve().parents[1]
     manifest = yaml.safe_load((root / 'plugin.yaml').read_text())
-    top = next(l for l in (root / 'CHANGELOG.md').read_text().splitlines() if l.startswith('## '))
+    # CONTRIBUTING.md invites notes under '## Unreleased'; the first versioned heading must match the manifest.
+    top = next(l for l in (root / 'CHANGELOG.md').read_text().splitlines() if l.startswith('## ') and l != '## Unreleased')
     assert top.split()[1] == manifest['version'], (top, manifest['version'])
     for key, field in manifest['config_schema'].items():
         assert field['description'].rstrip('.') != field['label'], key

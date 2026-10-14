@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- A proposed wake (`agent_can_create: ask_first`) now reads as not set. Its tool result carries `armed: false`, and its receipt starts "Not set yet: it is armed only after the owner sends /pulse ok <id>." Every create, update, pause and resume result carries `armed` (#91).
+- The wake text adds one contract line: if the chat shows the note's subject was settled after the wake was armed, the turn ends silently with `outcome="done"` and `notify=false` (#92).
+- A bundled `heartbeat2-report-problem` skill drafts a bug report from status and logs, without firing wakes or sending DMs. It files to this repository with `gh` only after the user approves the draft.
+
 ## 0.1.18 — 2026-10-14
 
 - Owner-requested one-time reminders, including `/pulse add`, can now be due exactly at `max_reminder_days` (365 days by default). Long reminders keep `max_lifetime_days` of grace after their due time, so they fire on time or follow the catch-up rule after downtime; quiet hours or wake spacing at the due time hold them into that grace instead of refusing them. Lowering `max_reminder_days` still expires a stored reminder not yet due at the new bound. Reminders created before 0.1.18 keep the expiry their receipt stated. Other wakes still must be due before their lifetime bound (#82).
