@@ -1,5 +1,20 @@
 # Security and data handling
 
+Please report vulnerabilities privately: [open a security advisory](https://github.com/electricsheephq/heartbeat2/security/advisories/new).
+Do not put security problems in public issues.
+
+We aim to acknowledge reports within 3 business days and to share a decision or fix plan within 14 days.
+
+## Security report scope
+
+- Wakes or messages sent outside the invoking gateway chat, to a disallowed recipient, or without the required consent.
+- One profile's schedules, notes or other plugin data exposed to another profile.
+- Credentials or secrets exposed through the plugin.
+
+## Out of scope
+
+- Hermes core gateway bugs: report them to [Hermes Agent upstream](https://github.com/NousResearch/hermes-agent/security).
+
 Disclosure — wakes and watchers run full turns on the conversation's own model,
 billed like any message; command probes run allowlisted read-only commands without
 an approval prompt; url probes make GET requests you configured; state stays in the
