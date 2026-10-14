@@ -265,3 +265,32 @@ def test_no_chaining_and_release_metadata():
     assert '`max_reminder_days`' in (root/'README.md').read_text()
     setting = yaml.safe_load((root/'plugin.yaml').read_text())['config_schema']['max_reminder_days']
     assert setting['type'] == 'int' and setting['default'] == 365
+
+
+@pytest.mark.parametrize('owner_asked,until,error', [
+    (True, {'expires':'in 31d'}, None),
+    (True, {}, 'set until.expires to extend it'),
+    (False, {'expires':'in 31d'}, 'max_lifetime_days setting'),
+])
+def test_owner_retime_of_agent_reminder_gets_reminder_bound(engine, owner_asked, until, error):
+    result = create(engine)
+    assert result.get('ok'), result
+    w = engine.store.get_wake(result['wake']['id'])
+    assert not w.owner_requested
+    owner_turn(engine)
+    result = engine.tool.handle({'action':'update','id':w.id,'trigger':{'kind':'at','at':'in 30d'},
+                                 'owner_asked':owner_asked,'until':until}, session_id='sid')
+    stored = engine.store.get_wake(w.id)
+    if error:
+        assert result.get('error') == 'invalid_request' and error in result['detail'], result
+        assert stored == w
+    else:
+        assert result.get('ok'), result
+        assert stored.owner_requested and stored.next_due_at == engine.clock.now()+30*DAY
+
+
+def test_unknown_home_in_command_cwd_is_a_request_error(engine):
+    result = create(engine, {'kind':'command','command':['git','status'],'cwd':'~no-such-user-hb2/repo'})
+    assert result.get('error') == 'invalid_request', result
+    assert result['detail'] == 'command cwd must be a directory'
+    assert not engine.store.list_wakes(KEY)

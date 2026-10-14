@@ -189,7 +189,13 @@ class Tool:
                                 return {'error':'max_active'}
                         # An update without a trigger keeps a stored relative deadline instead of re-reading it.
                         fresh = 'trigger' in args
-                        result = self.reschedule(w) if action=='resume' else self.prepare(w,args,reschedule=fresh,reparse_deadline=fresh)
+                        trig = args.get('trigger')
+                        new_kind = trig.get('kind',w.kind) if isinstance(trig,dict) else w.kind
+                        # The owner's grant applies before the first feasibility pass, so a requested retime gets the reminder bound.
+                        base = (replace(w,owner_requested=True) if action == 'update' and w.creator == 'agent'
+                                and not w.trigger_json.get('builtin') and w.parent_wake_id is None
+                                and args.get('owner_asked') is True and evidence and new_kind == 'at' else w)
+                        result = self.reschedule(w) if action=='resume' else self.prepare(base,args,reschedule=fresh,reparse_deadline=fresh)
                         candidate, clamps = result.wake, result.clamped
                         until = args.get('until') if isinstance(args.get('until'),dict) else {}
                         timing = ('trigger_json','kind','next_due_at','deadline_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s')
@@ -410,7 +416,8 @@ class Tool:
             raw=trigger.get('cwd')
             if raw is not None and not isinstance(raw,str): raise ValueError('command cwd must be a directory')
             home=e.ctx._manager.home_path
-            cwd=Path(raw or home).expanduser()
+            try: cwd=Path(raw or home).expanduser()
+            except RuntimeError: raise ValueError('command cwd must be a directory') from None  # ~unknown-user
             if not cwd.is_absolute(): cwd=Path(home)/cwd
             if not cwd.is_dir(): raise ValueError('command cwd must be a directory')
         if kind=='url':
