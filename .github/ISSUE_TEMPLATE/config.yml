@@ -1,0 +1,9 @@
+# Keep blank issues available for questions and feature requests.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/electricsheephq/heartbeat2/security/advisories/new
+    about: Please don't open a public issue for security problems.
+  - name: Problem in Hermes Agent itself
+    url: https://github.com/NousResearch/hermes-agent/issues
+    about: Bugs in Hermes core, not in this plugin, belong upstream.
