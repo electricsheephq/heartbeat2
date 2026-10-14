@@ -26,6 +26,11 @@ def actions(e):
     return sorted(result)
 
 
+def version_at_least(version, minimum):
+    try: return tuple(int(x) for x in str(version).split('.')[:3]) >= minimum
+    except ValueError: return False
+
+
 def delivery_cost(e):
     return 3 if e['kind'] == 'M' else 0 if e['kind'] in ('N', 'C-reply') else 1
 
@@ -185,7 +190,8 @@ class Runner:
             if old is None or old['message'] != m:
                 self.emit('dm', self.active['id'] if self.active else None, message=deepcopy(m))
             self.last_seen = max(self.last_seen, m['id'])
-            if self.active and m['out'] and m['id'] not in self.sent_ids and epoch(m['date']) >= epoch(self.active['sends'][0]['at']): self.void('foreign_owner_message')
+            if (self.active and m['out'] and m['id'] not in self.sent_ids and not self.has('close', self.active['id'])
+                    and epoch(m['date']) >= epoch(self.active['sends'][0]['at'])): self.void('foreign_owner_message')
 
     def archive(self):
         snapshot = self.snapshot()
@@ -238,8 +244,9 @@ class Runner:
             if due is not None and now >= due-45 and not self.has('gate', eid, wake['id']) and not self.has('gate_missed',eid,wake['id']):
                 if now >= due or (e['kind'] == 'M' and index == 2 and now > due-30): self.emit('gate_missed',eid,key=wake['id'],due=due,request_index=index)
                 else: self.emit('gate', eid, key=wake['id'], wake=current, session=self.pulse.session(self.chat_key), due=due, request_index=index)
-            if e['kind'] == 'W' and decoded(current.get('probe_state_json')) and not self.has('baseline', eid, wake['id']):
-                self.emit('baseline', eid, key=wake['id'], probe_state_json=current['probe_state_json'], first_probe_at=current.get('updated_at'))
+            if e['kind'] == 'W' and decoded(current.get('probe_state_json')) and not self.has('baseline', eid, wake['id']) and not self.has('w_baseline_missing', eid):
+                if now >= epoch(e['flip'])+1800: self.emit('w_baseline_missing', eid, late_baseline=wake['id'])
+                else: self.emit('baseline', eid, key=wake['id'], probe_state_json=current['probe_state_json'], first_probe_at=current.get('updated_at'))
         if e['kind'] == 'M' and not self.has('m3_owner_check', eid):
             gates = [r for r in self.by_episode.get(eid, []) if r['kind'] == 'gate' and r['episode'] == eid and r['request_index'] == 2]
             if gates and now >= gates[0]['due'] and not self.has('m3_owner_check', eid):
@@ -313,6 +320,8 @@ class Runner:
                   ('gateway_injection_disabled', bool(self.frozen.get('allow_gateway_injection'))),
                   ('hermes_version_missing', bool(self.frozen.get('hermes_version'))),
                   ('hermes_commit_missing', bool(self.frozen.get('hermes_commit'))),
+                  ('plugin_version_too_old', version_at_least(self.frozen.get('plugin_version'), (0, 1, 15))),
+                  ('nondefault_settings', not self.frozen.get('nondefault_settings')),
                   ('pending_occurrences', not state['pending']), ('preexisting_wakes', not dirty),
                   ('start_day_usage', smoke or not any(r['wake_id'] not in builtin for r in state['usage'])),
                   ('start_day_budget', smoke or sum(r['delivered'] for r in builtin_usage)+expected <= self.frozen['max_messages_per_day']-1)]
@@ -429,7 +438,7 @@ class Runner:
         self.replies(e)
         close = self.close_at(e)
         if e['kind'] == 'S':
-            ds = sorted(self.deliveries(e), key=lambda d: d['visible_at'])
+            ds = sorted((d for d in self.deliveries(e) if d['visible_at'] <= epoch(e['sends'][0]['at']) + 7200), key=lambda d: d['visible_at'])
             if not ds:
                 close = epoch(e['sends'][0]['at']) + 7200
                 if now >= close and not self.has('s_no_first_delivery', eid): self.emit('s_no_first_delivery', eid)
@@ -515,7 +524,14 @@ class Runner:
             failure = hard_failure(self.analysis_rows,self.delivery_cache) if self.dirty else None
             self.dirty = False
             if failure:
-                self.emit('hard_fail', self.active['id'] if self.active else None, reason=failure, status='FAIL'); return 2
+                self.emit('hard_fail', self.active['id'] if self.active else None, reason=failure, status='FAIL')
+                e, deadline = self.active, self.clock.now() + 900
+                while e and not self.has('episode_end', e['id']):
+                    self.poll(); self.turns()
+                    if self.cleanup(e): self.emit('episode_end', e['id'], snapshot=self.snapshot()); break
+                    if self.clock.now() >= deadline: self.emit('hard_fail_cleanup_incomplete', e['id'], wakes=[self.pulse.wake(w['id']) for w in self.wakes(e, all_created=True)]); break
+                    self.clock.sleep(5)
+                return 2
             remaining = [e for e in self.episodes if e['day'] <= self.until_day and not self.has('episode_end', e['id'])]
             if not remaining:
                 if self.until_day >= 8 and self.schedule.get('mode') != 'smoke':

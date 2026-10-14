@@ -162,6 +162,7 @@ def frozen_state(profile_home, hermes_source=None, hermes_version_file=None):
                 allow_gateway_injection=isinstance(entry, dict) and entry.get('allow_gateway_injection') is True,
                 quiet_hours=settings.get('quiet_hours', '22:00-08:00'), resolved_timezone=settings.get('timezone') or config.get('timezone'),
                 max_messages_per_day=settings.get('max_messages_per_day', 6), plugin_version=str(version), settings_sha256=digest(entries.get('heartbeat2', {})),
+                nondefault_settings=sorted(k for k in settings if k not in ('timezone', 'enabled', 'allow_gateway_injection', 'settings')),
                 model=config.get('model'), plugin_set_sha256=digest(dict(directories=sorted(p.name for p in (home/'plugins').iterdir() if p.is_dir()), enabled=enabled)))
 
 

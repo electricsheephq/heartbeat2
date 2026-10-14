@@ -361,3 +361,132 @@ def test_session_meta_row_does_not_hold_the_turn_open(tmp_path):
             (3,'s','tool','{"ok": true}',106.0,None), (4,'s','assistant','Armed.',110.0,None), (5,'s','session_meta','',111.0,None)])
     assert Transcript(path, now=lambda: 125.0).turn_done('s', 100.0)
     assert not Transcript(path, now=lambda: 115.0).turn_done('s', 100.0)  # Still inside the quiet period.
+
+
+def test_r5_w_late_baseline_rejected(tmp_path):
+    for offset in (-1, 0, 1):
+        r,c,store,e=shape_rig(tmp_path/str(offset),'W')
+        try:
+            r.clock.callback=lambda: None
+            r.clock.wall=epoch(e['sends'][0]['at'])
+            r.tick_episode(e);r.clock.sleep(15);r.turns()
+            w=store.list_wakes('chat')[0]
+            assert not r.has('baseline',e['id'])
+            r.clock.wall=epoch(e['flip'])+1800+offset
+            store.cas_wake(w.id,w.status,probe_state_json={'size':8})
+            r.evidence(e)
+            assert r.has('baseline',e['id'],w.id)==(offset<0)
+            assert r.has('w_baseline_missing',e['id'])==(offset>=0)
+        finally:
+            store.close()
+
+
+def test_r5_s_first_delivery_window(tmp_path):
+    for delay in (7200, None, 7201):
+        r,c,store,e=shape_rig(tmp_path/str(delay),'S')
+        try:
+            r.clock.callback=lambda: None
+            start=epoch(e['sends'][0]['at']);r.clock.wall=start
+            r.tick_episode(e);r.clock.sleep(15);r.turns()
+            w=store.list_wakes('chat')[0]
+            r.deliveries=lambda _: ([] if delay is None else
+                [dict(visible_at=start+delay,message={'id':99},wake_id=w.id)])
+            # Skip the deadline poll to reproduce a delivery first read late.
+            r.clock.wall=start+(7200 if delay is None else delay+300)
+            r.tick_episode(e)
+            stops=[at for at,text in c.sent if text=='stop checking in on me']
+            assert stops==([start+7500] if delay==7200 else [])
+            assert r.has('s_no_first_delivery',e['id'])==(delay!=7200)
+            if delay!=7200:
+                assert r.close_at(e)==start+7200
+            if delay is None:
+                marker=next(x for x in r.rows if x['kind']=='s_no_first_delivery')
+                assert epoch(marker['t'])==start+7200
+        finally:
+            store.close()
+
+
+def test_r5_hard_failure_cleanup_and_deadline(tmp_path,monkeypatch):
+    for stalled in (False, True):
+        r,c,store,e=shape_rig(tmp_path/str(stalled))
+        try:
+            c.no_delivery=True
+            builtin=store.create_wake(Wake('chat','builtin','owner_silent',trigger_json={'builtin':True}))
+            descendants=[]
+            def hard_failure(*args):
+                if not r.active or not r.has('turn',e['id'],'request:0'):
+                    return None
+                if not descendants:
+                    for status in ('paused','proposed'):
+                        descendants.append(store.create_wake(Wake('chat','synthetic descendant','at',status=status)).id)
+                return 'synthetic_hard_failure'
+            monkeypatch.setattr('bench.soak.score.hard_failure',hard_failure)
+            original=c.send
+            def send(text):
+                if stalled and text.startswith('/pulse cancel '):
+                    c.sent.append((r.clock.now(),text))
+                    return c.message(text,True)  # No reply or state change.
+                return original(text)
+            c.send=send
+            assert r.run()==2
+            failure=next(x for x in r.rows if x['kind']=='hard_fail')
+            assert failure['reason']=='synthetic_hard_failure'
+            created={w['id'] for w in r.wakes(e,all_created=True)}
+            assert set(descendants)<created and builtin.id not in created
+            cancels=[text.split()[-1] for _,text in c.sent if text.startswith('/pulse cancel ')]
+            assert cancels and builtin.id not in cancels
+            assert store.get_wake(builtin.id).status=='active'
+            if stalled:
+                incomplete=next(x for x in r.rows if x['kind']=='hard_fail_cleanup_incomplete')
+                assert epoch(incomplete['t'])-epoch(failure['t'])==900
+                assert {w['id'] for w in incomplete['wakes']}==created
+                assert any(w['status']=='active' for w in incomplete['wakes'])
+                assert not r.has('episode_end',e['id'])
+            else:
+                assert set(cancels)==created
+                assert all(store.get_wake(wid).status=='cancelled' for wid in created)
+                end=next(x for x in r.rows if x['kind']=='episode_end')
+                assert r.rows.index(failure)<r.rows.index(end)
+                assert r.has('cleanup_verified',e['id'])
+                assert not r.has('hard_fail_cleanup_incomplete',e['id'])
+        finally:
+            store.close()
+
+
+def test_r5_preflight_version_and_registered_settings(tmp_path):
+    for setting,reason in [('timezone',None),('version','plugin_version_too_old'),
+                           ('max_messages_per_day','nondefault_settings')]:
+        r,c,store,e=shape_rig(tmp_path/setting,'N')
+        try:
+            if setting=='version':
+                (r.home/'plugins/heartbeat2/plugin.yaml').write_text('version: 0.1.14\n')
+            elif setting=='max_messages_per_day':
+                config=r.home/'config.yaml'
+                config.write_text(config.read_text().replace('timezone: Asia/Tokyo',
+                    'timezone: Asia/Tokyo, max_messages_per_day: 5'))
+            assert r.run()==(1 if reason else 0)
+            if reason:
+                failed=next(x for x in r.rows if x['kind']=='setup_failed')
+                assert failed['reason']==reason and not c.sent
+            else:
+                assert r.has('preflight',None) and not r.has('setup_failed',None)
+                assert c.sent
+        finally:
+            store.close()
+
+
+def test_r5_post_close_owner_message_does_not_void(tmp_path):
+    for closed,message_offset in [(False,31),(True,31),(True,29)]:
+        r,c,store,e=shape_rig(tmp_path/f'{closed}-{message_offset}','N')
+        try:
+            start=epoch(e['sends'][0]['at']);r.clock.wall=start+30
+            r.active=e
+            if closed:
+                r.emit('close',e['id'],close_at=r.clock.now())
+            c.message('synthetic owner message',True,start+message_offset)
+            r.clock.wall=start+60;r.poll()
+            assert r.has('dm',e['id'])
+            foreign=[x for x in r.rows if x['kind']=='void' and x['reason']=='foreign_owner_message']
+            assert bool(foreign)==(not closed)
+        finally:
+            store.close()
