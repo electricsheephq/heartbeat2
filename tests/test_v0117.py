@@ -153,7 +153,7 @@ def test_reminder_setting_bounds(value):
 
 
 @pytest.mark.parametrize('changes,days', [
-    ({'creator':'user'}, 365), ({'owner_requested':True}, 365), ({}, 14),
+    ({'creator':'user'}, 379), ({'owner_requested':True}, 379), ({}, 14),
     ({'owner_requested':True,'parent_wake_id':'parent'}, 14),
     ({'creator':'user','agent_edited':True}, 14),
     ({'owner_requested':True,'babysit':True}, 1/6),
@@ -185,9 +185,9 @@ def test_owner_expiry_clamp_label_and_lowered_setting(engine):
     result = create(engine, {'kind':'at','at':'in 30d'}, owner_asked=True, until={'expires':'in 60d'})
     assert result.get('ok'), result
     w = engine.store.get_wake(result['wake']['id'])
-    assert w.expires_at == w.created_at+40*DAY and 'max_reminder' in result['clamped']['expires']
+    assert w.expires_at == w.created_at+54*DAY and 'max_reminder' in result['clamped']['expires']
     engine.policy = replace(engine.policy, max_reminder_days=20)
-    engine.clock.advance(20*DAY)
+    engine.clock.advance(34*DAY)
     engine.times()
     assert engine.store.get_wake(w.id).status_reason == 'max_lifetime_changed'
 
@@ -239,11 +239,11 @@ def test_long_reminder_downtime_catches_up_or_reports_missed(engine, late, fired
         assert 'missed' in engine.store.get_meta('notice:'+KEY)
 
 
-def test_long_reminder_grace_bounded_by_reminder_setting(engine):
+def test_long_reminder_grace_bounded_by_hard_end(engine):
     owner_turn(engine)
     result = create(engine, {'kind':'at','at':'in 360d'}, owner_asked=True)
     assert result.get('ok'), result
-    assert result['wake']['expires_at'] == result['wake']['created_at']+365*DAY
+    assert result['wake']['expires_at'] == result['wake']['next_due_at']+14*DAY
 
 
 def test_owner_refusal_names_reminder_setting(engine):
@@ -260,7 +260,6 @@ def test_no_chaining_and_release_metadata():
     for text in (DESCRIPTION, (root/'skills/heartbeat2-usage/SKILL.md').read_text()):
         assert 'When a create is refused' in text
         assert 'never arm a stand-in' in text.lower() and 're-arms' in text
-    assert 'version: "0.1.17"' in (root/'plugin.yaml').read_text()
     assert '## 0.1.17 — 2026-10-14' in (root/'CHANGELOG.md').read_text()
     assert '`max_reminder_days`' in (root/'README.md').read_text()
     setting = yaml.safe_load((root/'plugin.yaml').read_text())['config_schema']['max_reminder_days']

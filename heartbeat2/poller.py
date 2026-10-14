@@ -407,7 +407,10 @@ class Poller:
                 self.cancel_occurrences(w.id,'expired')
                 return
             hard_end=w.created_at+self.policy.max_life_s(w)
-            if not w.trigger_json.get('builtin') and hard_end<=now:
+            # A reminder still not due at its due bound (the setting was lowered) ends there; the grace is for a due one.
+            due_end=w.created_at+self.policy.due_bound_s(w)
+            late=due_end<=now and w.next_due_at is not None and w.next_due_at>due_end
+            if not w.trigger_json.get('builtin') and (hard_end<=now or late):
                 s.cas_wake(w.id,'active',status='expired',status_reason='max_lifetime_changed')
                 self.cancel_occurrences(w.id,'max_lifetime_changed')
                 return

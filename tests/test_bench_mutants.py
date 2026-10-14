@@ -34,6 +34,7 @@ SCENARIOS={'replay_slots':['sleep-62294','hermes-scale-zero'],'claim_cas_off':['
            'transform_raw':['sentinel-17646'],'cancel_on_reply_off':['hermes-drained'],'silenced_human':['hermes-drained']}
 SCENARIOS.update(governor_pause_off=['ignored-ladder'], caps_off=['caps-owner-bypass'],
                  mute_class_regress=['mute-classes'], dm_only_off=['dm-only'])
+CONTROL_SCENARIOS = sorted({scenario for mutant in MUTANTS for scenario in SCENARIOS[mutant]})
 GATE_ORDER_MUTANT=[('heartbeat2/poller.py',
     '        from .commands import quiet_until\n        quiet=quiet_until(self,s.session_key,urgent=w.urgent)',
     '        mute=self.policy.unanswered_gate(w,s.unanswered_count)\n        if mute: return mute,False,None\n        from .commands import quiet_until\n        quiet=quiet_until(self,s.session_key,urgent=w.urgent)')]
@@ -75,7 +76,8 @@ def scratch_run(tmp_path,mutations,driver=DRIVER):
         p=tmp_path/path; text=p.read_text()
         assert text.count(old)>=1,(path,old)
         p.write_text(text.replace(old,new))
-    # A hang guard, not a speed bar: the control run takes ~1 s locally but has exceeded 12 s on a slow shared CI runner.
+    # A hang guard, not a speed bar: the selected control measured ~5.01 s locally;
+    # the full control previously exceeded 12 s on a slow shared CI runner.
     result=subprocess.run([sys.executable,'-B','-c',driver],cwd=tmp_path,capture_output=True,text=True,timeout=60)
     assert result.returncode==0,result.stderr
     return json.loads(result.stdout)
@@ -83,7 +85,14 @@ def scratch_run(tmp_path,mutations,driver=DRIVER):
 
 @pytest.fixture(scope='module')
 def control(tmp_path_factory):
-    return scratch_run(tmp_path_factory.mktemp('u6-control'),[])
+    driver=DRIVER.replace('for s in load_scenarios()',
+                          'for s in load_scenarios() if s["id"] in '+repr(CONTROL_SCENARIOS))
+    return scratch_run(tmp_path_factory.mktemp('u6-control'),[],driver)
+
+
+def test_control_covers_every_mutant():
+    for mutant in MUTANTS:
+        assert set(CONTROL_SCENARIOS) >= set(SCENARIOS[mutant]), mutant
 
 
 @pytest.fixture(scope='module', autouse=True)
