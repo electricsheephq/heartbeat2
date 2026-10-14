@@ -280,6 +280,7 @@ class Tool:
             point=max(e.clock.now(),last+parse_duration(w.trigger_json.get('after',p.checkin_after_hours*3600)))
         elif w.kind not in TIME_KINDS: return w
         if point is None or w.expires_at is None: return w
+        nominal=point
         session=e.store.get_session(w.session_key)
         if p.wake_spacing_minutes>0 and session and session.last_wake_turn_at is not None:
             point=max(point,session.last_wake_turn_at+p.wake_spacing_minutes*60)
@@ -292,8 +293,11 @@ class Tool:
         due_bound=p.due_bound_s(w)
         latest=(w.created_at or e.clock.now())+due_bound
         reminder=p.lifetime_setting(w)=='max_reminder_days' and not w.babysit
-        if point>latest or (point==latest and not reminder):
+        # A long owner reminder's own due may equal its bound; quiet hours and spacing may then hold it into the grace.
+        if nominal>latest if reminder else point>=latest:
             raise Infeasible(f'{label} after the maximum lifetime of {due_bound/86400:g} days ({p.lifetime_setting(w)} setting)')
+        if point>=hard_end:
+            raise Infeasible(f'{label} held past the maximum lifetime of {max_life/86400:g} days by quiet hours or wake spacing')
         if point<w.expires_at: return w
         if explicit_expiry or e.store.get_wake(w.id) is not None:
             local=lambda t: datetime.fromtimestamp(t,p.resolved_timezone()).strftime('%a %d %b %H:%M')

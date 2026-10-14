@@ -2,7 +2,7 @@
 
 ## 0.1.18 — 2026-10-14
 
-- Owner-requested one-time reminders, including `/pulse add`, can now be due exactly at `max_reminder_days` (365 days by default). Long reminders keep `max_lifetime_days` of grace after their due time, so they fire on time or follow the catch-up rule after downtime. Other wakes still must be due before their lifetime bound (#82).
+- Owner-requested one-time reminders, including `/pulse add`, can now be due exactly at `max_reminder_days` (365 days by default). Long reminders keep `max_lifetime_days` of grace after their due time, so they fire on time or follow the catch-up rule after downtime; quiet hours or wake spacing at the due time hold them into that grace instead of refusing them. Lowering `max_reminder_days` still expires a stored reminder not yet due at the new bound. Reminders created before 0.1.18 keep the expiry their receipt stated. Other wakes still must be due before their lifetime bound (#82).
 - Granted owner-requested agent reminders say "Counts as your own reminder: not muted or capped." in their receipts, including after update or resume. The sentence survives long-receipt trimming; user-created, ignored, proposed and paused reminders do not show it (#85).
 - Mutant checks run their control only over the scenarios they compare, giving slow CI runners more headroom while keeping the 60-second subprocess guard (#83).
 

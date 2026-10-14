@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from heartbeat2.model import Wake
-from test_engine import engine, session, KEY
+from test_engine import engine, session, start, KEY
 from test_v0113 import owner_turn, finish
 from test_v0114 import command, create, receipt
 
@@ -192,3 +192,52 @@ def test_due_bound_never_exceeds_the_hard_end(engine):
     base = Wake(KEY, 'Owner reminder', 'at', creator='agent', owner_requested=True)
     for wake in (base, replace(base, babysit=True), replace(base, creator='user'), replace(base, owner_requested=False)):
         assert engine.policy.due_bound_s(wake) <= engine.policy.max_life_s(wake), wake
+
+
+@pytest.mark.parametrize('path', ['command', 'agent'])
+def test_quiet_hours_at_the_due_bound_hold_into_the_grace(engine, command, path):
+    # The due time 365 days on falls in quiet hours: the reminder is held into its grace, not refused.
+    hour = int(engine.clock.now()//3600)%24
+    engine.policy = replace(engine.policy, quiet_hours=f'{(hour-1)%24:02d}:00-{(hour+2)%24:02d}:00')
+    w = reminder(engine, command, path)
+    assert w.next_due_at == w.created_at+365*DAY
+    assert w.next_due_at < w.expires_at <= w.created_at+379*DAY
+    finish(engine)
+    engine.clock.advance(365*DAY)
+    engine.tick()
+    assert not engine.ctx.calls
+    engine.clock.advance(3*3600)
+    engine.tick()
+    assert len(engine.ctx.calls) == 1
+    assert engine.store.get_wake(w.id).status != 'expired'
+
+
+def test_lowered_reminder_bound_expires_a_reminder_not_yet_due(engine):
+    engine.policy = replace(engine.policy, max_reminder_days=40)
+    owner_turn(engine)
+    late = create(engine, {'kind':'at', 'at':'in 30d'}, owner_asked=True)
+    exact = create(engine, {'kind':'at', 'at':'in 20d'}, owner_asked=True)
+    assert late.get('ok') and exact.get('ok'), (late, exact)
+    finish(engine)
+    engine.policy = replace(engine.policy, max_reminder_days=20)
+    engine.clock.advance(20*DAY)
+    engine.tick()
+    stored = engine.store.get_wake(late['wake']['id'])
+    assert (stored.status, stored.status_reason) == ('expired', 'max_lifetime_changed')
+    assert engine.store.get_wake(exact['wake']['id']).status != 'expired'
+    assert len(engine.ctx.calls) == 1
+    start(engine); finish(engine)
+    engine.clock.advance(10*DAY)
+    engine.tick()
+    assert len(engine.ctx.calls) == 1 and not engine.store.list_occurrences(late['wake']['id'])
+
+
+def test_spacing_past_the_hard_end_is_refused(engine):
+    # Held past the hard end, the stored expiry would precede the dispatch and the reminder would never fire.
+    engine.policy = replace(engine.policy, max_reminder_days=1, max_lifetime_days=1, wake_spacing_minutes=3000)
+    owner_turn(engine)
+    session(engine, last_wake_turn_at=engine.clock.now())
+    result = create(engine, {'kind':'at', 'at':'in 1d'}, owner_asked=True)
+    assert result.get('error') == 'invalid_request', result
+    assert 'held past the maximum lifetime of 2 days' in result['detail']
+    assert not engine.store.list_wakes(KEY)
