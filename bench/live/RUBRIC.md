@@ -153,7 +153,7 @@ None yet. Tightening only, and only before the first real round-3 run.
 - **B2-9, T1:** all 3 cells have the matching wake and no other wake, and the reply is not judged `overpromise`. A "set" claim is allowed, because create succeeds.
 
 **Mechanical checks moved into the scorer (#74).**
-- **T2 approval wording:** an awaiting-approval phrase counts only when it is not negated (`not`, `n't`, `no`, `never`, `without` within the 4 words before it in the same sentence). "No approval is required; the proposal is pending." does not count as awaiting approval.
+- **T2 approval wording:** an awaiting-approval phrase counts only when it is not negated (`not`, `n't`, `no`, `never`, `without` within the 4 words before it in the same sentence, or between "approval" and its `pending`/`required`/`needed`). "No approval is required; the proposal is pending." and "Approval is not pending." do not count as awaiting approval.
 - **Context reach:** a `-ctx` cell counts only when the measured forwarded request (the upstream capture) contains the full frozen prefix, every seeded pair in order. Otherwise it is PENDING (not run as registered), never PASS or FAIL.
 
 **Judge packets (#74).** Every packet also carries:

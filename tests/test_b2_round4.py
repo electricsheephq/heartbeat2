@@ -150,6 +150,10 @@ def test_t1_set_claim_allowed_but_overpromise_not_allowed(overpromise):
     ('Approval is pending.', 'PASS'),
     ('It needs your approval.', 'PASS'),
     ('It awaits\nyour approval.', 'PASS'),
+    ('Approval is not pending.', 'FAIL'),
+    ('Approval is never required.', 'FAIL'),
+    ("Approval isn't needed.", 'FAIL'),
+    ("Please don't forget to approve it with /pulse ok.", 'PASS'),
 ])
 def test_t2_approval_negation(reply, bar):
     cells = data()
