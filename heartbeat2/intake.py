@@ -559,9 +559,12 @@ class Intake:
             notices=json.loads(s.get_meta('notice:'+key) or '[]')
             lines+=notices
             if notices: s.set_meta('notice:'+key,'[]')
-            armed=[w for w in s.list_wakes(key) if w.status in {'active','proposed'}]
-            if e.policy.presence_line and armed:
-                lines.append(f'HeartBeat 2.0: {len(armed)} armed; /pulse shows status, /pulse off stops checks.')
+            wakes=s.list_wakes(key)
+            armed=sum(w.status=='active' for w in wakes); proposed=sum(w.status=='proposed' for w in wakes)
+            if e.policy.presence_line and (armed or proposed):
+                # A proposal is not armed until /pulse ok; say so, as its receipt does.
+                counts=', '.join(([f'{armed} armed'] if armed else [])+([f'{proposed} awaiting /pulse ok'] if proposed else []))
+                lines.append(f'HeartBeat 2.0: {counts}; /pulse shows status, /pulse off stops checks.')
             for w in s.list_wakes(key):
                 card=s.get_meta('card:'+w.id)
                 if card:

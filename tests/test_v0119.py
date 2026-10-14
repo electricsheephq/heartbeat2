@@ -51,3 +51,20 @@ def test_report_problem_skill_is_registered_with_its_description(fake_ctx):
     body = path.read_text()
     assert 'do not fire a wake or send a DM to reproduce' in body
     assert 'security/advisories/new' in body and 'issues/new?template=bug_report.yml' in body
+
+
+def context(e, turn):
+    from test_v0113 import admit
+    admit(e, mid=turn, text='Anything new?')
+    out = e.intake.pre_llm_call(session_id='sid', turn_id=turn, user_message='Anything new?', platform='telegram')
+    return (out or {}).get('context', '')
+
+
+def test_turn_context_never_counts_a_proposal_as_armed(engine):
+    engine.policy = replace(engine.policy, agent_can_create='ask_first')
+    assert create(engine).get('ok')
+    text = context(engine, 'next')
+    assert 'HeartBeat 2.0: 1 awaiting /pulse ok;' in text and 'armed' not in text
+    engine.policy = replace(engine.policy, agent_can_create='yes')
+    assert create(engine).get('ok')
+    assert 'HeartBeat 2.0: 1 armed, 1 awaiting /pulse ok;' in context(engine, 'later')
