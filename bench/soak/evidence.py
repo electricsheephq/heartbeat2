@@ -46,7 +46,8 @@ class Reader:
         self.connection.row_factory = sqlite3.Row
 
     def rows(self, query, params=()):
-        return [dict(r) for r in self.connection.execute(query, params)]
+        # Deployed Hermes stores BLOB columns (messages.display_identity); the log is JSON, so bytes become hex.
+        return [{k: v.hex() if isinstance(v, bytes) else v for k, v in dict(r).items()} for r in self.connection.execute(query, params)]
 
     def close(self):
         self.connection.close()

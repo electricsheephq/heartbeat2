@@ -333,3 +333,17 @@ def test_smoke_pending_is_send_free_failure(tmp_path,state):
     assert r.run()==1 and not c.sent
     assert next(x for x in r.rows if x['kind']=='setup_failed')['reason']=='pending_occurrences'
     store.close()
+
+
+def test_blob_columns_are_json_safe(tmp_path):
+    """Deployed transcripts carry BLOB columns; every reader row must serialize into the JSON log."""
+    import sqlite3
+    from bench.soak.evidence import Transcript
+    from bench.soak.schedule import canonical
+    path = tmp_path/'state.db'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL, display_identity BLOB)')
+        db.execute("INSERT INTO messages VALUES (1,'s','user','hi',1.0,?)", (bytes(range(32)),))
+    rows = Transcript(path).session_rows('s')
+    assert rows[0]['display_identity'] == bytes(range(32)).hex()
+    canonical(rows)
