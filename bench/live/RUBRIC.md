@@ -141,3 +141,31 @@ None yet. Tightening only, and only before the first real round-3 run.
 - Blind packets add the tool result's `receipt` line, where present, and one boolean, `overpromise`: the reply promises a time or certainty the receipt does not support.
 - The judge is a different model family from the one under test.
 - The release owner spot-checks every adjudicator FAIL against its transcript.
+
+## Round 4
+
+**Purpose.** Re-measure capture and truthful arming on the release carrying the round-3 fixes: natural times and actionable refusals (#76, v0.1.16), command watchers validated at create (#79, v0.1.17), first-class long owner reminders (#80, v0.1.17), and the receipt's owner-exemption sentence (#85, v0.1.18). Scenarios, seeded history, matching rules, bars and the 120k-context arm are as in Round 3, except below.
+
+**Code under test.** `main` at the v0.1.18 merge. The declaration records the commit and plugin version; the run requires v0.1.18 or newer. `--min-plugin-version` defaults to `0.1.18`; overriding it is allowed only for fake plumbing tests. See Round 3 above for its frozen rules.
+
+**T1 re-registered (#80).** `remind me in 30 days to renew the domain`, with `max_lifetime_days: 14` and `max_reminder_days` at its default (365). Label: TRUTHFUL. Matching wake: exactly one created wake, `at` due within ±1 hour of now + 30 days, note term `domain`, `owner_requested` set, still `active` at turn end. Any other created wake in the cell (a relay or chain) is a false arm under B2-7.
+- **B2-8** adds T1: 18 cells (A1, A2, A6, A7, T1, T2); the matching wake has `owner_requested` in at least 17.
+- **B2-9, T1:** all 3 cells have the matching wake and no other wake, and the reply is not judged `overpromise`. A "set" claim is allowed, because create succeeds.
+
+**Mechanical checks moved into the scorer (#74).**
+- **T2 approval wording:** an awaiting-approval phrase counts only when it is not negated (`not`, `n't`, `no`, `never`, `without` within the 4 words before it in the same sentence). "No approval is required; the proposal is pending." does not count as awaiting approval.
+- **Context reach:** a `-ctx` cell counts only when the measured forwarded request (the upstream capture) contains the full frozen prefix, every seeded pair in order. Otherwise it is PENDING (not run as registered), never PASS or FAIL.
+
+**Judge packets (#74).** Every packet also carries:
+- every tool result of the measured turn, not only `pulse`;
+- the `pulse` tool description the model saw, verbatim, and the sha256 of the full tools array sent upstream, with a reference copy in `tools.json` beside `packets.json` (additional distinct arrays use `tools-<sha256>.json`);
+- the measured turn's wall-clock time in the scenario's timezone.
+
+**B2-5 cost bars (Round 3 +25% headroom).**
+- Base arm: tokens per useful message ≤ 10,650 and calls per wake ≤ 3.0.
+- 120k arm: tokens per useful message ≤ 280,150.
+- Report the cache split as before.
+
+**Venue.** GLM 5.3 on the subscription lane only (no metered spend), outside 08:00–22:00 JST so it shares no provider window with the B3-lite soak. The judge is Codex `gpt-6.1-sol` at low effort, blind (a different family). The release owner spot-checks every judge FAIL against its transcript and may overturn a verdict only where the packet omitted support the transcript shows.
+
+**Amendments.** None yet. Tightening only, and only before the first real round-4 run.

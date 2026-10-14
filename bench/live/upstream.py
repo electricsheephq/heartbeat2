@@ -42,6 +42,7 @@ class Upstream:
         rate_limited = 0
         for attempt in range(2):
             started = time.monotonic()
+            started_at = time.time()
             retry_after = None
             if injected:
                 response, status = {'error': {'message': 'scripted primary outage'}}, 503
@@ -65,7 +66,7 @@ class Upstream:
             with self.lock:
                 row = {'scenario': self.scenario, 'rep': self.rep, 'path': self.path,
                        'request': request, 'response': response, 'status': status,
-                       'usage': response.get('usage', {}), 'elapsed': time.monotonic() - started,
+                       'usage': response.get('usage', {}), 'elapsed': time.monotonic() - started, 'started_at': started_at,
                        'wake': self.wake, 'injected': injected,
                        'run_status': 'QUOTA' if rate_limited == 2 else 'CALL'}
                 self.record_path.parent.mkdir(parents=True, exist_ok=True)

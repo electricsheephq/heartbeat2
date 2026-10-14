@@ -140,3 +140,6 @@ scenarios:
   - {<<: *negative, id: N7, owner: 'stop checking in on me', prearm: {kind: every, every: 1h, note: 'check in on the owner'}}
   - {<<: *negative, id: T1, label: TRUTHFUL, owner: 'remind me in 30 days to renew the domain', settings: {max_lifetime_days: 14}}
   - {<<: *capture, id: T2, label: TRUTHFUL, owner: 'remind me in 10 minutes to send the file', settings: {agent_can_create: ask_first}, match: {families: [at], due: 'in 10m', status: proposed, term: file}}
+round4:
+  T1:
+    match: {families: [at], due: 'in 30d', tolerance: 1h, status: active, term: domain}
