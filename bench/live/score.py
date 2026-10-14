@@ -66,9 +66,9 @@ def bars(cells, texts, reps):
 def aggregate(score):
     for path, group in score['paths'].items():
         cells, texts = group['cells'], group['texts']
-        if score.get('round') == 3:
+        if score.get('round') in (3, 4):
             from .round3 import bars as round3_bars
-            group['bars'] = round3_bars(cells, texts, score['reps'], '-ctx' in path)
+            group['bars'] = round3_bars(cells, texts, score['reps'], '-ctx' in path, score['round'])
         else:
             group['bars'] = bars(cells, texts, score['reps'])
         useful = sum(not t['narration'] and not t['missing_tokens'] and
@@ -84,7 +84,7 @@ def aggregate(score):
             'calls_per_useful_message': calls / useful if useful else None,
             'calls_per_wake': wake_calls / wakes if wakes else None,
             'judgment_status': 'COMPLETE' if all('verdict' in t for t in texts) else 'PENDING'}
-        if score.get('round') == 3:
+        if score.get('round') in (3, 4):
             split = dict.fromkeys(('input', 'cache_read', 'cache_write', 'output'), 0)
             for c in cells:
                 for row in c.get('upstream_rows', []):
@@ -95,6 +95,12 @@ def aggregate(score):
                     for key, value in zip(split, values):
                         split[key] += value
             group['bars']['B2-5'].update(cache_split=split, cache_split_per_useful_message={k: v / useful if useful else None for k, v in split.items()})
+        if score.get('round') == 4:
+            cost = group['bars']['B2-5']
+            ready = group['bars'].pop('cost_ready') and cost['judgment_status'] == 'COMPLETE'
+            ok = cost['tokens_per_useful_message'] is not None and cost['tokens_per_useful_message'] <= (280150 if '-ctx' in path else 10650)
+            ok &= '-ctx' in path or cost['calls_per_wake'] is not None and cost['calls_per_wake'] <= 3.0
+            cost['status'] = ('PASS' if ok else 'FAIL') if ready else 'PENDING'
     return score
 
 
@@ -112,7 +118,7 @@ def score_results(results, definitions, reps=3, round=2):
         seen.add(identity)
         group = score['paths'].setdefault(result['path'], {'cells': [], 'texts': []})
         wakes = [w for w in result.get('wake_set', []) if w['creator'] == 'agent']
-        ended = wake_set_ended(wakes) or round == 3 and result.get('session', {}).get('enabled') in (False, 0)
+        ended = wake_set_ended(wakes) or round in (3, 4) and result.get('session', {}).get('enabled') in (False, 0)
         rows = result.get('upstream_rows', [])
         group['cells'].append({k: result[k] for k in ('scenario', 'rep', 'status', 'delivered')} | {
             'upstream': result.get('upstream', 'live'),
@@ -123,9 +129,9 @@ def score_results(results, definitions, reps=3, round=2):
             group['texts'].append({'id': packet_id(result, i), 'scenario': result['scenario'],
                 'rep': result['rep'], 'label': spec['label'], 'narration': bool(NARRATION.search(text)),
                 'missing_tokens': [t for t in spec['expect'] if not token_present(t, text)]})
-    if round == 3:
+    if round in (3, 4):
         from .round3 import augment
-        augment(score, results, specs)
+        augment(score, results, specs, round)
     return aggregate(score)
 
 
@@ -140,7 +146,7 @@ def write(score, out):
         lines.append(f'| {path} | ' + ' | '.join(b[k] for k in ('B2-1', 'B2-2', 'B2-3', 'B2-4')) +
                      f' | {b["B2-5"]["tokens_per_useful_message"]} | {b["B2-5"]["calls_per_wake"]} |')
     (out / 'score.md').write_text('\n'.join(lines) + '\n')
-    if score.get('round') == 3:
+    if score.get('round') in (3, 4):
         keys = [f'B2-{i}' for i in range(6, 11)]
         lines += ['\n| Path | ' + ' | '.join(keys) + ' |', '|---|' + '---|' * len(keys)]
         lines += ['| ' + path + ' | ' + ' | '.join(group['bars'][k] for k in keys) + ' |' for path, group in score['paths'].items()]
@@ -151,13 +157,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--results', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
-    parser.add_argument('--round', type=int, choices=[2, 3], default=2)
+    parser.add_argument('--round', type=int, choices=[2, 3, 4], default=2)
     args = parser.parse_args()
     from .run import ROOT, scenarios
     if args.out.resolve() == ROOT or ROOT in args.out.resolve().parents:
         parser.error('results must stay outside the repository')
     results = [json.loads(p.read_text()) for p in args.results.glob('P*/*.json')]
-    write(score_results(results, scenarios(), round=args.round), args.out)
+    write(score_results(results, scenarios(round=args.round), round=args.round), args.out)
 
 
 if __name__ == '__main__':

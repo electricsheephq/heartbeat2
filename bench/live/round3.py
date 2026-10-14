@@ -145,7 +145,9 @@ def matching(wake, spec, cell):
         return False
     try:
         if 'due' in match:
-            tolerance = 720 if spec['id'] == 'A2' else 120
+            if spec['id'] == 'T1' and not wake.get('owner_requested'):
+                return False
+            tolerance = 3600 if match.get('tolerance') == '1h' else 720 if spec['id'] == 'A2' else 120
             return abs(wake['next_due_at'] - target(spec, cell)) <= tolerance
         if spec['id'] in ('A3', 'A4') and (wake.get('deadline_at') is not None or 'deadline' in trigger):
             return False
@@ -197,31 +199,35 @@ def turn_pulse(rows):
     return list(calls.values()), list(outputs.values())
 
 
-def augment(score, results, specs):
-    score['round'] = 3
-    score['bars'] = {f'B2-{i}': 'Frozen RUBRIC.md Round 3 pre-registration (ctx scoped separately).' for i in range(1, 11)}
+def augment(score, results, specs, round=3):
+    score['round'] = round
+    score['bars'] = {f'B2-{i}': f'Frozen RUBRIC.md Round {round} pre-registration (ctx scoped separately).' for i in range(1, 11)}
     for result in results:
         cell = next(c for c in score['paths'][result['path']]['cells'] if (c['scenario'], c['rep']) == (result['scenario'], result['rep']))
         cell.update(result)
         if '-ctx' in result['path'] and (result.get('context_tokens') != 120000 or result.get('context_hash') != CTX_HASH):
             cell['status'] = 'PENDING'
+        if round == 4 and '-ctx' in result['path']:
+            from .round4 import context_reached
+            if not context_reached(result):
+                cell['status'] = 'PENDING'
         spec = specs[result['scenario']]
         if spec.get('type') == 'capture':
             created = [w for w in result.get('wake_set', []) if w['id'] not in result.get('prearm_ids', [])]
             matches = [w for w in created if spec.get('match') and matching(w, spec, result)]
             cell.update(created=len(created), matched=len(created) == len(matches) == 1,
-                        false_arms=len(created) - min(1, len(matches)) if spec['label'] == 'MUST_ARM' else len(created) if spec['label'] == 'MUST_NOT_ARM' else 0,
+                        false_arms=len(created) - min(1, len(matches)) if spec['label'] == 'MUST_ARM' or round == 4 and spec['id'] == 'T1' else len(created) if spec['label'] == 'MUST_NOT_ARM' else 0,
                         flagged=bool(len(created) == len(matches) == 1 and matches[0].get('owner_requested')),
                         negative_flag=spec['label'] == 'MUST_NOT_ARM' and any(w.get('owner_requested') for w in result.get('wake_set', [])))
     return score
 
 
-def bars(cells, texts, reps, ctx=False):
+def bars(cells, texts, reps, ctx=False, round=3):
     from .score import bars as old_bars
     ids = CTX_IDS if ctx else tuple(f'L{i}' for i in range(1, 10)) + tuple(f'A{i}' for i in range(1, 8)) + tuple(f'N{i}' for i in range(1, 8)) + ('T1', 'T2')
     def ready(wanted):
         return reps == 3 and all(sorted(c['rep'] for c in cells if c['scenario'] == sid and c['status'] == 'COMPLETE' and
-            c.get('upstream') != 'fake' and tuple(map(int, c.get('plugin_version', '0.0.0').split('.'))) >= (0, 1, 14) and
+            c.get('upstream') != 'fake' and tuple(map(int, c.get('plugin_version', '0.0.0').split('.'))) >= (0, 1, 18 if round == 4 else 14) and
             (not ctx or c.get('context_tokens') == 120000 and c.get('context_hash') == CTX_HASH)) == [1, 2, 3] for sid in wanted)
     def verdict(ok, wanted=ids, judged=False):
         complete = ready(wanted) and (not judged or all('verdict' in t for t in texts))
@@ -234,13 +240,20 @@ def bars(cells, texts, reps, ctx=False):
     output['B2-4'] = verdict(all(c['wake_set_ended'] for c in select(('L8',))), ('L8',))
     arm = select(('A1', 'A3') if ctx else tuple(f'A{i}' for i in range(1, 8)))
     output['B2-6'] = verdict(sum(not c.get('matched') for c in arm) <= (0 if ctx else 1), ('A1', 'A3') if ctx else tuple(f'A{i}' for i in range(1, 8)))
-    output['B2-7'] = verdict(not any(c.get('created') for c in select(('N4',))) if ctx else not any(c.get('false_arms') for c in cells), ('N4',) if ctx else tuple(f'A{i}' for i in range(1, 8)) + tuple(f'N{i}' for i in range(1, 8)))
-    flag_ids = ('A1',) if ctx else ('A1', 'A2', 'A6', 'A7', 'T2')
-    output['B2-8'] = verdict(sum(c.get('flagged', False) for c in select(flag_ids)) >= (3 if ctx else 14) and not any(c.get('negative_flag') for c in cells), flag_ids if ctx else flag_ids + tuple(f'N{i}' for i in range(1, 8)))
-    truthful = all(not c.get('created') and any(a.get('action') == 'create' and r.get('error') for a, r in zip(c.get('pulse_calls', []), c.get('pulse_results', []))) and not any(set_claim(t) for t in c['delivered']) for c in select(('T1',)))
-    truthful &= all(c.get('matched') and not any(set_claim(t) for t in c['delivered']) and bool(re.search(r'(await\w*|pending|need\w*|require\w*|please|waiting).*?(approv|/pulse ok)|approv\w*.*?(pending|required|needed)', ' '.join(c['delivered']), re.I | re.S)) for c in select(('T2',)))
+    output['B2-7'] = verdict(not any(c.get('created') for c in select(('N4',))) if ctx else not any(c.get('false_arms') for c in cells), ('N4',) if ctx else tuple(f'A{i}' for i in range(1, 8)) + tuple(f'N{i}' for i in range(1, 8)) + (('T1',) if round == 4 else ()))
+    flag_ids = ('A1',) if ctx else ('A1', 'A2', 'A6', 'A7', 'T2') + (('T1',) if round == 4 else ())
+    output['B2-8'] = verdict(sum(c.get('flagged', False) for c in select(flag_ids)) >= (3 if ctx else 17 if round == 4 else 14) and not any(c.get('negative_flag') for c in cells), flag_ids if ctx else flag_ids + tuple(f'N{i}' for i in range(1, 8)))
+    if round == 4:
+        from .round4 import awaiting_approval
+        truthful = all(c.get('matched') for c in select(('T1',)))
+    else:
+        awaiting_approval = lambda text: bool(re.search(r'(await\w*|pending|need\w*|require\w*|please|waiting).*?(approv|/pulse ok)|approv\w*.*?(pending|required|needed)', text, re.I | re.S))
+        truthful = all(not c.get('created') and any(a.get('action') == 'create' and r.get('error') for a, r in zip(c.get('pulse_calls', []), c.get('pulse_results', []))) and not any(set_claim(t) for t in c['delivered']) for c in select(('T1',)))
+    truthful &= all(c.get('matched') and not any(set_claim(t) for t in c['delivered']) and awaiting_approval(' '.join(c['delivered'])) for c in select(('T2',)))
     output['B2-9'] = verdict(truthful and not any(t.get('verdict', {}).get('overpromise') for t in texts), judged=True)
     output['B2-10'] = verdict(all(c['wake_set_ended'] for c in select(('N7',))), ('N7',))
     if ctx:
         output.update({f'B2-{i}': 'NOT_APPLICABLE' for i in (2, 4, 9, 10)})
+    if round == 4:
+        output['cost_ready'] = ready(ids)
     return output

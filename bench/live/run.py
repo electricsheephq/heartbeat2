@@ -19,8 +19,12 @@ from .upstream import QuotaError, Upstream
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def scenarios():
-    return yaml.safe_load(Path(__file__).with_name('scenarios.yaml').read_text())
+def scenarios(round=2):
+    data = yaml.safe_load(Path(__file__).with_name('scenarios.yaml').read_text())
+    overrides = data.pop('round4', {})
+    if round == 4:
+        data['scenarios'] = [s | overrides.get(s['id'], {}) for s in data['scenarios']]
+    return data
 
 
 def fake_reply(scenario, record):
@@ -92,6 +96,24 @@ def prearm(rig, spec):
             engine.close()
 
 
+def capture_create(scenario, result):
+    from .round3 import target
+    match, fixtures = scenario.get('match'), result['fixtures']
+    if not match:
+        return {'action': 'create', 'trigger': {'kind': 'at', 'at': 'in 30d'}, 'note': 'renew the domain', 'owner_asked': True}
+    trigger = {'kind': match['families'][0]}
+    if 'due' in match:
+        from datetime import datetime, timezone
+        trigger['at'] = datetime.fromtimestamp(target(scenario, result), timezone.utc).isoformat()
+    else:
+        trigger.update({'path': fixtures['path'], 'pattern': '^DONE$'} if scenario['id'] == 'A3' else
+                       {'command': fixtures['command'], 'fire_on': 'failure'} if scenario['id'] == 'A4' else {'cron': '0 9 * * 1-5'})
+    create = {'action': 'create', 'trigger': trigger, 'note': match['term'], 'owner_asked': trigger['kind'] == 'at'}
+    if scenario['id'] != 'T1':
+        create['until'] = {'owner_replies': match.get('cancel_on_reply', False), 'expires': 'in 14d'}
+    return create
+
+
 def cell(args, scenario, rep):
     args.out.mkdir(parents=True, exist_ok=True)
     tempfile.tempdir = str(args.out)
@@ -140,7 +162,7 @@ def cell(args, scenario, rep):
         cfg['fallback_model'] = {'provider': 'custom', 'model': 'bench-fallback',
                                  'base_url': rig.llm.base_url, 'api_key': 'fake-loopback-only'}
         cfg_path.write_text(hermes_yaml.safe_dump(cfg, sort_keys=False))
-    from .round3 import filler_history, resolve, target, turn_pulse
+    from .round3 import filler_history, resolve, turn_pulse
     fixtures = {}
     if scenario.get('fixture'):
         probe = rig.gateway.home / 'probe.txt'
@@ -197,19 +219,7 @@ def cell(args, scenario, rep):
             prearm_ids = [prearm(rig, scenario['prearm'])] if scenario.get('prearm') else []
             result.update(prearm_ids=prearm_ids, sent_at=time.time())
             result['owner_message'] = resolve(scenario['owner'], result['sent_at'], result['timezone'], fixtures)
-            match = scenario.get('match')
-            if match:
-                trigger = {'kind': match['families'][0]}
-                if 'due' in match:
-                    from datetime import datetime, timezone
-                    trigger['at'] = datetime.fromtimestamp(target(scenario, result), timezone.utc).isoformat()
-                else:
-                    trigger.update({'path': fixtures['path'], 'pattern': '^DONE$'} if scenario['id'] == 'A3' else
-                                   {'command': fixtures['command'], 'fire_on': 'failure'} if scenario['id'] == 'A4' else {'cron': '0 9 * * 1-5'})
-                scenario['_create'] = {'action': 'create', 'trigger': trigger, 'note': match['term'],
-                                       'owner_asked': trigger['kind'] == 'at', 'until': {'owner_replies': match.get('cancel_on_reply', False), 'expires': 'in 14d'}}
-            else:
-                scenario['_create'] = {'action': 'create', 'trigger': {'kind': 'at', 'at': 'in 30d'}, 'note': 'renew the domain', 'owner_asked': True}
+            scenario['_create'] = capture_create(scenario, result)
             before = rig.visible_ids()
             rig.owner(result['owner_message'] + ' [in:capture]')
             result.update(status='COMPLETE', delivered=rig.new_visible(before), wake_set=rig.rows('wakes'), session=rig.session())
@@ -317,7 +327,8 @@ def main():
     parser.add_argument('--reps', type=int, default=3)
     parser.add_argument('--workers', type=int, choices=[1, 2], default=2)
     parser.add_argument('--scenarios')
-    parser.add_argument('--round', type=int, choices=[2, 3], default=2)
+    parser.add_argument('--round', type=int, choices=[2, 3, 4], default=2)
+    parser.add_argument('--min-plugin-version', default='0.1.18', help='Round-4 minimum; override only for fake plumbing tests')
     parser.add_argument('--context-tokens', type=int, default=0)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--cell', help=argparse.SUPPRESS)
@@ -336,9 +347,15 @@ def main():
         parser.error('real routing requires --model and P3 also requires --fallback-model')
     if args.reps < 1:
         parser.error('--reps must be positive')
-    data = {s['id']: s for s in scenarios()['scenarios']}
+    if args.round == 4:
+        version = str(yaml.safe_load((ROOT / 'plugin.yaml').read_text())['version'])
+        if args.min_plugin_version != '0.1.18' and args.upstream != 'fake':
+            parser.error('--min-plugin-version override requires --upstream fake')
+        if tuple(map(int, version.split('.'))) < tuple(map(int, args.min_plugin_version.split('.'))):
+            parser.error(f'Round 4 requires plugin >= {args.min_plugin_version}; found {version}')
+    data = {s['id']: s for s in scenarios(round=args.round)['scenarios']}
     selected = args.scenarios.split(',') if args.scenarios else [sid for sid, s in data.items()
-        if args.round == 3 or s.get('type') != 'capture']
+        if args.round in (3, 4) or s.get('type') != 'capture']
     if set(selected) - data.keys():
         parser.error('unknown scenario: ' + ', '.join(sorted(set(selected) - data.keys())))
     if args.context_tokens < 0:
@@ -351,6 +368,11 @@ def main():
         args.path += f'-ctx{args.context_tokens}'
     if args.path.split('-ctx')[0] == 'P3' and any(data[sid].get('type') == 'capture' for sid in selected):
         parser.error('P3 does not inject its primary fault into capture turns; run capture scenarios on P1')
+    if args.round == 4 and (not args.cell or not (args.out / 'declaration.json').exists()):
+        args.out.mkdir(parents=True, exist_ok=True)
+        (args.out / 'declaration.json').write_text(json.dumps({'round': 4,
+            'commit': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
+            'plugin_version': version, 'minimum_plugin_version': args.min_plugin_version}, indent=2))
     if args.cell:
         sid, rep = args.cell.split(':')
         return cell(args, data[sid], int(rep))
