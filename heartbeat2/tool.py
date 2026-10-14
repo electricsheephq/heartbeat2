@@ -289,7 +289,11 @@ class Tool:
             point=quiet_until(e,w.session_key,urgent=w.urgent,now=point) or point
         max_life=p.max_life_s(w)
         hard_end=(w.created_at or e.clock.now())+max_life
-        if point>=hard_end: raise Infeasible(f'{label} after the maximum lifetime of {max_life/86400:g} days ({p.lifetime_setting(w)} setting)')
+        due_bound=p.due_bound_s(w)
+        latest=(w.created_at or e.clock.now())+due_bound
+        reminder=p.lifetime_setting(w)=='max_reminder_days' and not w.babysit
+        if point>latest or (point==latest and not reminder):
+            raise Infeasible(f'{label} after the maximum lifetime of {due_bound/86400:g} days ({p.lifetime_setting(w)} setting)')
         if point<w.expires_at: return w
         if explicit_expiry or e.store.get_wake(w.id) is not None:
             local=lambda t: datetime.fromtimestamp(t,p.resolved_timezone()).strftime('%a %d %b %H:%M')
@@ -321,6 +325,8 @@ class Tool:
                   f'Waits for {duration(parse_duration(w.trigger_json.get("after",p.checkin_after_hours*3600)))} of owner silence')
             parts=[lead+(f'; if nothing happens by {local(w.deadline_at)}, it tells you once' if watcher and w.deadline_at is not None else '')+'.']
         if w.status not in {'proposed','paused'}:
+            from .policy import owner_requested
+            if owner_requested(w): parts.append('Counts as your own reminder: not muted or capped.')
             if w.kind in TIME_KINDS or watcher or w.kind=='owner_silent' and not w.trigger_json.get('builtin'):
                 from .commands import quiet_until
                 due=((s.last_human_at or e.clock.now())+parse_duration(w.trigger_json.get('after',p.checkin_after_hours*3600)) if w.kind=='owner_silent' else

@@ -293,8 +293,18 @@ class Policy:
         return 'max_reminder_days' if reminder else 'max_lifetime_days'
 
     def max_life_s(self, wake):
-        seconds = getattr(self, self.lifetime_setting(wake)) * 86400
+        setting = self.lifetime_setting(wake)
+        days = getattr(self, setting)
+        if setting == 'max_reminder_days':
+            days += self.max_lifetime_days
+        seconds = days * 86400
         return min(seconds, 4 * 3600) if wake.babysit else seconds
+
+    def due_bound_s(self, wake):
+        # Never later than the hard end: a babysit wake keeps its 4-hour bound.
+        if self.lifetime_setting(wake) == 'max_reminder_days' and not wake.babysit:
+            return self.max_reminder_days * 86400
+        return self.max_life_s(wake)
 
     def clamp(self, wake: Wake, *, probe_gated: bool = False, cache_ttl=None) -> ClampedWake:
         if wake.kind not in KINDS:

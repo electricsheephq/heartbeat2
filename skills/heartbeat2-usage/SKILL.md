@@ -41,8 +41,10 @@ After arming, relay the `receipt`: timing, quiet-hour hold, mute and expiry;
 never promise exact timing yourself. A proposed wake is "awaiting your OK",
 never "armed".
 When the owner asks for a one-time reminder in their current message, set `owner_asked: true` on the `at` create; never set it for your own follow-ups.
-The receipt is what to repeat.
-Owner-requested one-time reminders use `max_reminder_days` (default 365 days);
+The receipt is what to repeat. A granted owner-requested reminder says:
+"Counts as your own reminder: not muted or capped."
+Owner-requested one-time reminders can be due up to `max_reminder_days` (default 365 days),
+with `max_lifetime_days` of grace after a long reminder's due time;
 recurring wakes, watchers and autonomous follow-ups use `max_lifetime_days`.
 When a create is refused, tell the owner why and what can be done; never arm a stand-in
 or relay wake that re-arms later to get around a limit. Do not claim a refused reminder is set.
