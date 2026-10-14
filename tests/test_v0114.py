@@ -43,7 +43,6 @@ def test_beyond_maximum_tool_and_command_do_not_store(engine, command):
     result = create(engine, {'kind':'at','at':'in 30d'})
     assert result.get('error') == 'invalid_request', result
     assert 'maximum lifetime' in result['detail'] and 'until.expires' not in result['detail']
-    assert command('add in 30d Check the report.').startswith('Error:')
     assert not engine.store.list_wakes(KEY)
 
 
@@ -273,7 +272,7 @@ def test_muted_receipts_and_cancel(engine, kind):
             'Muted: it waits for your reply.') in text
     assert 'Cancels if you reply.' in text and 'Expires ' in text
     assert 'Wakes are at least 10 min apart, so it can land a few minutes late.' in text
-    if kind == 'command': assert 'Checks every 1m' in text
+    if kind == 'command': assert 'Checks now, then every 1m' in text
     if kind == 'subagent_done': assert 'Waits for subagent_done events' in text
 
 

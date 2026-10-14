@@ -173,7 +173,8 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Minutes between wake turns | `wake_spacing_minutes` | 10 | Per chat. |
 | Fastest watcher check (seconds) | `probe_floor_seconds` | 60 | Watchers never check more often than this. |
 | Active wakes per chat | `max_active` | 10 | Also capped at 50 across the profile. |
-| Longest lifetime (days) | `max_lifetime_days` | 14 | Every wake expires by then; agent recurring wakes default to 7 days. |
+| Longest lifetime (days) | `max_lifetime_days` | 14 | Recurring wakes, watchers and agent follow-ups expire by then; agent recurring wakes default to 7 days. |
+| Longest owner one-time reminder (days) | `max_reminder_days` | 365 | Owner-requested one-time reminders, including `/pulse add`, expire by then; maximum 3650 days. |
 | Check in after a long silence | `owner_silent_checkin` | off | Off by default. One check-in per silence, with how to turn it off. |
 | Silence before a check-in (hours) | `checkin_after_hours` | 24 | Doubles for the next silence if a check-in is ignored. |
 | Wake-from-wake depth | `max_rearm_chain` | 2 | How many wakes deep a chain armed inside wake turns may go; a message from you resets it. |

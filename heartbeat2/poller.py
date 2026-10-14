@@ -128,11 +128,14 @@ class Poller:
         with s.atomic():
             noticed=set()
             for w in s.list_wakes() if self.process_start else []:
-                if w.kind in EVENT_KINDS and w.status in {'active','paused','proposed'} and 'event' in w.trigger_json:
-                    if s.cas_wake(w.id,w.status,expected_version=w.version,status='failed',status_reason='invalid_trigger_event'):
-                        self.cancel_occurrences(w.id,'invalid_trigger_event',preserve_started=True)
+                reason='invalid_trigger_event' if w.kind in EVENT_KINDS and 'event' in w.trigger_json else (
+                    'invalid_fire_on' if w.kind=='command' and w.trigger_json.get('fire_on','change') not in ('change','success','failure','json') else '')
+                if reason and w.status in {'active','paused','proposed'}:
+                    if s.cas_wake(w.id,w.status,expected_version=w.version,status='failed',status_reason=reason):
+                        self.cancel_occurrences(w.id,reason,preserve_started=True)
                         if w.session_key not in noticed:
-                            self.notice(w.session_key,f'A watcher ({w.id}) used an unsupported event filter and could never fire, so it was stopped. Ask me to set it up again.')
+                            field='event filter' if reason=='invalid_trigger_event' else 'fire_on'
+                            self.notice(w.session_key,f'A watcher ({w.id}) used an unsupported {field} and could never fire, so it was stopped. Ask me to set it up again.')
                             noticed.add(w.session_key)
             for o in s.list_occurrences() if self.process_start else []:
                 if o.state=='claimed':
@@ -403,7 +406,7 @@ class Poller:
                 s.cas_wake(w.id,'active',status='expired',status_reason='expired')
                 self.cancel_occurrences(w.id,'expired')
                 return
-            hard_end=w.created_at+min(self.policy.max_lifetime_days*86400,14400 if w.babysit else float('inf'))
+            hard_end=w.created_at+self.policy.max_life_s(w)
             if not w.trigger_json.get('builtin') and hard_end<=now:
                 s.cas_wake(w.id,'active',status='expired',status_reason='max_lifetime_changed')
                 self.cancel_occurrences(w.id,'max_lifetime_changed')

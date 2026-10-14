@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.17 — 2026-10-14
+
+- Command watchers validate `fire_on` at create and update, with an enum and an actionable refusal (#79). At startup, stored active, paused or proposed watchers with an invalid mode stop with `invalid_fire_on`; queued occurrences are cancelled while started turns are preserved, with one notice per chat. Invalid command working directories and existing non-regular file targets are also refused at create. Probe receipts name the first check: now or its local time, then the interval.
+- Owner-requested one-time reminders use `max_reminder_days` (default 365, maximum 3650), including `/pulse add` and agent `at` reminders backed by the current owner request (#80). Recurring wakes, watchers, autonomous follow-ups and children retain their existing lifetime limits; babysit remains bounded to four hours. Feasibility, expiry clamps, receipts and the poller share the bound; autonomous edits revoke owner intent and are refused if the shorter lifetime cannot fit. Lifetime refusals name the setting. The skill and tool description forbid stand-in or relay wakes that re-arm later to bypass a refusal.
+
 ## 0.1.16 — 2026-10-14
 
 - Times accept `HH:MM` (or `today HH:MM`) for the next occurrence in the chat's timezone, `tomorrow HH:MM`, `in 10 minutes`, `+10m`, and ISO date-times. Durations accept short units and words for seconds, minutes, hours, days and weeks, joined with spaces, commas or `and`; `/pulse add` accepts natural durations and bare clock times.
