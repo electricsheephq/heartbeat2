@@ -18,7 +18,7 @@ def corpus():
     emit('baseline_setup', session=session, effective_quiet='22:00-08:00', starting_transcript=[], transcript_sha256=digest([]))
     for e in s['episodes']:
         eid, k = e['id'], e['kind']; start = datetime.fromisoformat(e['sends'][0]['at']).timestamp()
-        emit('episode_start', eid, start, schedule=e, session=session, frozen={}, gateway_starts=[])
+        emit('episode_start', eid, start, schedule=e, session=session, frozen={}, gateway_starts=[], snapshot=snap())
         if k == 'W':
             emit('file_write', eid, start, mode='wb', path='fixtures/'+e['job']+'.status', bytes='RUNNING\n')
             flip = datetime.fromisoformat(e['flip']).timestamp()
@@ -31,7 +31,7 @@ def corpus():
             if k != 'N':
                 due = datetime.fromisoformat(e['due'][n]).timestamp() if e['due'] else start+3600 if k == 'S' else flip+300
                 term = e['tasks'][n]['term'] if e['tasks'] else 'DONE' if k == 'W' else 'check'
-                w = dict(id=eid+f'-{n}', kind='file' if k == 'W' else 'every' if k == 'S' else 'at', status='active', status_reason='', note=term, owner_requested=1,
+                w = dict(id=eid+f'-{n}', created_at=at, kind='file' if k == 'W' else 'every' if k == 'S' else 'at', status='active', status_reason='', note=term, owner_requested=1,
                          next_due_at=due, cancel_on_reply=k.startswith('C'), deadline_at=None, eff_interval_s=3600, max_fires=None, expires_at=None,
                          trigger_json={'path': 'fixtures/'+e.get('job', '')+'.status', 'pattern': '^DONE$', 'check_every': 300}, session_key='chat')
                 wakes.append(w); current.append(w)

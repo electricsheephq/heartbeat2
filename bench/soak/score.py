@@ -222,7 +222,7 @@ def score(schedule, rows, verdicts=None):
             baseline.get('session', {}).get('unanswered_count') == 0 and declaration.get('frozen', {}).get('allow_gateway_injection') and
             declaration.get('frozen', {}).get('hermes_version') and declaration.get('frozen', {}).get('hermes_commit')):
         for i in evidence: evidence[i] = False
-    measured_ids, watcher_intervals = set(), []
+    matched_ids, measured_ids, watcher_intervals = set(), set(), []
     logs_by_episode, ds_by_wake = {}, {}
     for r in rows: logs_by_episode.setdefault(r.get('episode'), []).append(r)
     for d in deliveries: ds_by_wake.setdefault(d['wake_id'], []).append(d)
@@ -239,6 +239,19 @@ def score(schedule, rows, verdicts=None):
         request_turns = {int(r['key'].split(':')[1]): r for r in turns if r['key'].startswith('request:')}
         ended = any(r['kind'] == 'episode_end' for r in logs)
         started = any(r['kind'] == 'episode_start' for r in logs)
+        start_snapshot = next((r.get('snapshot') for r in logs if r['kind'] == 'episode_start'), None)
+        end_row = next((r for r in logs if r['kind'] == 'setup' and r.get('key') == 'archive'),
+                       next((r for r in logs if r['kind'] == 'episode_end'), {}))
+        end_snapshot = end_row.get('snapshot')
+        if start_snapshot is not None and end_snapshot is not None:
+            known_ids = {w['id'] for w in start_snapshot['wakes']}
+            known_ids.update(w['id'] for t in logs if t['kind'] == 'turn' and 'before' in t and 'snapshot' in t for w in created(t))
+            for w in end_snapshot['wakes']:
+                trigger = decoded(w.get('trigger_json'))
+                # Only a wake turn's own creations: an owner-turn wake whose turn row is missing is an evidence gap, never a false arm.
+                if w['id'] not in known_ids and w.get('created_in') == 'wake_turn' and not (isinstance(trigger, dict) and trigger.get('builtin')):
+                    violation(2, dict(episode=eid, wake=w['id'], reason='created_outside_owner_turn'), w['created_at'])
+        elif included and ended: evidence[2] = False
         if included and (not ended or len(request_turns) != len(e['sends'])):
             for i in evidence: evidence[i] = False
         if included and (not started or last_snapshot is None):
@@ -256,6 +269,7 @@ def score(schedule, rows, verdicts=None):
             if not t: continue
             path = next((r['path'] for r in logs if r['kind'] == 'file_write' and r['mode'] == 'wb'), None)
             ws = created(t); matches = [w for w in ws if matching(w, e, n, path)] if k != 'N' else []
+            matched_ids.update(w['id'] for w in matches)
             ok = len(ws) == len(matches) == 1
             if k != 'N' and not ok: failed_capture = True; capture_times.append(t['t'])
             false = len(ws)-int(bool(matches)) if k != 'N' else len(ws)
@@ -371,7 +385,14 @@ def score(schedule, rows, verdicts=None):
         for i in evidence: evidence[i] = False
     if capture_misses > (0 if schedule.get('mode') == 'smoke' else 1) or evidence[1] and flagged < (1 if schedule.get('mode') == 'smoke' else 20): violations[1].append(dict(capture_misses=capture_misses, owner_requested=flagged))
     if delivery_checks and sum(delivery_checks)/len(delivery_checks) < .95: violations[3].append(dict(reason='under_95_percent_on_time'))
-    windows = [rebased(e, logs_by_episode.get(e['id'], [])) for e in episodes]
+    windows = []
+    for e in episodes:
+        logs = logs_by_episode.get(e['id'], [])
+        window = rebased(e, logs)
+        window['latest_close'] = max([epoch(window['latest_close'])] +
+                                     [epoch(r['close_at']) for r in logs if r['kind'] == 'close'] +
+                                     [epoch(r['latest_close']) for r in logs if r['kind'] == 'w_window'])
+        windows.append(window)
     for u in unresolved:
         at = epoch(u['message']['date'])
         occurrence_span = any(o['wake_id'] in measured_ids and o.get('started_at') is not None and o.get('ended_at') is not None and o['started_at']-60 <= at <= o['ended_at']+60 for o in (last_snapshot or {}).get('occurrences', []))
@@ -392,10 +413,11 @@ def score(schedule, rows, verdicts=None):
     costs = [o for o in (last_snapshot or {}).get('occurrences', []) if o['wake_id'] in measured_ids]
     percentile = lambda q: sorted(latencies)[min(len(latencies)-1, int((len(latencies)-1)*q))] if latencies else None
     daily = {}
-    for u in unresolved:
-        if not u['could_belong'] and epoch(u['message']['date']) >= epoch(declaration['t']):
+    unrequested = [u['message'] for u in unresolved if not u['could_belong']] + [d['message'] for d in deliveries if d['wake_id'] not in matched_ids]
+    for message in unrequested:
+        if epoch(message['date']) >= epoch(declaration['t']):
             from zoneinfo import ZoneInfo
-            day = datetime.fromtimestamp(epoch(u['message']['date']), ZoneInfo(schedule['tz'])).date().isoformat(); daily[day] = daily.get(day, 0)+1
+            day = datetime.fromtimestamp(epoch(message['date']), ZoneInfo(schedule['tz'])).date().isoformat(); daily[day] = daily.get(day, 0)+1
     metrics = dict(daily_cap_exemption='not tested', unrequested_messages_per_day=daily,
                    latency_seconds=dict(p50=percentile(.5), p95=percentile(.95)), watcher_check_every=watcher_intervals,
                    wake_cost={key: sum(o.get(key, 0) for o in costs) for key in ('cost_microusd', 'tokens_in', 'cache_read_tokens', 'cache_write_tokens', 'tokens_out', 'api_calls')}, arming_turn_cost='not measured')
