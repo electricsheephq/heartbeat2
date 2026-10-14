@@ -143,3 +143,6 @@ scenarios:
 round4:
   T1:
     match: {families: [at], due: 'in 30d', tolerance: 1h, status: active, term: domain}
+round5:
+  T1:
+    match: {families: [at], due: 'in 30d', tolerance: day, status: active, term: domain}

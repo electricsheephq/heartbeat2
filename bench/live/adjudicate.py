@@ -14,7 +14,7 @@ from .score import VERDICT_KEYS, aggregate, packet_id, write
 PAYLOAD = re.compile(r'<wake-payload\b[^>]*>\n?(.*?)\n?</wake-payload>', re.S)
 
 
-def turn_fields(result):
+def turn_fields(result, round=4):
     rows = measured_rows(result)
     tools = rows[0].get('request', {}).get('tools', []) if rows else []
     names, outputs = {}, {}
@@ -29,10 +29,15 @@ def turn_fields(result):
                 outputs[key] = {'tool_call_id': key, 'name': names.get(key), 'content': message.get('content')}
     timestamp = rows[0].get('started_at') if rows else None
     timestamp = timestamp if timestamp is not None else result.get('sent_at')
-    return {'tool_results': list(outputs.values()),
+    fields = {'tool_results': list(outputs.values()),
             'pulse_description': next((t['function'].get('description', '') for t in tools if t.get('function', {}).get('name') == 'pulse'), ''),
             'tools_sha256': hashlib.sha256(json.dumps(tools, ensure_ascii=False, indent=2).encode()).hexdigest(),
-            'measured_at': datetime.fromtimestamp(timestamp, ZoneInfo(result.get('timezone', 'UTC'))).isoformat() if timestamp is not None else None}, tools
+            'measured_at': datetime.fromtimestamp(timestamp, ZoneInfo(result.get('timezone', 'UTC'))).isoformat() if timestamp is not None else None}
+    if round >= 5:
+        messages = rows[0].get('request', {}).get('messages', []) if rows else []
+        fields.update(system_prompt=next((m.get('content', '') for m in messages if m.get('role') == 'system'), ''),
+                      pulse_parameters=next((t['function'].get('parameters', {}) for t in tools if t.get('function', {}).get('name') == 'pulse'), {}))
+    return fields, tools
 
 
 def evidence(result, limit=6, width=600):
@@ -56,11 +61,11 @@ def evidence(result, limit=6, width=600):
     return found[:limit]
 
 
-def packets(results):
+def packets(results, round=4):
     output = []
     for result in results:
         # Legacy fixtures without measured-turn metadata keep their packet shape.
-        fields, _ = turn_fields(result) if result.get('plugin_version') or any(
+        fields, _ = turn_fields(result, round) if result.get('plugin_version') or any(
             'request' in r for r in measured_rows(result)) else ({}, [])
         history = [row for pair in result['history'] for row in (
             {'role': 'user', 'content': pair['owner']},
@@ -82,7 +87,7 @@ def packets(results):
 
 
 def merge(score, verdicts):
-    keys = (*VERDICT_KEYS, 'overpromise') if score.get('round') in (3, 4) else VERDICT_KEYS
+    keys = (*VERDICT_KEYS, 'overpromise') if score.get('round', 2) >= 3 else VERDICT_KEYS
     texts = {t['id']: t for group in score['paths'].values() for t in group['texts']}
     seen = set()
     for verdict in verdicts:
@@ -105,6 +110,7 @@ def main():
     packet = sub.add_parser('packets')
     packet.add_argument('--results', type=Path, required=True)
     packet.add_argument('--out', type=Path, required=True)
+    packet.add_argument('--round', type=int, default=4)
     merger = sub.add_parser('merge')
     merger.add_argument('--score', type=Path, required=True)
     merger.add_argument('--verdicts', type=Path, required=True)
@@ -115,7 +121,7 @@ def main():
         parser.error('results must stay outside the repository')
     if args.command == 'packets':
         cells = [json.loads(p.read_text()) for p in args.results.glob('P*/*.json')]
-        result = packets(cells)
+        result = packets(cells, round=args.round)
         args.out.mkdir(parents=True, exist_ok=True)
         (args.out / 'packets.json').write_text(json.dumps(result, indent=2))
         references = {turn_fields(c)[0]['tools_sha256']: turn_fields(c)[1] for c in cells if c['delivered']}

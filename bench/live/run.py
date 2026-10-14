@@ -22,8 +22,11 @@ ROOT = Path(__file__).resolve().parents[2]
 def scenarios(round=2):
     data = yaml.safe_load(Path(__file__).with_name('scenarios.yaml').read_text())
     overrides = data.pop('round4', {})
-    if round == 4:
+    round5 = data.pop('round5', {})
+    if round >= 4:
         data['scenarios'] = [s | overrides.get(s['id'], {}) for s in data['scenarios']]
+    if round >= 5:
+        data['scenarios'] = [s | round5.get(s['id'], {}) for s in data['scenarios']]
     return data
 
 
@@ -327,8 +330,8 @@ def main():
     parser.add_argument('--reps', type=int, default=3)
     parser.add_argument('--workers', type=int, choices=[1, 2], default=2)
     parser.add_argument('--scenarios')
-    parser.add_argument('--round', type=int, choices=[2, 3, 4], default=2)
-    parser.add_argument('--min-plugin-version', default='0.1.18', help='Round-4 minimum; override only for fake plumbing tests')
+    parser.add_argument('--round', type=int, choices=[2, 3, 4, 5], default=2)
+    parser.add_argument('--min-plugin-version', default='0.1.18', help='Round-4/5 minimum; override only for fake plumbing tests')
     parser.add_argument('--context-tokens', type=int, default=0)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--cell', help=argparse.SUPPRESS)
@@ -347,15 +350,15 @@ def main():
         parser.error('real routing requires --model and P3 also requires --fallback-model')
     if args.reps < 1:
         parser.error('--reps must be positive')
-    if args.round == 4:
+    if args.round >= 4:
         version = str(yaml.safe_load((ROOT / 'plugin.yaml').read_text())['version'])
         if args.min_plugin_version != '0.1.18' and args.upstream != 'fake':
             parser.error('--min-plugin-version override requires --upstream fake')
         if tuple(map(int, version.split('.'))) < tuple(map(int, args.min_plugin_version.split('.'))):
-            parser.error(f'Round 4 requires plugin >= {args.min_plugin_version}; found {version}')
+            parser.error(f'Round {args.round} requires plugin >= {args.min_plugin_version}; found {version}')
     data = {s['id']: s for s in scenarios(round=args.round)['scenarios']}
     selected = args.scenarios.split(',') if args.scenarios else [sid for sid, s in data.items()
-        if args.round in (3, 4) or s.get('type') != 'capture']
+        if args.round >= 3 or s.get('type') != 'capture']
     if set(selected) - data.keys():
         parser.error('unknown scenario: ' + ', '.join(sorted(set(selected) - data.keys())))
     if args.context_tokens < 0:
@@ -368,9 +371,9 @@ def main():
         args.path += f'-ctx{args.context_tokens}'
     if args.path.split('-ctx')[0] == 'P3' and any(data[sid].get('type') == 'capture' for sid in selected):
         parser.error('P3 does not inject its primary fault into capture turns; run capture scenarios on P1')
-    if args.round == 4 and (not args.cell or not (args.out / 'declaration.json').exists()):
+    if args.round >= 4 and (not args.cell or not (args.out / 'declaration.json').exists()):
         args.out.mkdir(parents=True, exist_ok=True)
-        (args.out / 'declaration.json').write_text(json.dumps({'round': 4,
+        (args.out / 'declaration.json').write_text(json.dumps({'round': args.round,
             'commit': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
             'plugin_version': version, 'minimum_plugin_version': args.min_plugin_version}, indent=2))
     if args.cell:
