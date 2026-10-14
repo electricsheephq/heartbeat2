@@ -91,7 +91,8 @@ class Transcript(Reader):
         return results
 
     def turn_done(self, session_id, after_ts, quiet_s=10):
-        rows = self.turn(session_id, after_ts)
+        # Deployed Hermes appends a 'session_meta' row after a session's first turn; only conversation rows end a turn.
+        rows = [r for r in self.turn(session_id, after_ts) if r['role'] in ('user', 'assistant', 'tool')]
         return bool(rows and rows[-1]['role'] == 'assistant' and not decoded(rows[-1].get('tool_calls')) and self.now() - rows[-1]['timestamp'] >= quiet_s)
 
     def session_rows(self, session_id):

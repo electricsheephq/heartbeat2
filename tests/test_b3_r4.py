@@ -347,3 +347,17 @@ def test_blob_columns_are_json_safe(tmp_path):
     rows = Transcript(path).session_rows('s')
     assert rows[0]['display_identity'] == bytes(range(32)).hex()
     canonical(rows)
+
+
+def test_session_meta_row_does_not_hold_the_turn_open(tmp_path):
+    """Deployed Hermes writes one 'session_meta' row after a fresh session's first final answer."""
+    import sqlite3
+    from bench.soak.evidence import Transcript
+    path = tmp_path/'state.db'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_calls TEXT)')
+        db.executemany('INSERT INTO messages VALUES (?,?,?,?,?,?)', [
+            (1,'s','user','remind me in 5 minutes to check',100.0,None), (2,'s','assistant','',105.0,'[{"id":"c","function":{"name":"pulse","arguments":"{}"}}]'),
+            (3,'s','tool','{"ok": true}',106.0,None), (4,'s','assistant','Armed.',110.0,None), (5,'s','session_meta','',111.0,None)])
+    assert Transcript(path, now=lambda: 125.0).turn_done('s', 100.0)
+    assert not Transcript(path, now=lambda: 115.0).turn_done('s', 100.0)  # Still inside the quiet period.
