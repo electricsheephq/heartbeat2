@@ -197,3 +197,27 @@ def test_control_logged_closes_do_not_shorten_rebased_windows():
     dm(logs, 94000, stamp, 'unknown within rebased close')
     result = score(schedule, logs, verdicts)
     assert next(u for u in result['unresolved'] if u['message']['id'] == 94000)['could_belong']
+
+
+def test_partial_arming_match_is_a_requested_wake():
+    schedule, logs, verdicts = snapshot_corpus()
+    episode, rows = episode_rows(schedule, logs, 'M')
+    turn = next(r for r in rows if r['kind'] == 'turn' and r['key'] == 'request:1')
+    wid = next(w['id'] for w in turn['snapshot']['wakes'] if w['id'] not in {x['id'] for x in turn['before']['wakes']})
+    logs.remove(turn)
+    logs.append(dict(turn, kind='partial_arming'))
+    delivery(logs, wid, 95000, '2026-10-25T00:00:00+09:00', 'partial arming delivery')
+    delivery(logs, 'unmatched', 95001, '2026-10-25T01:00:00+09:00', 'unmatched delivery')
+    assert score(schedule, logs, verdicts)['metrics']['unrequested_messages_per_day'] == {'2026-10-25': 1}
+
+
+def test_logged_extensions_stop_at_the_first_void():
+    schedule, logs, verdicts = snapshot_corpus()
+    episode, _ = episode_rows(schedule, logs, 'W')
+    at = max(epoch(e['latest_close']) for e in schedule['episodes'])+3600
+    stamp = lambda t: datetime.fromtimestamp(t).astimezone().isoformat()
+    logs.append(dict(kind='void', episode=episode['id'], t=stamp(at), reason='client_error'))
+    logs.append(dict(kind='w_window', episode=episode['id'], t=stamp(at+60), latest_close=at+600))
+    dm(logs, 96000, stamp(at+300), 'after the void, inside the logged extension')
+    result = score(schedule, logs, verdicts)
+    assert not next(u for u in result['unresolved'] if u['message']['id'] == 96000)['could_belong']

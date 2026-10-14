@@ -277,6 +277,11 @@ def score(schedule, rows, verdicts=None):
             if len(matches) == 1:
                 w = matches[0]; matched.append((n, w, t)); measured_ids.add(w['id'])
                 if k.startswith('R') or k.startswith('C') or k == 'M': flagged += included and bool(w.get('owner_requested'))
+        # A timed-out M arming can still have created its matching wake; its deliveries belong to the request.
+        partial_path = next((r['path'] for r in logs if r['kind'] == 'file_write' and r['mode'] == 'wb'), None)
+        for r in logs:
+            if r['kind'] == 'partial_arming' and r.get('key', '').startswith('request:') and 'before' in r and 'snapshot' in r:
+                matched_ids.update(w['id'] for w in created(r) if matching(w, e, int(r['key'].split(':')[1]), partial_path))
         if k == 'S':
             for pre in (r for r in logs if r['kind'] == 'before_stop'):
                 for _,w,_ in matched:
@@ -389,9 +394,11 @@ def score(schedule, rows, verdicts=None):
     for e in episodes:
         logs = logs_by_episode.get(e['id'], [])
         window = rebased(e, logs)
+        # A voided attempt counts only before its first void, so its logged extensions stop there.
+        void = min((epoch(r['t']) for r in logs if r['kind'] == 'void'), default=float('inf'))
         window['latest_close'] = max([epoch(window['latest_close'])] +
-                                     [epoch(r['close_at']) for r in logs if r['kind'] == 'close'] +
-                                     [epoch(r['latest_close']) for r in logs if r['kind'] == 'w_window'])
+                                     [min(epoch(r['close_at']), void) for r in logs if r['kind'] == 'close'] +
+                                     [min(epoch(r['latest_close']), void) for r in logs if r['kind'] == 'w_window'])
         windows.append(window)
     for u in unresolved:
         at = epoch(u['message']['date'])
