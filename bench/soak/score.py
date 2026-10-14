@@ -362,11 +362,18 @@ def score(schedule, rows, verdicts=None):
     judged_delivery = [verdicts[p['id']] for p in packets if p['id'].startswith('d-') and p['id'] in verdicts]
     if judged_delivery and sum(v.get('useful') is True and not v.get('narration') for v in judged_delivery)/len(judged_delivery) < .95: violations[8].append(dict(reason='under_95_percent_useful'))
     bars = {f'B3-{i}': 'FAIL' if violations[i] else 'INCOMPLETE' if not evidence[i] else 'PENDING' if pending.get(i) else 'PASS' for i in evidence}
+    if schedule.get('mode') == 'smoke':
+        exercised = {e['kind'] for e in episodes if any(r['kind'] == 'episode_start' and r['episode'] == e['id'] for r in rows)}
+        required = {1: exercised-{'N'}, 2: exercised, 3: exercised-{'N','C-reply'},
+                    4: exercised & {'C-reply'}, 5: exercised & {'S'}, 6: exercised & {'M'},
+                    7: exercised, 8: exercised-{'N','C-reply'}}
+        for i, kinds in required.items():
+            if not kinds: bars[f'B3-{i}'] = 'NOT_EXERCISED'
     costs = [o for o in (last_snapshot or {}).get('occurrences', []) if o['wake_id'] in measured_ids]
     percentile = lambda q: sorted(latencies)[min(len(latencies)-1, int((len(latencies)-1)*q))] if latencies else None
     daily = {}
     for u in unresolved:
-        if not u['could_belong']:
+        if not u['could_belong'] and epoch(u['message']['date']) >= epoch(declaration['t']):
             from zoneinfo import ZoneInfo
             day = datetime.fromtimestamp(epoch(u['message']['date']), ZoneInfo(schedule['tz'])).date().isoformat(); daily[day] = daily.get(day, 0)+1
     metrics = dict(daily_cap_exemption='not tested', unrequested_messages_per_day=daily,
@@ -375,7 +382,7 @@ def score(schedule, rows, verdicts=None):
     metrics['wake_cost_by_wake'] = {wid: {key: sum(o.get(key, 0) for o in costs if o['wake_id'] == wid) for key in metrics['wake_cost']} for wid in measured_ids}
     useful = sum(v.get('useful') is True for v in judged_delivery)
     metrics['wake_cost_per_useful_delivery_microusd'] = metrics['wake_cost']['cost_microusd']/useful if useful and not pending[8] else None
-    status = 'FAIL' if bars['B3-5'] == 'FAIL' or bars['B3-6'] == 'FAIL' else 'ABORTED' if any(r['kind'] == 'abort' and r.get('reason') == 'frozen_state_changed' for r in rows) else 'FAIL' if 'FAIL' in bars.values() else 'INCOMPLETE' if 'INCOMPLETE' in bars.values() else 'PENDING' if 'PENDING' in bars.values() else 'PASS'
+    status = 'FAIL' if bars['B3-5'] == 'FAIL' or bars['B3-6'] == 'FAIL' else 'ABORTED' if any(r['kind'] == 'abort' and r.get('reason') == 'frozen_state_changed' for r in rows) else 'FAIL' if 'FAIL' in bars.values() else 'INCOMPLETE' if 'INCOMPLETE' in bars.values() or len(covered) < len(schedule['episodes']) else 'PENDING' if 'PENDING' in bars.values() else 'PASS'
     return dict(status=status, bars=bars, violations={f'B3-{i}': v for i, v in violations.items()}, voids=voids, unresolved=unresolved, metrics=metrics, packets=packets)
 
 

@@ -26,9 +26,13 @@ def actions(e):
     return sorted(result)
 
 
+def delivery_cost(e):
+    return 3 if e['kind'] == 'M' else 0 if e['kind'] in ('N', 'C-reply') else 1
+
+
 def preview(schedule, until_day, soak_dir):
     print('rubric_sha256', hashlib.sha256(Path(__file__).with_name('RUBRIC.md').read_bytes()).hexdigest())
-    print('setup: /new; /approve; archive/hash starting transcript; /pulse quiet default; cancel active/proposed/paused non-built-in wakes; enable; verify fresh-day baseline and Hermes revision')
+    print('setup: read-only preflight (refuse pre-existing non-built-in wakes, pending occurrences, invalid revision or soak usage/budget); /new; /approve; archive/hash starting transcript; /pulse quiet default; cancel only wakes appearing during setup; enable; verify baseline')
     for e in schedule['episodes']:
         if e['day'] > until_day: continue
         if e['kind'] == 'W': print(e['sends'][0]['at'], e['id'], 'write RUNNING\\n', e['path'].replace('{soak_dir}', str(soak_dir)))
@@ -115,7 +119,8 @@ class Runner:
         before = self.snapshot(); before['hermes_session_id'] = self.transcript.current_session(self.chat_key)
         try: message = self.client.send(text)
         except ClientError:
-            self.emit('client_error', eid, operation='send'); self.void('client_error'); return
+            self.emit('client_error', eid, operation='send', key=key)
+            self.void('cleanup_client_error' if purpose == 'setup' and key.startswith('setup_cancel:') else 'client_error'); return
         self.sent_ids.add(message['id'])
         self.emit('send', eid, key=key, message=message, purpose=purpose, before=before)
         self.pending.append((eid, key, message, before, purpose))
@@ -123,6 +128,7 @@ class Runner:
     def turns(self):
         for item in list(self.pending):
             eid, key, message, before, purpose = item
+            episode = next((e for e in self.episodes if e['id'] == eid), None)
             sid = self.transcript.current_session(self.chat_key)
             if purpose == 'setup':
                 replies = [r['message'] for r in self.dm_latest.values() if not r['message']['out'] and
@@ -145,6 +151,10 @@ class Runner:
                 elif self.clock.now() >= epoch(message['date'])+120:
                     self.emit('setup_failed',reason='command_reply_or_state_mismatch',key=key)
                 continue
+            if self.clock.now() >= epoch(message['date'])+300 and not (episode and episode['kind'] == 'M' and key.startswith('request:')):
+                active = self.active; self.active = episode; self.void('turn_unresolved'); self.active = active
+                self.emit('turn_unresolved', eid, key=key, message_id=message['id'])
+                self.pending.remove(item); continue
             if not sid: continue
             claimed = {r['owner']['id'] for r in self.analysis_rows if r['kind'] == 'turn' and r.get('owner') and 'id' in r['owner']}
             owner = self.transcript.owner(sid,message['text'],epoch(message['date']),claimed)
@@ -171,7 +181,9 @@ class Runner:
             return
         self.outage = None
         for m in messages:
-            self.emit('dm', self.active['id'] if self.active else None, message=m)
+            old = self.dm_latest.get(m['id'])
+            if old is None or old['message'] != m:
+                self.emit('dm', self.active['id'] if self.active else None, message=deepcopy(m))
             self.last_seen = max(self.last_seen, m['id'])
             if self.active and m['out'] and m['id'] not in self.sent_ids and epoch(m['date']) >= epoch(self.active['sends'][0]['at']): self.void('foreign_owner_message')
 
@@ -224,7 +236,7 @@ class Runner:
             current = self.pulse.wake(wake['id']) or wake
             due = epoch(e['flip']) if e['kind'] == 'W' else wake.get('next_due_at')
             if due is not None and now >= due-45 and not self.has('gate', eid, wake['id']) and not self.has('gate_missed',eid,wake['id']):
-                if now > due-30: self.emit('gate_missed',eid,key=wake['id'],due=due,request_index=index)
+                if now >= due or (e['kind'] == 'M' and index == 2 and now > due-30): self.emit('gate_missed',eid,key=wake['id'],due=due,request_index=index)
                 else: self.emit('gate', eid, key=wake['id'], wake=current, session=self.pulse.session(self.chat_key), due=due, request_index=index)
             if e['kind'] == 'W' and decoded(current.get('probe_state_json')) and not self.has('baseline', eid, wake['id']):
                 self.emit('baseline', eid, key=wake['id'], probe_state_json=current['probe_state_json'], first_probe_at=current.get('updated_at'))
@@ -253,18 +265,26 @@ class Runner:
     def cleanup(self, e):
         pending = [item for item in self.pending if item[0] == e['id']]
         if pending:
-            if any(self.clock.now() >= epoch(item[2]['date'])+300 for item in pending): self.emit('setup_failed', reason='cleanup_turn_timeout')
             return False
         self.emit('setup', e['id'], key='archive', action='archive', snapshot=self.snapshot()) if not self.has('setup', e['id'], 'archive') else None
         for w in self.wakes(e,all_created=True):
             w = self.pulse.wake(w['id'])
             if w and w['status'] in ('active','proposed','paused'):
                 key = f'setup_cancel:{w["id"]}'
-                if not self.has('send_intent', e['id'], key):
-                    self.emit('setup', e['id'], action='cancel', wake_id=w['id']); self.send(e, key, f'/pulse cancel {w["id"]}', 'setup'); return False
-                self.emit('setup_failed', reason='cleanup_wake_still_active', wake_id=w['id']); return False
+                attempts = [r for r in self.by_episode.get(e['id'], []) if r['kind'] == 'send_intent' and r['key'].split(':retry:')[0] == key]
+                if attempts:
+                    last = attempts[-1]['key']
+                    sent = self.has('send', e['id'], last)
+                    if sent:
+                        self.emit('setup_failed', reason='cleanup_wake_still_active', wake_id=w['id']); return False
+                    if len(attempts) >= 3:
+                        self.emit('setup_failed', reason='cleanup_retry_exhausted', wake_id=w['id']); return False
+                    # Cancel is idempotent. Re-read state above before retrying an uncertain send.
+                    key += f':retry:{len(attempts)}'
+                self.emit('setup', e['id'], action='cancel', wake_id=w['id']); self.send(e, key, f'/pulse cancel {w["id"]}', 'setup'); return False
+        if not self.has('cleanup_verified', e['id']): self.emit('cleanup_verified', e['id'], snapshot=self.snapshot())
         session = self.pulse.session(self.chat_key)
-        if e['kind'] == 'S' and session and not self.has('send_intent', e['id'], 'setup_on'):
+        if e['kind'] == 'S' and session and not session['enabled'] and not self.has('send_intent', e['id'], 'setup_on'):
             self.emit('setup', e['id'], action='on'); self.send(e, 'setup_on', '/pulse on', 'setup'); return False
         self.emit('setup', e['id'], action='verify_enabled', session=session)
         if not session or not session['enabled']: self.emit('setup_failed', reason='cleanup_chat_disabled')
@@ -276,16 +296,40 @@ class Runner:
         windows = [r for r in self.by_episode.get(e['id'], []) if r['kind'] == 'w_window']
         return windows[-1]['latest_close'] if windows else epoch(e['latest_close'])
 
+    def preflight(self):
+        """Evaluate read-only setup predicates before any transport send."""
+        sid = self.transcript.current_session(self.chat_key)
+        session = self.pulse.session(self.chat_key)
+        state = self.pulse.baseline_state(self.chat_key, self.schedule['start'], self.frozen['quiet_hours'])
+        wakes = self.pulse.wakes(self.chat_key)
+        builtin = {w['id'] for w in wakes if (decoded(w['trigger_json']) or {}).get('builtin')}
+        dirty = [w['id'] for w in wakes if w['status'] in ('active','proposed','paused') and w['id'] not in builtin]
+        builtin_usage = [r for r in state['usage'] if r['wake_id'] in builtin]
+        expected = sum(delivery_cost(e) for e in self.schedule['episodes'] if e['day'] == 1)
+        smoke = self.schedule.get('mode') == 'smoke'
+        checks = [('timezone_mismatch', self.schedule['tz'] == self.frozen.get('resolved_timezone') == 'Asia/Tokyo'),
+                  ('hermes_session_missing', bool(sid)), ('pulse_session_missing', bool(session)),
+                  ('not_fresh_calendar_day', datetime.fromtimestamp(self.clock.now(), self.zone).date().isoformat() == self.schedule['start']),
+                  ('gateway_injection_disabled', bool(self.frozen.get('allow_gateway_injection'))),
+                  ('hermes_version_missing', bool(self.frozen.get('hermes_version'))),
+                  ('hermes_commit_missing', bool(self.frozen.get('hermes_commit'))),
+                  ('pending_occurrences', not state['pending']), ('preexisting_wakes', not dirty),
+                  ('start_day_usage', smoke or not any(r['wake_id'] not in builtin for r in state['usage'])),
+                  ('start_day_budget', smoke or sum(r['delivered'] for r in builtin_usage)+expected <= self.frozen['max_messages_per_day']-1)]
+        failed = [reason for reason, ok in checks if not ok]
+        self.emit('setup_failed' if failed else 'preflight', **({'reason':failed[0], 'failed_checks':failed} if failed else {}),
+                  session=session, session_id=sid, wake_ids=dirty, builtin_usage=builtin_usage,
+                  delivered_today=sum(r['delivered'] for r in state['usage']), max_messages_per_day=self.frozen['max_messages_per_day'],
+                  day1_expected_deliveries=expected, **state)
+        return not failed
+
     def baseline(self):
         setup = {'id': 'setup'}
-        if self.schedule['tz'] != 'Asia/Tokyo' or self.frozen.get('resolved_timezone') != 'Asia/Tokyo':
-            self.emit('setup_failed',reason='timezone_mismatch'); return False
-        old_sid = self.transcript.current_session(self.chat_key)
-        if not old_sid: self.emit('setup_failed',reason='hermes_session_missing'); return False
-        session = self.pulse.session(self.chat_key)
-        if datetime.fromtimestamp(self.clock.now(), self.zone).date().isoformat() != self.schedule['start']:
-            self.emit('setup_failed', reason='not_fresh_calendar_day'); return False
+        if not self.preflight(): return False
         while datetime.fromtimestamp(self.clock.now(), ZoneInfo('Asia/Tokyo')).hour < 8: self.clock.sleep(5)
+        if not self.preflight(): return False  # Recheck usage/wakes after waiting for active hours.
+        preflight = next(r for r in reversed(self.rows) if r['kind'] == 'preflight')
+        old_sid = preflight['session_id']
         for key, text in [('new', '/new'), ('approve','/approve'), ('quiet', '/pulse quiet default')]:
             if not self.setup_send(setup, key, text): return False
         for w in self.pulse.wakes(self.chat_key):
@@ -296,12 +340,15 @@ class Runner:
         state = self.pulse.baseline_state(self.chat_key, self.schedule['start'], self.frozen['quiet_hours'])
         sid = self.transcript.current_session(self.chat_key)
         dirty = any(w['status'] in ('active', 'proposed', 'paused') and not (decoded(w['trigger_json']) or {}).get('builtin') for w in self.pulse.wakes(self.chat_key))
-        used = state['pending'] or any(any(v for k, v in r.items() if k not in ('day', 'wake_id')) for r in state['usage'])
-        ok = (session and session['enabled'] and session['unanswered_count'] == 0 and not dirty and not used and
-              sid and sid != old_sid and state['effective_quiet'] == '22:00-08:00' and
-              self.frozen['allow_gateway_injection'] and self.frozen['hermes_version'] and self.frozen['hermes_commit'])
+        checks = [('session_not_rotated', sid and sid != old_sid), ('quiet_window_mismatch', state['effective_quiet'] == '22:00-08:00'),
+                  ('unanswered_not_zero', session and session['unanswered_count'] == 0), ('chat_disabled', session and session['enabled']),
+                  ('dirty_wakes', not dirty), ('pending_occurrences', not state['pending'])]
+        reason = next((reason for reason, ok in checks if not ok), None)
+        ok = reason is None
         transcript = self.transcript.session_rows(old_sid)
         self.emit('baseline_setup' if ok else 'setup_failed', session=session, **state,
+                  **({'reason':reason} if reason else {}), builtin_usage=preflight['builtin_usage'],
+                  delivered_today=preflight['delivered_today'], max_messages_per_day=preflight['max_messages_per_day'],
                   old_session_id=old_sid, session_id=sid, starting_transcript=transcript, transcript_sha256=digest(transcript))
         return bool(ok)
 
@@ -329,7 +376,10 @@ class Runner:
             return
         if not self.has('episode_start', eid):
             if now > epoch(e['sends'][0]['at'])+120:
-                self.void('runner_stopped'); self.emit('episode_end',eid,snapshot=self.snapshot()); self.active=None; return
+                started = next((r for r in reversed(self.rows) if r['kind'] == 'runner_start'), None)
+                previous = next((r for r in reversed(self.rows) if r['kind'] == 'episode_end' and r['episode'] != eid), None)
+                overran = started and epoch(started['t']) <= epoch(e['sends'][0]['at']) and previous and epoch(previous['t'])+300 > epoch(e['sends'][0]['at'])
+                self.void('previous_episode_overran' if overran else 'runner_stopped'); self.emit('episode_end',eid,snapshot=self.snapshot()); self.active=None; return
             first = next(x for x in self.episodes if x['day'] == e['day'])
             if first['id'] == eid:
                 session = self.pulse.session(self.chat_key)
@@ -401,9 +451,9 @@ class Runner:
         replacements, incomplete, consumed = [], [], 0
         for e in self.schedule['episodes']:
             if e['id'] in voids:
-                cost = 3 if e['kind'] == 'M' else 0 if e['kind'] in ('N','C-reply') else 1
+                cost = delivery_cost(e)
                 cap = (self.frozen or self.state()).get('max_messages_per_day',6)
-                if consumed+cost > cap:
+                if consumed+cost > cap-1:
                     incomplete.append(e['id']); continue
                 consumed += cost
                 replacement = deepcopy(e); replacement.update(id=e['id']+'-r', day=8, replaces=e['id'])
@@ -439,11 +489,12 @@ class Runner:
         if resumed:
             for e in self.episodes:
                 if self.has('episode_start', e['id']) and not self.has('episode_end', e['id']):
-                    self.active = e; self.void('runner_stopped')
+                    self.active = e
+                    if not self.has('close', e['id']): self.void('runner_stopped')
                     self.emit('resume_cleanup', e['id'])
                     self.active = None
             for r in list(self.rows):
-                if r['kind'] == 'send' and not self.has('turn', r['episode'], r['key']) and not self.has('command_reply',r['episode'],r['key']) and not self.has('partial_arming', r['episode'], r['key']):
+                if r['kind'] == 'send' and not self.has('turn', r['episode'], r['key']) and not self.has('command_reply',r['episode'],r['key']) and not self.has('partial_arming', r['episode'], r['key']) and not self.has('turn_unresolved', r['episode'], r['key']):
                     self.pending.append((r['episode'], r['key'], r['message'], r['before'], r['purpose']))
         if not self.has('baseline_setup', None) and not self.baseline(): return 1
         while True:
@@ -455,6 +506,7 @@ class Runner:
                 self.emit('gateway_starts', self.active['id'] if self.active else None, starts=sorted(starts), new=sorted(starts-self.starts))
                 self.void('gateway_restart')
             self.starts = starts
+            if self.active: self.evidence(self.active)
             self.poll(); self.turns(); self.archive()
             from .score import hard_failure
             if self.dirty:

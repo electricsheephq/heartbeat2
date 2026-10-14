@@ -118,25 +118,28 @@ def test_command_mismatch_fails_closed(tmp_path):
         return m
     c.send = send
     assert r.run() == 1
+    assert next(x for x in r.rows if x['kind']=='setup_failed')['reason']=='command_reply_or_state_mismatch'
     assert not any(text == e['sends'][0]['text'] for _,text in c.sent)
     store.close()
 
 
 @pytest.mark.parametrize('kind', ['M', 'R-rel'])
-def test_gate_planned_45_seconds_and_refuses_late(tmp_path, kind):
+def test_gate_planned_45_seconds_and_m3_refuses_late(tmp_path, kind):
     r,c,store,e = rig(tmp_path,kind)
     r.clock.wall = epoch(e['sends'][0]['at']); r.tick_episode(e); r.clock.sleep(15); r.turns()
     w=store.list_wakes('chat')[0]
     due=w.next_due_at+1.3
     for t in r.by_episode[e['id']]:
-        if t['kind']=='turn': next(x for x in t['snapshot']['wakes'] if x['id']==w.id)['next_due_at']=due
+        if t['kind']=='turn':
+            next(x for x in t['snapshot']['wakes'] if x['id']==w.id)['next_due_at']=due
+            if kind=='M': t['key']='request:2'
     r.clock.wall=due-44; r.evidence(e)
     gate=next(x for x in r.rows if x['kind']=='gate')
     assert epoch(gate['t']) <= due-30
     r.rows.remove(gate); r.index.discard(('gate',e['id'],w.id))
     r.clock.wall=due-29; r.evidence(e)
-    assert len([x for x in r.rows if x['kind']=='gate']) == 0
-    assert r.has('gate_missed',e['id'],w.id)
+    assert len([x for x in r.rows if x['kind']=='gate']) == (0 if kind=='M' else 1)
+    assert r.has('gate_missed',e['id'],w.id)==(kind=='M')
     store.close()
 
 
@@ -233,7 +236,7 @@ def test_day8_counts_all_deliveries(tmp_path):
     r.frozen=r.state()|{'max_messages_per_day':4};r.requeue()
     row=next(x for x in r.rows if x['kind']=='requeue')
     expected=lambda x:3 if x['kind']=='M' else 1
-    assert sum(expected(x) for x in row['episodes'])<=4
+    assert sum(expected(x) for x in row['episodes'])<=3
     assert row['incomplete']
     store.close()
 
@@ -270,6 +273,7 @@ def test_setup_timezone_fails_closed(tmp_path,schedule_tz,plugin_tz):
     r.schedule['tz']=schedule_tz;r.schedule['sha256']=digest({k:v for k,v in r.schedule.items() if k!='sha256'})
     original=r.state;r.state=lambda:original()|{'resolved_timezone':plugin_tz}
     assert r.run()==1 and not any(text==e['sends'][0]['text'] for _,text in c.sent)
+    assert next(x for x in r.rows if x['kind']=='setup_failed')['reason']=='timezone_mismatch'
     store.close()
 
 
@@ -370,7 +374,7 @@ def test_smoke_cli_fake_transport_only(tmp_path,monkeypatch):
     assert runner.main()==0
     result=json.loads((log.parent/'smoke-score.json').read_text())
     assert result['bars']['B3-3']=='PASS' and result['status']=='PENDING'
-    assert sum('remind me in 3 minutes' in text for _,text in c.sent)==1
+    assert sum('remind me in 5 minutes' in text for _,text in c.sent)==1
     assert any(text.startswith('/pulse cancel ') for _,text in c.sent)
     store.close()
 

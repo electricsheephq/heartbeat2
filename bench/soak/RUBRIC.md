@@ -20,14 +20,18 @@ The bars below are frozen once this file merges. The soak code that runs them co
   - the profile's normal model; the model and provider are recorded at the start.
 - **Frozen during the soak:** the plugin version, the plugin's entry (settings and `allow_gateway_injection`), the model, the gateway's plugin set, and the Hermes version and commit. A change aborts the run (see Voids).
 - **Baseline before day 1** (logged as setup):
+  - before any send, verify Tokyo timezone, Hermes and pulse sessions, the current calendar day, gateway injection, Hermes version/commit, and no claimed/started occurrence;
+  - refuse pre-existing active, proposed or paused non-built-in wakes before any send; the release owner clears them with the owner;
+  - a non-built-in start-day ledger row stops soak setup; record built-in usage and require built-in deliveries plus day-1 expected deliveries ≤ `max_messages_per_day` − 1;
   - send `/new`, verify its confirmation prompt, send `/approve` once, verify the fresh DM session from Hermes state, and archive and hash the old session transcript; never send `always`;
   - the chat is enabled;
-  - no non-built-in wake is active, proposed or paused (any found is cancelled with `/pulse cancel <id>`);
+  - no non-built-in wake is active, proposed or paused; cancellation is only a safety net for wakes appearing during setup;
   - run `/pulse quiet default` and record the effective quiet window; it must be 22:00–08:00 or setup fails;
   - the stored unanswered count is 0;
-  - day 1 starts on a fresh calendar day, so no daily usage is carried over.
+  - day 1 starts on a fresh calendar day; built-in usage on that day is recorded and budgeted, not carried-over usage.
 
   Any check that fails after cleanup stops the start.
+- **Smoke:** not a soak day; record delivered-today usage and the cap without rejecting usage. Its owner one-shot asks `remind me in 5 minutes to check the smoke receipt`, closes at due + 15 min, and reports unexercised bars as `NOT_EXERCISED`.
 - **Scripted owner:** a runner sends from the owner's Telegram account through a user client, so the gateway sees ordinary owner messages.
 - **Timezone:** both the registered schedule and the plugin's resolved timezone must be Asia/Tokyo; setup fails closed otherwise.
 - **Hours:** the first send is at 08:30 or later, every due time is at 21:30 or earlier, and every episode window closes by 21:45 (profile timezone). No episode crosses quiet hours (default 22:00–08:00).
@@ -138,7 +142,7 @@ A delivery is a bot message in the DM, matched to a wake turn:
 - **Owner turn:** match exact owner text after whitespace normalization in the current Hermes DM session, with timestamp in [send − 5 s, send + 120 s]; transport and transcript message ids are different namespaces. The turn ends at the next user row, including a pulse wake.
 - **Arming reply:** match every non-empty assistant text to transport replies after the send, before the next owner send or wake delivery.
 - **Matching delivery:** require an exact `⟦pulse o:<wake_id>/` marker and the contiguous wake turn's final non-empty assistant text inside [started_at, ended_at], equal to transport text dated inside [started_at − 5 s, ended_at + 60 s]. Deployed marker timestamps may precede started_at by a fraction of a second; allow at most 5 s for that marker only.
-- **Display normalization:** strip `**`, `__`, backticks, code fences and `~~`; convert `[t](u)` to `t`; collapse whitespace. Equality is required, never a prefix or suffix match. Blank transport text stays unresolved.
+- **Display normalization:** strip leading header markers, word-bounded single `*x*` / `_x_`, `**`, `__`, backticks, code fences and `~~`; convert `[t](u)` to `t`; collapse whitespace. Equality is required, never a prefix or suffix match. Blank transport text and unsupported tables stay unresolved.
 - **Excluded:** ordinary replies to owner messages (arming replies, acknowledgements).
 - **Late, duplicate, or after cancel/stop:** a message from a wake counts against its episode, even outside the episode's window.
 - **Unresolved:** a message that cannot be attributed is listed, and makes B3-3 and B3-5 **INCOMPLETE** if it could belong to an episode under test.
@@ -188,7 +192,9 @@ A delivery is a bot message in the DM, matched to a wake turn:
 - a send or read failure of the user client;
 - a Telegram or network outage of 5 minutes or more;
 - an M arming turn is still running 5 min after its send (void and requeue the M episode; do not send its remaining requests);
+- another episode turn cannot be correlated within 5 min (`turn_unresolved`), or a cleanup cancel has a transient client error (`cleanup_client_error`); void and requeue where allowed, continuing cleanup with read-only state verification before any bounded idempotent cancel retry;
 - an episode's scheduled first send passed by more than 2 minutes while the runner was down or started late (do not send it late; requeue it);
+- a previous episode overran while the runner was up, delaying the next first send more than 2 minutes (`previous_episode_overran`; do not send late; requeue it);
 - the runner process stopped while the window was open (a crash or host restart, recorded by the runner's own start line on resume), so a scheduled action may have been missed.
 
 Rules:
@@ -201,7 +207,7 @@ Rules:
     - sends follow the generation timing rules from 08:30, with gaps drawn from `random.Random("20261014:8")`, one `randint(5, 30)` after each accepted replacement except the last; no placeholder draws;
     - a replacement keeps its episode id with the suffix `-r`;
     - a replacement that is itself void stays void, with no further replacement;
-  - day 8 budgets every expected delivery of every kind against `max_messages_per_day` (default 6); accept replacements in original order, leaving excess replacements INCOMPLETE and unrun;
+  - day 8 budgets every expected delivery of every kind against `max_messages_per_day` − 1 (default 5); accept replacements in original order, leaving excess replacements INCOMPLETE and unrun;
   - every original attempt and replacement is published with its reason;
   - missing required non-void coverage at the end of day 8 makes the affected bars **INCOMPLETE**, never PASS.
 
@@ -232,6 +238,7 @@ Rules:
 10. **2026-10-14 (runner PR): C snapshot.** Score cancellation immediately after the reply turn ends, before cleanup.
 11. **2026-10-14 (runner PR): Hermes freeze.** Record Hermes version and commit with frozen hashes; a change aborts the soak (ABORTED, exit 3).
 12. **2026-10-14 (runner PR): Deployed evidence.** Distinct id spaces, exact display-normalized texts, contiguous marker-anchored wake turns, fractional marker/start skew, command replies plus read-only state, and bounded per-chat cursor reads with edit overlap.
-13. **2026-10-14 (runner PR): Timing and void ordering.** Due − 45 s gate scheduling with the due − 30 s deadline, latched cleanup, late-start void/requeue, and only pre-void violations. M acknowledgements follow request:2 occurrences.
+13. **2026-10-14 (runner PR): Timing and void ordering.** Due − 45 s gate scheduling with the due − 30 s deadline for M's third reminder only; other wakes accept any read before due. Latched cleanup, late-start void/requeue, and only pre-void violations. M acknowledgements follow request:2 occurrences.
 14. **2026-10-14 (runner PR): Scoring scope.** B3-5 covers the matching S wake only; before-stop recurrence belongs to B3-1; no-baseline W has capture-only scoring; B3-7 set claims cover arming replies only; hourly cron covers the observation window.
-15. **2026-10-14 (runner PR): Setup and cap tightening.** Amendments 5–8 now require the plugin's total daily delivery cap, explicit /new confirmation via /approve and Hermes session proof, all non-terminal episode wakes cancelled, and matching Tokyo timezones. No scoring bar is relaxed.
+15. **2026-10-14 (runner PR): Setup and cap tightening.** Amendments 5–8 now require total expected deliveries ≤ `max_messages_per_day` − 1, explicit /new confirmation via /approve and Hermes session proof, all non-terminal episode wakes cancelled, and matching Tokyo timezones. No scoring bar is relaxed.
+16. **2026-10-14 (runner PR): Send-free preflight and smoke usage.** Tighten amendment 7: a pre-existing non-built-in active, proposed or paused wake stops both soak and smoke before any send, preserving the owner's wakes; cancel only additions during setup. All read-only predicates run before sends, with specific failure reasons. Built-in start-day usage is recorded and budgeted, not carried-over usage. Smoke is not a soak day and records usage without rejecting it; its owner one-shot bypasses the cap. Five-minute smoke timing and `NOT_EXERCISED` bars prevent unsupported coverage claims. Distinct/edited DM logging, recoverable episode voids and cleanup-only resume preserve evidence without broadening the soak bars.

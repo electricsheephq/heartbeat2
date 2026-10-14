@@ -15,8 +15,11 @@ def whitespace(text):
 
 def display(text):
     text = re.sub(r'```[^\n`]*\n', '', text or '')
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)
     for marker in ('**', '__', '`', '~~'): text = text.replace(marker, '')
+    for marker in ('*', '_'):
+        text = re.sub(r'(?<!\w)' + re.escape(marker) + r'([^' + re.escape(marker) + r'\n]+)' + re.escape(marker) + r'(?!\w)', r'\1', text)
     return whitespace(text)
 
 
@@ -135,8 +138,11 @@ class Pulse(Reader):
 def hermes_revision(source, version_file):
     if source is None or version_file is None: return dict(hermes_version=None, hermes_commit=None)
     text = Path(version_file).read_text().strip()
+    try: stamp = json.loads(text)
+    except ValueError: stamp = None
     match = re.search(r"(?:__version__|version)\s*=\s*['\"]([^'\"]+)['\"]", text)
-    version = match[1] if match else text if '\n' not in text else None
+    version = (stamp.get('baseVersion') or None if isinstance(stamp, dict) else
+               match[1] if match else text if '\n' not in text else None)
     result = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=source, capture_output=True, text=True, timeout=5)
     commit = result.stdout.strip() if result.returncode == 0 else None
     return dict(hermes_version=version, hermes_commit=commit if commit and re.fullmatch('[0-9a-f]{40,64}', commit) else None)

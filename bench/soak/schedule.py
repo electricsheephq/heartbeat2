@@ -109,12 +109,12 @@ def build(start: date, tz: str) -> dict:
 
 
 def smoke_schedule(start, at=None):
-    """One registered three-minute reminder, using ordinary episode paths."""
+    """One registered five-minute reminder, using ordinary episode paths."""
     sent = datetime.fromisoformat(at) if at else datetime.combine(date.fromisoformat(start), time(8,30), ZoneInfo('Asia/Tokyo'))
-    if str(sent.tzinfo) not in ('Asia/Tokyo','UTC+09:00') or not time(8) <= sent.time() <= time(21,27):
+    if str(sent.tzinfo) not in ('Asia/Tokyo','UTC+09:00') or not time(8) <= sent.time() <= time(21,25):
         raise ValueError('smoke must fit inside Tokyo active hours')
-    due = sent+timedelta(minutes=3)
-    e = dict(id='smoke-r', day=1, kind='R-rel', sends=[dict(at=sent.isoformat(),text='remind me in 3 minutes to check the smoke receipt')],
+    due = sent+timedelta(minutes=5)
+    e = dict(id='smoke-r', day=1, kind='R-rel', sends=[dict(at=sent.isoformat(),text='remind me in 5 minutes to check the smoke receipt')],
              due=[due.isoformat()],tasks=[dict(task='check the smoke receipt',term='receipt')],latest_close=(due+timedelta(minutes=15)).isoformat())
     obj = dict(mode='smoke',smoke_at=sent.isoformat(),seed=SEED,start=start,tz='Asia/Tokyo',episodes=[e])
     return obj | {'sha256':digest(obj)}

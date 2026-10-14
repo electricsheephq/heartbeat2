@@ -80,10 +80,16 @@ def test_cleanup_every_episode(tmp_path, kind):
     store.close()
 
 
-def test_fresh_baseline_paused_proposed_quiet_and_archive(tmp_path):
+def test_fresh_baseline_wakes_appearing_during_setup_quiet_and_archive(tmp_path):
     r,c,store,e = rig(tmp_path,'N')
-    for status in ('active','proposed','paused'):
-        store.create_wake(Wake(session_key='chat',kind='at',note='old',id='old-'+status,status=status))
+    original = c.send
+    def send(text):
+        m = original(text)
+        if text == '/approve':
+            for status in ('active','proposed','paused'):
+                store.create_wake(Wake(session_key='chat',kind='at',note='old',id='old-'+status,status=status))
+        return m
+    c.send = send
     store.set_meta('quiet:chat', json.dumps({'range':'off'}))
     store.cas_session('chat',{'enabled':True}, enabled=False, unanswered_count=2)
     assert r.run() == 0
@@ -178,7 +184,7 @@ def test_day8_preserves_texts_offsets_order_caps_and_single_replacement(tmp_path
     originals=[x for x in r.schedule['episodes'] if x['kind']=='W']
     for x in originals:r.emit('void',x['id'],reason='client_error')
     r.requeue(); row=next(x for x in r.rows if x['kind']=='requeue'); replacements=row['episodes']
-    assert len(replacements)==6 and len(row['incomplete'])==1
+    assert len(replacements)==5 and len(row['incomplete'])==2
     rng=random.Random('20261014:8')
     for i,(old,new) in enumerate(zip(originals,replacements)):
         assert new['id']==old['id']+'-r' and new['sends'][0]['text']==old['sends'][0]['text']
@@ -312,7 +318,9 @@ def test_cleanup_refusal_cannot_leave_an_active_wake(tmp_path):
     r.active=e;r.send(e,'request:0',e['sends'][0]['text'],'request');r.clock.sleep(15);r.turns()
     w=store.list_wakes('chat')[0]
     r.emit('send_intent',e['id'],key='setup_cancel:'+w.id,text='/pulse cancel '+w.id,purpose='setup')
+    for n in (1,2): r.emit('send_intent',e['id'],key=f'setup_cancel:{w.id}:retry:{n}',text='/pulse cancel '+w.id,purpose='setup')
     assert r.cleanup(e) is False and r.has('setup_failed',None)
+    assert next(x for x in r.rows if x['kind']=='setup_failed')['reason']=='cleanup_retry_exhausted'
     store.close()
 
 
