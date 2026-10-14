@@ -288,7 +288,9 @@ class Policy:
         return floor
 
     def lifetime_setting(self, wake):
-        return 'max_reminder_days' if owner_class(wake) and one_shot(wake) else 'max_lifetime_days'
+        # An owner reminder is never bounded below the general lifetime, so raising either keeps it valid.
+        reminder = owner_class(wake) and one_shot(wake) and self.max_reminder_days >= self.max_lifetime_days
+        return 'max_reminder_days' if reminder else 'max_lifetime_days'
 
     def max_life_s(self, wake):
         seconds = getattr(self, self.lifetime_setting(wake)) * 86400

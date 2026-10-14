@@ -309,7 +309,7 @@ class Tool:
         elif w.kind in RECURRING_KINDS:
             parts=[f'Next at {local(w.next_due_at)}'+(' (cron).' if w.kind=='cron' else f', then every {duration(w.eff_interval_s)}.')]
         else:
-            first=('Checks now' if w.next_due_at is None or w.next_due_at<=e.clock.now()+60 else f'First check {local(w.next_due_at)}')
+            first=('Checks now' if w.next_due_at is None or w.next_due_at<=e.clock.now() else f'First check {local(w.next_due_at)}')
             lead=(f'{first}, then every {duration(w.trigger_json["check_every"])}' if w.kind in PROBE_KINDS else
                   f'Waits for {w.kind} events' if watcher else
                   f'Waits for {duration(parse_duration(w.trigger_json.get("after",p.checkin_after_hours*3600)))} of owner silence')

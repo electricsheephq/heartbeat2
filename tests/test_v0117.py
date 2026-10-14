@@ -75,13 +75,13 @@ def test_startup_sweep_all_statuses_one_notice_per_chat_idempotent(engine, monke
     assert engine.store.get_meta('notice:'+KEY) == notices
 
 
-@pytest.mark.parametrize('delay', [0, 60, 61, 3600])
+@pytest.mark.parametrize('delay', [0, 1, 60, 3600])
 @pytest.mark.parametrize('kind', ['command', 'file', 'url', 'process'])
 def test_probe_receipt_first_check(engine, delay, kind):
     w = arm(engine, kind, next_due_at=engine.clock.now()+delay,
             trigger_json={'check_every':300}, deadline_at=engine.clock.now()+7200)
     result = {'receipt':engine.tool.receipt(w, engine.store.get_session(KEY))}
-    lead = 'Checks now' if delay <= 60 else f'First check {local(engine,w.next_due_at)}'
+    lead = 'Checks now' if delay <= 0 else f'First check {local(engine,w.next_due_at)}'
     assert receipt(result).startswith(lead+', then every 5m;')
 
 
@@ -163,6 +163,19 @@ def test_lifetime_helper_owner_one_shots_only(engine, changes, days):
     w = Wake(KEY, 'Check.', 'at', **{k:v for k,v in changes.items() if k != 'kind'})
     w = replace(w, kind=changes.get('kind','at'))
     assert engine.policy.max_life_s(w) == days*DAY
+
+
+def test_reminder_bound_never_below_general_lifetime(engine):
+    engine.policy = replace(engine.policy, max_lifetime_days=400)
+    w = Wake(KEY, 'Check.', 'at', creator='user')
+    assert engine.policy.max_life_s(w) == 400*DAY and engine.policy.lifetime_setting(w) == 'max_lifetime_days'
+    owner_turn(engine)
+    result = create(engine, {'kind':'at','at':'in 380d'}, owner_asked=True)
+    assert result.get('ok'), result
+    w = engine.store.get_wake(result['wake']['id'])
+    engine.clock.advance(370*DAY)
+    engine.times()
+    assert engine.store.get_wake(w.id).status == 'active'
 
 
 def test_owner_expiry_clamp_label_and_lowered_setting(engine):
