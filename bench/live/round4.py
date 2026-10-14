@@ -15,8 +15,11 @@ def measured_rows(cell):
     if cell.get('type') != 'capture':
         return [r for r in rows if r.get('wake')]
     owner = cell.get('owner_message', '').strip()
-    return [r for r in rows if owner and next((text(m) for m in reversed(
-        r.get('request', {}).get('messages', [])) if m.get('role') == 'user'), None) == owner]
+    def measured(r):
+        latest = next((text(m) for m in reversed(r.get('request', {}).get('messages', [])) if m.get('role') == 'user'), None)
+        # The plugin's turn context (e.g. "HeartBeat 2.0: 1 armed; ...") is appended after a blank line.
+        return latest is not None and (latest == owner or latest.startswith(owner + '\n\n'))
+    return [r for r in rows if owner and measured(r)]
 
 
 @lru_cache(maxsize=1)

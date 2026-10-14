@@ -169,3 +169,23 @@ None yet. Tightening only, and only before the first real round-3 run.
 **Venue.** GLM 5.3 on the subscription lane only (no metered spend), outside 08:00–22:00 JST so it shares no provider window with the B3-lite soak. The judge is Codex `gpt-6.1-sol` at low effort, blind (a different family). The release owner spot-checks every judge FAIL against its transcript and may overturn a verdict only where the packet omitted support the transcript shows.
 
 **Amendments.** None yet. Tightening only, and only before the first real round-4 run.
+
+## Round 5
+
+**Purpose.** Re-measure the v0.1.19 candidates: proposal results read "Not set yet" and carry `armed` (#91), and a settled subject ends silently (#92). Scenarios, bars and arms are as in Round 4, with exactly the two benchmark changes below.
+
+**Code under test.** `main` at a commit that contains both #93 and this harness. The plugin version is 0.1.18 with unreleased changes; the declaration records the commit and plugin version. `--min-plugin-version` defaults to `0.1.18` for round 5; overriding it is allowed only for fake plumbing tests.
+
+**T1 same local calendar day.** With `tolerance: day`, `next_due_at` must fall on the same local calendar day, in the cell's timezone, as `target()` (now + 30 days). All other Round-4 T1 rules remain: exactly one created wake, `at`, `owner_requested`, still `active`, note term `domain`; any other created wake is a false arm. Round-4 scoring retains its ±1 hour tolerance.
+
+**Judge packet completeness.** For rounds ≥ 5, packets with measured-turn metadata additionally carry:
+- `system_prompt`: the first `system` message of the first measured request, verbatim;
+- `pulse_parameters`: the `pulse` tool's `parameters` object from that request's tools array.
+
+The measured owner turn is the request whose latest user message is the owner message, alone or followed by the plugin's turn context after a blank line. Round 4 required an exact match, so the N7 packets (whose owner message carries "HeartBeat 2.0: 1 armed; …") had no tool results; this applies to Round-4 rescoring too and changes no Round-4 score.
+
+Round-4 packets keep their exact shape. The packets CLI defaults to round 4; round-5 runs pass `--round 5`.
+
+**Bars, arms and venue.** As in Round 4: B2-8 requires 17 of 18 cells; B2-5 allows 10,650 tokens per useful message and 3.0 calls per wake on base, and 280,150 tokens per useful message on the 120k arm, with the cache split reported. GLM 5.3 on the subscription lane only, outside 08:00–22:00 JST; blind Codex `gpt-6.1-sol` at low effort, with the same release-owner spot-check and overturn rule.
+
+**Amendments.** None yet. Tightening only, and only before the first real round-5 run.
