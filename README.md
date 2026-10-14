@@ -173,7 +173,8 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Minutes between wake turns | `wake_spacing_minutes` | 10 | Per chat. |
 | Fastest watcher check (seconds) | `probe_floor_seconds` | 60 | Watchers never check more often than this. |
 | Active wakes per chat | `max_active` | 10 | Also capped at 50 across the profile. |
-| Longest lifetime (days) | `max_lifetime_days` | 14 | Every wake expires by then; agent recurring wakes default to 7 days. |
+| Longest lifetime (days) | `max_lifetime_days` | 14 | Recurring wakes, watchers and agent follow-ups expire by then; agent recurring wakes default to 7 days. |
+| Longest owner one-time reminder (days) | `max_reminder_days` | 365 | Owner-requested one-time reminders, including `/pulse add`, expire by then (never sooner than `max_lifetime_days`); maximum 3650 days. |
 | Check in after a long silence | `owner_silent_checkin` | off | Off by default. One check-in per silence, with how to turn it off. |
 | Silence before a check-in (hours) | `checkin_after_hours` | 24 | Doubles for the next silence if a check-in is ignored. |
 | Wake-from-wake depth | `max_rearm_chain` | 2 | How many wakes deep a chain armed inside wake turns may go; a message from you resets it. |
@@ -200,7 +201,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 ## Guardrails, briefly
 Every guardrail is configurable:
 - Recurring timers repeat at most every 15 minutes, or every 55 minutes when the agent arms one without a watcher. Watchers check at most once a minute.
-- Every wake expires after 14 days at most.
+- Every wake expires after 14 days at most, except a one-time reminder you ask for, which can be due up to 365 days out (`max_reminder_days`, never below `max_lifetime_days`). A reminder due later than 14 days stays deliverable for 14 days after its due time, so downtime at the due time follows the catch-up rule instead of expiring silently.
 - A wake that could not fire before it expires is refused, including an owner-silence wait or a probe's next check without a deadline. On create, an implicit lifetime stretches to fit, up to the maximum. Existing wakes keep their expiry; an edit past it is refused with a hint to set `until.expires` when extending can help, otherwise it names the maximum lifetime. Quiet hours count at the real dispatch time for one-shot times and watcher deadlines. A timed quiet override chains into the default quiet hours if they still apply when it ends. A one-shot outside the catch-up window is refused; one due now fires on the next check. A timed resume that cannot fit ends the wake with a notice. Receipts name the silence duration and are at most 240 characters; long ones end with an ellipsis.
 - Daily caps hold watchers until capacity frees, including on a new local day; your unedited one-shot reminders, including one-time reminders you ask for in chat, bypass both caps.
 - After 2 unanswered messages, agent watchers hold until you write; other agent timers and built-in check-ins drop their occurrence. Wakes you armed, and one-time reminders you ask for in chat (the agent marks them `owner_asked`), still fire unless the agent edited their trigger, timing or note; a watcher-only conversion you requested with `/pulse watch` keeps owner status. Held matches merge, keeping the latest payload; pauses preserve them and expiry is visible in `/pulse why`.

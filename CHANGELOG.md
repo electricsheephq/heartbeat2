@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.17 — 2026-10-14
+
+- Command watchers validate `fire_on` at create and update, with an enum and an actionable refusal (#79). At startup, stored active, paused or proposed watchers with an invalid mode stop with `invalid_fire_on`; queued occurrences are cancelled while started turns are preserved, with one notice per chat. Invalid command working directories and existing non-regular file targets are also refused at create. Probe receipts name the first check: now or its local time, then the interval.
+- Owner-requested one-time reminders use `max_reminder_days` (default 365, maximum 3650), including `/pulse add` and agent `at` reminders backed by the current owner request (#80). Recurring wakes, watchers, autonomous follow-ups and children retain their existing lifetime limits; babysit remains bounded to four hours. The reminder bound is never below `max_lifetime_days`, so a profile that raised it keeps its existing reminders. A reminder due within `max_lifetime_days` keeps the old implicit expiry; one due later stays deliverable for `max_lifetime_days` after its due time, so downtime follows the catch-up rule instead of silent expiry. Feasibility, expiry clamps, receipts and the poller share the bound; autonomous edits revoke owner intent and are refused if the shorter lifetime cannot fit. Lifetime refusals name the setting. The skill and tool description forbid stand-in or relay wakes that re-arm later to bypass a refusal.
+
+## 0.1.16 — 2026-10-14
+
+- Times accept `HH:MM` (or `today HH:MM`) for the next occurrence in the chat's timezone, `tomorrow HH:MM`, `in 10 minutes`, `+10m`, and ISO date-times. Durations accept short units and words for seconds, minutes, hours, days and weeks, joined with spaces, commas or `and`; `/pulse add` accepts natural durations and bare clock times.
+- Refusals now name invalid times and durations and show accepted forms. Unknown trigger kinds list the valid kinds and a one-time reminder example; `respond` outside a wake turn explains how to reply and manage wakes. These fixes come from the B2 round-3 evidence (#76).
+- Recurring wake receipts now name a wake-spacing hold, and say that ticks due in quiet hours are skipped until they end, within the existing 240-character limit (#72).
+
 ## 0.1.15 — 2026-10-14
 
 - **Unsupported event filters are refused (#57).** Select the event with `trigger.kind`; `trigger.event` is no longer advertised or accepted. At startup, existing active, paused or proposed event watchers using it are stopped (a stray `event` key on other kinds is ignored, as before) with `invalid_trigger_event`, pending occurrences are cancelled, and one notice per chat asks you to set the watcher up again. Stored task and board filters keep working.

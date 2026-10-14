@@ -1,6 +1,7 @@
 """Session-bound pulse tool. No setting writes or destination arguments."""
 from dataclasses import asdict, replace
 from datetime import datetime
+from pathlib import Path
 import json
 import re
 
@@ -18,7 +19,8 @@ BOOL = {'type': 'boolean'}
 PARAMETERS = obj({
     'action': {'type': 'string', 'enum': ['create', 'list', 'update', 'pause', 'resume', 'cancel', 'respond', 'off']},
     'id': STR, 'title': STR, 'note': STR, 'reason': STR,
-    'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','fire_on','check_every','deadline','cwd')},
+    'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','check_every','deadline','cwd')},
+                    'fire_on': {'type':'string','enum':['change','success','failure','json']},
                     'pid': {'type':'integer'}, 'command': {'type':'array','items':STR},
                     'emojis': {'type':'array','items':STR}}),
     'until': obj({'expires':STR, 'max_fires':{'type':'integer'}, 'owner_replies':BOOL}),
@@ -33,9 +35,12 @@ DESCRIPTION = ('Use create to arm a wake/watcher (note and trigger.kind required
                'outcome and notify, optionally scratch/next_check. Bounds and clamps are reported. Never type silence markers. '
                'Results include a `cache` line; pick intervals the line marks warm. '
                'Results include a receipt line; tell the owner what it says, not a promise of your own. '
+               'When a create is refused, tell the owner why and what can be done; never arm a stand-in or relay wake '
+               'that re-arms later to get around a limit. '
                'For a one-time "at" wake the owner asks for in their current message, set owner_asked=true: '
                "it then fires like the owner's own reminder (not muted, not capped). Never set it for your own follow-ups.")
 SCHEMA = {'name':'pulse','description':DESCRIPTION,'parameters':PARAMETERS}
+NOT_IN_FLIGHT = {'error':'not_in_flight','detail':'respond is only for answering a wake turn; in an ordinary conversation, just reply to the owner (use create/update/cancel to manage wakes).'}
 
 
 def current_session_key():
@@ -94,6 +99,9 @@ class Tool:
                 return {'error':'unknown_parameter'}
             if 'owner_asked' in args and not isinstance(args['owner_asked'], bool):
                 raise ValueError('owner_asked must be a boolean')
+            for field in ('trigger','until','pacing'):
+                if field in args and not isinstance(args[field],dict):
+                    raise ValueError(f'invalid request: {field} must be an object')
             s = self.identity()
             if s is None:
                 return {'error':'missing_session'}
@@ -160,8 +168,8 @@ class Tool:
                         babysit=args.get('babysit'), untrusted_payload=bool(flight and flight.untrusted))
                     if not gate.allowed:
                         if args.get('id') != 'all':
-                            return {'error':gate.reason}
-                        results.append({'id':w.id,'error':gate.reason})
+                            return {'error':gate.reason, **({'detail':gate.detail} if gate.detail else {})}
+                        results.append({'id':w.id,'error':gate.reason, **({'detail':gate.detail} if gate.detail else {})})
                         continue
                     clamps = {}
                     if action in {'resume','update'}:
@@ -181,7 +189,13 @@ class Tool:
                                 return {'error':'max_active'}
                         # An update without a trigger keeps a stored relative deadline instead of re-reading it.
                         fresh = 'trigger' in args
-                        result = self.reschedule(w) if action=='resume' else self.prepare(w,args,reschedule=fresh,reparse_deadline=fresh)
+                        trig = args.get('trigger')
+                        new_kind = trig.get('kind',w.kind) if isinstance(trig,dict) else w.kind
+                        # The owner's grant applies before the first feasibility pass, so a requested retime gets the reminder bound.
+                        base = (replace(w,owner_requested=True) if action == 'update' and w.creator == 'agent'
+                                and not w.trigger_json.get('builtin') and w.parent_wake_id is None
+                                and args.get('owner_asked') is True and evidence and new_kind == 'at' else w)
+                        result = self.reschedule(w) if action=='resume' else self.prepare(base,args,reschedule=fresh,reparse_deadline=fresh)
                         candidate, clamps = result.wake, result.clamped
                         until = args.get('until') if isinstance(args.get('until'),dict) else {}
                         timing = ('trigger_json','kind','next_due_at','deadline_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s')
@@ -220,6 +234,9 @@ class Tool:
                                 candidate = replace(candidate,owner_requested=False)
                         if action == 'resume':
                             candidate = replace(candidate,status='active',status_reason='')
+                        result = e.policy.clamp(candidate,cache_ttl=e.timing(candidate)['cache_ttl'])
+                        candidate = result.wake
+                        clamps.update(result.clamped)
                         candidate = self.feasible(candidate,explicit_expiry='expires' in until)
                     else:
                         candidate = replace(w,status='paused' if action=='pause' else 'cancelled',status_reason='agent')
@@ -234,8 +251,11 @@ class Tool:
                     if action in {'update','resume'}: item['receipt']=self.receipt(w,s)
                     results.append(item)
                 return results[0] if args.get('id') != 'all' and results else {'ok':True,'results':results}
-        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        except ValueError as exc:
             return {'error':'invalid_request','detail':str(exc)}
+        except (TypeError, KeyError, OverflowError, AttributeError):
+            e.log.warning('pulse tool rejected a malformed request', exc_info=True)
+            return {'error':'invalid_request','detail':'invalid request: check the field types and required trigger values'}
         except Exception:
             e.log.warning('pulse tool failed', exc_info=True)
             return {'error':'engine_error'}
@@ -267,14 +287,16 @@ class Tool:
             from .commands import quiet_until
             point=max(point,e.clock.now())
             point=quiet_until(e,w.session_key,urgent=w.urgent,now=point) or point
-        max_life=min(p.max_lifetime_days*86400,4*3600) if w.babysit else p.max_lifetime_days*86400
+        max_life=p.max_life_s(w)
         hard_end=(w.created_at or e.clock.now())+max_life
-        if point>=hard_end: raise Infeasible(f'{label} after the maximum lifetime of {max_life/86400:g} days')
+        if point>=hard_end: raise Infeasible(f'{label} after the maximum lifetime of {max_life/86400:g} days ({p.lifetime_setting(w)} setting)')
         if point<w.expires_at: return w
         if explicit_expiry or e.store.get_wake(w.id) is not None:
             local=lambda t: datetime.fromtimestamp(t,p.resolved_timezone()).strftime('%a %d %b %H:%M')
             raise Infeasible(f'{label} after expiry: {local(point)} >= {local(w.expires_at)}; set until.expires to extend it')
-        end=min(hard_end,point+3600)
+        # A long owner reminder keeps the grace a short one has, so downtime at its due time doesn't drop it.
+        grace=p.max_lifetime_days*86400 if p.lifetime_setting(w)=='max_reminder_days' and not w.babysit else 3600
+        end=min(hard_end,point+grace)
         return replace(w,expires_at=end)
 
     def receipt(self,w,s):
@@ -293,23 +315,27 @@ class Tool:
         elif w.kind in RECURRING_KINDS:
             parts=[f'Next at {local(w.next_due_at)}'+(' (cron).' if w.kind=='cron' else f', then every {duration(w.eff_interval_s)}.')]
         else:
-            lead=(f'Checks every {duration(w.trigger_json["check_every"])}' if w.kind in PROBE_KINDS else
+            first=('Checks now' if w.next_due_at is None or w.next_due_at<=e.clock.now() else f'First check {local(w.next_due_at)}')
+            lead=(f'{first}, then every {duration(w.trigger_json["check_every"])}' if w.kind in PROBE_KINDS else
                   f'Waits for {w.kind} events' if watcher else
                   f'Waits for {duration(parse_duration(w.trigger_json.get("after",p.checkin_after_hours*3600)))} of owner silence')
             parts=[lead+(f'; if nothing happens by {local(w.deadline_at)}, it tells you once' if watcher and w.deadline_at is not None else '')+'.']
         if w.status not in {'proposed','paused'}:
-            if w.kind=='at' or watcher or w.kind=='owner_silent' and not w.trigger_json.get('builtin'):
+            if w.kind in TIME_KINDS or watcher or w.kind=='owner_silent' and not w.trigger_json.get('builtin'):
                 from .commands import quiet_until
                 due=((s.last_human_at or e.clock.now())+parse_duration(w.trigger_json.get('after',p.checkin_after_hours*3600)) if w.kind=='owner_silent' else
-                     (w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind=='at' else
+                     (w.next_due_at if w.next_due_at is not None else e.clock.now()) if w.kind in TIME_KINDS else
                      w.deadline_at if w.deadline_at is not None else w.next_due_at if w.kind in PROBE_KINDS and w.next_due_at is not None else e.clock.now())
                 due=max(due,e.clock.now())
-                if p.wake_spacing_minutes>0 and s.last_wake_turn_at is not None:
+                skip=w.kind in RECURRING_KINDS  # Poller.gate drops a recurring tick in quiet hours before spacing
+                release=quiet_until(e,w.session_key,urgent=w.urgent,now=due) if skip else None
+                if release and release>due: parts.append(f'Quiet hours skip its ticks until {local(release)}.'); due=release
+                if p.wake_spacing_minutes>0 and s.last_wake_turn_at is not None and not (release and skip and due==release):
                     spacing=s.last_wake_turn_at+p.wake_spacing_minutes*60
                     if spacing>due: parts.append(f'Wake spacing holds it until {local(spacing)}.')
                     due=max(due,spacing)
                 release=quiet_until(e,w.session_key,urgent=w.urgent,now=due)
-                if release and release>due: parts.append(f'Quiet hours hold it until {local(release)}.')
+                if release and release>due: parts.append(f'Quiet hours {"skip its ticks" if skip else "hold it"} until {local(release)}.')
             if not owner_class(w) and s.unanswered_count>=p.max_unanswered:
                 parts.append('Muted: it waits for your reply.' if watcher else 'Muted: it is dropped unless you reply first.')
             if p.wake_spacing_minutes>0 and (w.kind in TIME_KINDS or watcher or w.kind=='owner_silent'):
@@ -381,9 +407,19 @@ class Tool:
         if 'deadline' in trigger and reparse_deadline:
             updates['deadline_at']=parse_at(trigger['deadline'],now=e.clock.now(),timezone=e.policy.resolved_timezone())
         if kind=='command':
+            mode=trigger.get('fire_on','change')
+            if mode not in ('change','success','failure','json'):
+                raise ValueError(f"invalid fire_on '{mode}': use failure (alert when the command exits nonzero), success, change, or json")
             argv=trigger.get('command')
             if not isinstance(argv,list) or not all(isinstance(x,str) for x in argv) or not e.policy.command_allowed(argv):
                 raise ValueError('command probe is not allowlisted')
+            raw=trigger.get('cwd')
+            if raw is not None and not isinstance(raw,str): raise ValueError('command cwd must be a directory')
+            home=e.ctx._manager.home_path
+            try: cwd=Path(raw or home).expanduser()
+            except RuntimeError: raise ValueError('command cwd must be a directory') from None  # ~unknown-user
+            if not cwd.is_absolute(): cwd=Path(home)/cwd
+            if not cwd.is_dir(): raise ValueError('command cwd must be a directory')
         if kind=='url':
             from .probes import classify_url
             classify_url(trigger.get('url'), e.policy.url_allow_private)
@@ -392,7 +428,9 @@ class Tool:
             from .registration import home_scope
             home=e.ctx._manager.home_path
             with home_scope(home):
-                check_file_read(file_path(trigger.get('path'), home))
+                path=file_path(trigger.get('path'), home)
+                check_file_read(path)
+                if path.exists() and not path.is_file(): raise ValueError('file probe requires a regular file')
         if kind=='process':
             try:
                 import psutil  # Hermes-provided, only this kind needs it.
@@ -431,10 +469,10 @@ class Tool:
     def respond(self,args,flight):
         e=self.engine
         if flight is None or flight.invalid:
-            return {'error':'not_in_flight'}
+            return dict(NOT_IN_FLIGHT)
         o=e.store.get_occurrence(flight.wake_id,flight.dedupe_key)
         if o is None or o.state!='started' or o.attempt!=flight.attempt:
-            return {'error':'not_in_flight'}
+            return dict(NOT_IN_FLIGHT)
         outcome=args.get('outcome')
         if outcome not in {'no_change','progress','done','blocked','needs_attention'} or not isinstance(args.get('notify'),bool):
             raise ValueError('respond needs outcome and boolean notify')
@@ -463,6 +501,6 @@ class Tool:
                 changes['next_check_s']=bounded
                 if requested!=bounded: clamps['next_check']=f'{requested} → {bounded} (pacing)'
         if not e.store.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=o.attempt,**changes):
-            return {'error':'not_in_flight'}
+            return dict(NOT_IN_FLIGHT)
         if scratch is not None: flight.scratch=scratch
         return {'ok':True,'clamped':clamps}

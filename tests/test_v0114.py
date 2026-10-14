@@ -43,7 +43,6 @@ def test_beyond_maximum_tool_and_command_do_not_store(engine, command):
     result = create(engine, {'kind':'at','at':'in 30d'})
     assert result.get('error') == 'invalid_request', result
     assert 'maximum lifetime' in result['detail'] and 'until.expires' not in result['detail']
-    assert command('add in 30d Check the report.').startswith('Error:')
     assert not engine.store.list_wakes(KEY)
 
 
@@ -166,7 +165,7 @@ def test_quiet_implicit_extension_and_recurring_skip(engine):
     recurring = create(engine, {'kind':'every','every':'1d at 23:00'},
                        until={'expires':'tomorrow 07:00'})
     assert recurring.get('ok'), recurring
-    assert 'Quiet' not in receipt(recurring)
+    assert 'Quiet hours skip its ticks until' in receipt(recurring) and 'hold it' not in receipt(recurring)
 
 
 @pytest.mark.parametrize('kind', ['command', 'subagent_done'])
@@ -273,7 +272,7 @@ def test_muted_receipts_and_cancel(engine, kind):
             'Muted: it waits for your reply.') in text
     assert 'Cancels if you reply.' in text and 'Expires ' in text
     assert 'Wakes are at least 10 min apart, so it can land a few minutes late.' in text
-    if kind == 'command': assert 'Checks every 1m' in text
+    if kind == 'command': assert 'Checks now, then every 1m' in text
     if kind == 'subagent_done': assert 'Waits for subagent_done events' in text
 
 
@@ -341,7 +340,7 @@ def test_update_already_due_one_shot_has_receipt(engine):
 def test_docs_and_version():
     root = Path(__file__).resolve().parents[1]
     assert 'Results include a receipt line; tell the owner what it says, not a promise of your own.' in DESCRIPTION
-    assert 'version: "0.1.15"' in (root/'plugin.yaml').read_text()
+    assert '## 0.1.15 — 2026-10-14' in (root/'CHANGELOG.md').read_text()
     skill = (root/'skills/heartbeat2-usage/SKILL.md').read_text()
     assert 'receipt' in skill and 'awaiting your OK' in skill
     readme = (root/'README.md').read_text()

@@ -76,12 +76,14 @@ def command_allowed(argv, allowlist):
 def validate_url(url):
     if not isinstance(url, str) or any(c.isspace() for c in url):
         raise ValueError('invalid URL')
-    parsed = urllib.parse.urlsplit(url)
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        parsed.port  # validate malformed/out-of-range ports before I/O
+    except ValueError: raise ValueError('invalid URL') from None
     if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
         raise ValueError('URL requires http or https and a host')
     if parsed.username is not None or parsed.password is not None:
         raise ValueError('URL credentials are refused')
-    parsed.port  # validate malformed/out-of-range ports before I/O
     return url
 
 

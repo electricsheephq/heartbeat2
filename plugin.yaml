@@ -1,5 +1,5 @@
 name: heartbeat2
-version: "0.1.15"
+version: "0.1.17"
 description: >-
   HeartBeat 2.0: bounded wakes and watchers in the conversation that armed them. Disclosure — wakes and watchers run full turns on the conversation's own model,
   billed like any message; command probes run allowlisted read-only commands without
@@ -103,7 +103,12 @@ config_schema:
     type: int
     default: 14
     label: "Longest lifetime (days)"
-    description: "Every wake expires by then; agent recurring wakes default to 7 days. Maximum 3650 (ten years)."
+    description: "Recurring wakes, watchers and agent follow-ups expire by then; agent recurring wakes default to 7 days. Maximum 3650 (ten years)."
+  max_reminder_days:
+    type: int
+    default: 365
+    label: "Longest owner one-time reminder (days)"
+    description: "Owner-requested one-time reminders expire by then. Maximum 3650 (ten years)."
   owner_silent_checkin:
     type: bool
     default: false

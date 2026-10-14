@@ -41,6 +41,11 @@ NON_GATEWAY_PLATFORMS = frozenset({"cli", "tui", "desktop", "api_server", "cron"
 INJECTION_CONFIG = "plugins:\n  entries:\n    heartbeat2:\n      allow_gateway_injection: true"
 
 
+def unknown_kind(kind):
+    return Gate(False, "unknown_kind", f"unknown trigger kind '{kind}'; valid kinds: {', '.join(sorted(KINDS))}. "
+                'A one-time reminder is {"kind": "at", "at": "in 10m"}.')
+
+
 @dataclass(frozen=True)
 class Gate:
     allowed: bool
@@ -72,6 +77,7 @@ class Policy:
     probe_floor_seconds: int = 60
     max_active: int = 10
     max_lifetime_days: int = 14
+    max_reminder_days: int = 365
     owner_silent_checkin: bool = False
     checkin_after_hours: int = 24
     max_rearm_chain: int = 2
@@ -137,7 +143,7 @@ class Policy:
         if result.agent_can_create not in {"yes", "ask_first", "no"}:
             raise ValueError("agent_can_create must be yes, ask_first, or no")
         for name in ("min_interval_minutes", "agent_ungated_floor_minutes", "probe_floor_seconds",
-                     "max_lifetime_days", "checkin_after_hours", "noop_backoff_factor",
+                     "max_lifetime_days", "max_reminder_days", "checkin_after_hours", "noop_backoff_factor",
                      "noop_max_backoff_hours", "ledger_days"):
             if getattr(result, name) < 1:
                 raise ValueError(f"{name} must be positive")
@@ -151,6 +157,7 @@ class Policy:
             "noop_max_backoff_hours": 8760,
             "probe_floor_seconds": 604800,
             "max_lifetime_days": 3650,
+            "max_reminder_days": 3650,
             "checkin_after_hours": 8760,
         }.items():
             if getattr(result, name) > maximum:
@@ -213,7 +220,7 @@ class Policy:
         if not allow_gateway_injection:
             return Gate(False, "injection_disabled", INJECTION_CONFIG)
         if kind not in KINDS:
-            return Gate(False, "unknown_kind")
+            return unknown_kind(kind)
         family = ("silence" if kind == "owner_silent" else "events" if kind in EVENT_KINDS
                   else kind if kind in PROBE_KINDS else None)
         if family and not getattr(self, f"source_{family}"):
@@ -256,7 +263,7 @@ class Policy:
             return Gate(False, "needs_owner")
         kind = new_kind if new_kind is not None else wake.kind
         if kind not in KINDS:
-            return Gate(False, "unknown_kind")
+            return unknown_kind(kind)
         family = ("silence" if kind == "owner_silent" else "events" if kind in EVENT_KINDS
                   else kind if kind in PROBE_KINDS else None)
         if family and not getattr(self, f"source_{family}"):
@@ -279,6 +286,15 @@ class Policy:
         if agent_authored(wake) and not probe_gated:
             floor = max(floor, self.agent_ungated_floor_minutes * 60)
         return floor
+
+    def lifetime_setting(self, wake):
+        # An owner reminder is never bounded below the general lifetime, so raising either keeps it valid.
+        reminder = owner_class(wake) and one_shot(wake) and self.max_reminder_days >= self.max_lifetime_days
+        return 'max_reminder_days' if reminder else 'max_lifetime_days'
+
+    def max_life_s(self, wake):
+        seconds = getattr(self, self.lifetime_setting(wake)) * 86400
+        return min(seconds, 4 * 3600) if wake.babysit else seconds
 
     def clamp(self, wake: Wake, *, probe_gated: bool = False, cache_ttl=None) -> ClampedWake:
         if wake.kind not in KINDS:
@@ -328,13 +344,17 @@ class Policy:
                 clamped["check_every"] = f"{old} → {interval} (probe_floor)"
         now = self.clock.now()
         if not (wake.trigger_json.get('builtin') and wake.expires_at is None):
-            max_life = min(self.max_lifetime_days * 86400, 4 * 3600) if wake.babysit else self.max_lifetime_days * 86400
-            default_life = min(max_life, 7 * 86400) if wake.creator == "agent" and wake.kind in RECURRING_KINDS else max_life
+            max_life = self.max_life_s(wake)
+            # The implicit expiry stays max_lifetime_days for every wake; only a long owner
+            # reminder outlives it, via the hard end and Tool.feasible's due-based grace.
+            base_life = min(self.max_lifetime_days * 86400, 4 * 3600) if wake.babysit else self.max_lifetime_days * 86400
+            default_life = min(base_life, 7 * 86400) if wake.creator == "agent" and wake.kind in RECURRING_KINDS else min(base_life, max_life)
             hard_end = (wake.created_at or now) + max_life
             expires = min(now + default_life, hard_end) if wake.expires_at is None else min(wake.expires_at, hard_end)
             if not math.isfinite(expires) or expires <= now:
                 raise ValueError("expiry must be in the future")
-            change("expires_at", expires, "expires", "babysit_lifetime" if wake.babysit else "max_lifetime")
+            rule = "max_lifetime" if wake.expires_at is None and now + default_life < hard_end else self.lifetime_setting(wake).removesuffix('_days')
+            change("expires_at", expires, "expires", "babysit_lifetime" if wake.babysit else rule)
         if wake.max_fires is not None and (isinstance(wake.max_fires, bool) or not isinstance(wake.max_fires, int) or wake.max_fires < 1):
             raise ValueError("max_fires must be positive")
         if wake.babysit:
