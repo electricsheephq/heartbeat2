@@ -84,7 +84,7 @@ If you can write files, also save a short one-line title to its own file (with a
 
 ## 7. Publish only after an explicit yes to this draft
 
-Show the user the exact title and the complete text, and say where it will go: a new public issue in electricsheephq/heartbeat2, or a comment on issue number N there. Ask them to confirm it holds no secrets or private messages, then ask whether to publish it, change it, or stop.
+Show the user the title and the text exactly as saved in the files, and say where they will go; both destinations are public: a new issue in electricsheephq/heartbeat2, or a comment on issue number N there. Ask them to confirm it holds no secrets or private messages, then ask whether to publish it, change it, or stop. After any change, update the files and show them again before asking.
 An earlier "report it", "just fix it" or an ambiguous reply does not approve this draft. Only a yes after the user has seen it does.
 
 - New issue, with a signed-in GitHub CLI:
