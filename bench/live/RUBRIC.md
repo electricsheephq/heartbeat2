@@ -201,6 +201,11 @@ have no routing tokens. Times are relative to the first actual owner send;
 delivery dates are the Bot API stand-in response dates, in whole seconds.
 Every owner send and bot message, post-owner-turn database snapshot and final
 snapshot is retained. Arming replies are excluded from wake delivery counts.
+After each owner send, wait for gateway run-idle (180 s timeout), then for five
+consecutive seconds with no new bot message (60 s cap). Hitting the cap is VOID
+(`turn_not_settled`). Only then capture the snapshot, created wakes and every bot
+message from that turn. This also gates S-stop's stop send and C-reply's reply
+turn. B3-7 receives all arming-turn bot texts joined in order.
 
 | Cell | Window | Registered bars |
 | --- | --- | --- |
@@ -208,7 +213,7 @@ snapshot is retained. Arming replies are excluded from wake delivery counts.
 | R-clock | 30 min | Owner: “remind me at {HH:MM} to {task}”, next 5-minute mark at or after send+15 min in the chosen timezone. Send later than HH:MM−12 min is VOID (`send_slipped`). Capture/delivery bars match R-rel, with the target due equal to that clock time. |
 | C-reply | 30 min | Owner: “check in with me in 20 minutes about {task} unless I reply before then”. B3-1: exactly one `at` wake storing `cancel_on_reply` (from `until.owner_replies`); `owner_silent` is FAIL (`owner_silent_alternative`). At +5 min send exactly “all good, no need”. B3-4: after that turn wake is cancelled or done with `status_reason=owner_replied`; zero wake deliveries until due+5 min. |
 | W | 45 min | Create an absolute `jobs/{job}.log` containing `started\n`; owner: “tell me when {abs path} says DONE”. B3-1: exactly one file watcher on that path, a pattern matching DONE, stored `check_every` ≤25 min (larger: `check_every_too_long`). Wait for `probe_state_json.offset` baseline; at +10 min or later append exactly `DONE\n`, never rewrite. B3-3: one delivery from flip to flip+stored interval+180 s, containing DONE or the job name. |
-| M | 75 min | After each prior turn ends, request reminders at 20,40,60 min for three tasks; send nothing else. B3-1: three `at` wakes with `owner_requested=1`. At the third gate, stored session `unanswered_count` must be ≥2; otherwise B3-6 is NOT_EXERCISED. B3-6: third delivery within due−60 s to due+180 s while unanswered ≥2. A third wake lacking the flag and dropped as unanswered is B3-1 FAIL, not B3-6 FAIL. Expect all three reminders. |
+| M | 75 min | After each prior turn ends, request reminders at 20,40,60 min for three tasks; send nothing else. B3-1: three `at` wakes with `owner_requested=1`. B3-3: reminders 1 and 2 each delivered exactly once within their own due−60 s to due+180 s window. At the third gate, stored session `unanswered_count` must be ≥2; otherwise B3-6 is NOT_EXERCISED. B3-6 scores only the third reminder: exactly one delivery within due−60 s to due+180 s while unanswered ≥2. A third wake lacking the flag and dropped as unanswered is B3-1 FAIL, not B3-6 FAIL. |
 | S-stop — stop before first tick | 80 min | Owner: “check on me every hour until the {project} deploy is finished”. B3-1: one `every`/`cron` wake first due ≥send+55 min. No arm: NOT_EXERCISED (`declined`); cancel-on-reply set: FAIL (`cancel_on_reply_on_S`). Immediately after arming send exactly “stop checking in on me”. B3-5: cancelled/paused with reason other than `owner_replied`, or session `enabled=0`; `owner_replied` is NOT_EXERCISED. Observe through first due+10 min: no occurrence claimed after stop and zero deliveries. |
 
 **B3-2:** neither the C-reply reply turn nor the S-stop stop turn may create a
@@ -221,11 +226,25 @@ contract is the measured pulse description, verbatim, with the Round-4/5
 `tool_results`, `pulse_description`, tools digest and measured clock fields;
 Round-5 system prompt and parameters are retained. The release owner spot-checks
 judge FAILs against the transcript and may overturn them where it shows support.
+Only COMPLETE repetitions produce packets. `packets.json` is a JSON array in
+the adjudicator packet shape, with string evidence and history ending at the
+judged turn. Merge external verdicts with `python -m bench.live.round6 merge
+--out OUT --verdicts PATH`. Verdicts require a known unique id, boolean `useful`,
+`narration`, `overpromise`, and a nonempty one-line `why`. B3-7 fails on any arming
+overpromise; B3-8 fails on any non-useful or narrating delivery. Missing verdicts
+leave the relevant bar PENDING_JUDGE. Merge writes `final.json` and `final.md`.
 
 **Aggregation:** per repetition/bar: PASS, FAIL, VOID, NOT_RUN, NOT_EXERCISED,
 each with a reason. Overall cell PASS requires every scheduled repetition to
-PASS. Worst state wins: FAIL > VOID/NOT_RUN > NOT_EXERCISED > PASS.
+PASS. Worst state wins: FAIL > PENDING_JUDGE > VOID/NOT_RUN > NOT_EXERCISED > PASS.
 Missing scheduled results are NOT_RUN, never removed from the denominator.
+Missing send times, turns or snapshots are VOID (`incomplete_evidence`). The
+declaration records upstream host (or `fake`), model, timezone, deadline, seed,
+reps, cells, call cap, pin path/commit, runner commit and dirty flag; each result
+also records upstream. Summaries include this declaration, claim class, S-stop
+label, and per-cell/per-rep states and reasons. If the declaration or any result
+uses fake upstream, every overall cell is PLUMBING and the first summary line is
+`FAKE UPSTREAM: plumbing check only; no claim.` Judging cannot promote it to PASS.
 
 **Stop and deadline rules:** any 429 or the shared locked call cap stops the
 whole run immediately; no 429 retry or sleep. 5xx/unreachable gets one retry,
@@ -235,6 +254,16 @@ otherwise record NOT_RUN (`deadline`). Quota stops active cells and leaves the
 rest NOT_RUN (`quota`). A real upstream requires a future, timezone-aware
 `--until`. Round 6 is amended to run at operator-set hours, only inside that
 window, and never at the same time as another B2 round.
+Before each cell or rerun, refuse as NOT_RUN (`quiet_hours`) if the interval
+from now through window+10 min intersects the manifest's default `quiet_hours`
+in `--tz`. After the first send, a sent_at-to-end interval crossing quiet hours
+is VOID (`quiet_hours`), including any S-stop extension. A refused rerun retains
+the original VOID reason and adds `rerun_refused:<reason>`; final VOID exits 3.
+Exit 0 requires every cell to complete. Output directories must be fresh (no
+`calls.json` or result JSON). SIGTERM/SIGINT stops active cells, allows up to 60 s
+for cleanup, marks unfinished cells NOT_RUN (`terminated`), and exits 2. A cell
+signal without a quota latch records TERMINATED, never QUOTA. Pin refusal exits
+4 in the cell and stops the run with every cell NOT_RUN (`refused`).
 
 **Not proven:** shared/installed profiles, real Telegram transport, other Hermes
 pins, other models, broader toolsets, compression, groups, CLI/TUI/Desktop/API/

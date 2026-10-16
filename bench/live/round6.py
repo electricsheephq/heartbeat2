@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -23,7 +23,11 @@ from .upstream import QuotaError, Upstream
 ROOT = Path(__file__).resolve().parents[2]
 DATA = yaml.safe_load(Path(__file__).with_name('journey.yaml').read_text())
 WINDOWS = {k: v * 60 for k, v in DATA['cells'].items()}
-RANK = {'PASS': 0, 'NOT_EXERCISED': 1, 'NOT_RUN': 2, 'VOID': 2, 'FAIL': 3}
+RANK = {'PASS': 0, 'NOT_EXERCISED': 1, 'NOT_RUN': 2, 'VOID': 2, 'PENDING_JUDGE': 3, 'FAIL': 4}
+CLAIM_CLASS = ('isolated-rig live-model journey smoke: pinned Hermes, loopback Bot API, one model, '
+               'pulse-only toolset, compression off, default plugin settings, n=3 per cell, no rate claim')
+STOP_LABEL = 'stop before first tick'
+FAKE_BANNER = 'FAKE UPSTREAM: plumbing check only; no claim.'
 
 
 def variants(seed, rep):
@@ -34,6 +38,83 @@ def variants(seed, rep):
 
 def deadline_allows(cell, now, until):
     return until is None or now + WINDOWS[cell] + 600 <= until
+
+
+def quiet_intersects(start, end, tz):
+    """Closed observation interval versus the manifest's local quiet hours."""
+    from heartbeat2.schedule import quiet_end
+    quiet = yaml.safe_load((ROOT / 'plugin.yaml').read_text())['config_schema']['quiet_hours']['default']
+    if quiet_end(start, quiet, tz) is not None:
+        return True
+    if not quiet:
+        return False
+    hour, minute = map(int, quiet.split('-')[0].split(':'))
+    zone = ZoneInfo(tz)
+    day = datetime.fromtimestamp(start, zone).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    while day.timestamp() <= end:
+        if day.timestamp() >= start and quiet_end(day.timestamp(), quiet, tz) is not None:
+            return True
+        day += timedelta(days=1)
+    return False
+
+
+def upstream_name(args):
+    return 'fake' if args.upstream == 'fake' else urlsplit(args.upstream_url).hostname
+
+
+def declaration_for(args, selected):
+    sibling = Path(str(args.pin) + '.COMMIT')
+    pin_commit = sibling.read_text().strip() if sibling.is_file() else (
+        subprocess.check_output(['git', '-C', str(args.pin), 'rev-parse', 'HEAD'], text=True).strip()
+        if (args.pin / '.git').exists() else None)
+    return dict(round=6, upstream=upstream_name(args), model=args.model, tz=args.tz, until=args.until,
+                seed=args.seed, reps=args.reps, cells=selected, max_calls=args.max_calls,
+                pin=str(args.pin), pin_commit=pin_commit,
+                scheduled=[(s, r) for s in selected for r in range(1, args.reps + 1)],
+                commit=subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
+                dirty=bool(subprocess.check_output(['git', '-C', str(ROOT), 'status', '--porcelain'], text=True)))
+
+
+def capture_turn(rig, text, result, upstream, snapshot, bots, guard, *, role='arming', minutes=20, match=''):
+    """Capture only after run-idle AND five seconds of Bot API delivery silence."""
+    before, call_start = snapshot(), len(upstream.rows)
+    prior = {m['id'] for m in bots()}
+    turn = dict(role=role, minutes=minutes, match=match, owner=dict(text=text, sent_at=time.time()),
+                bot_ids=[], created=[], upstream_rows=[], snapshot=before)
+    result['turns'].append(turn)
+    original_dm = rig.driver.dm
+    def recorded_dm(text):
+        inbound = original_dm(text)
+        turn['owner'].update(id=inbound.message_id, date=inbound.raw['message']['date'])
+        result.setdefault('sent_at', turn['owner']['date'])
+        return inbound
+    rig.driver.dm = recorded_dm
+    try:
+        rig.owner(text)
+        rig.gateway.wait_idle(timeout=180)
+        started = changed = time.monotonic()
+        seen = {m['id'] for m in bots()}
+        while True:
+            guard()
+            current = bots()
+            ids = {m['id'] for m in current}
+            now = time.monotonic()
+            if ids - seen:
+                changed = now
+            seen |= ids
+            if now - started >= 60:
+                raise RuntimeError('turn_not_settled')
+            if now - changed >= 5:
+                break
+            time.sleep(.25)
+        turn.update(snapshot=snapshot(), bot_ids=[m['id'] for m in current if m['id'] not in prior],
+                    upstream_rows=upstream.rows[call_start:])
+        turn['created'] = [w for w in turn['snapshot']['wakes'] if w['id'] not in {w['id'] for w in before['wakes']}]
+        result['snapshots'].append(turn['snapshot'])
+    finally:
+        rig.driver.dm = original_dm
+    guard()
+    return turn
 
 
 class CallBudget:
@@ -95,6 +176,20 @@ def aggregate(states):
 
 
 def score_cell(result):
+    status = result.get('status')
+    if status in {'NOT_RUN', 'QUOTA', 'TERMINATED'}:
+        return dict(state='NOT_RUN', reason='terminated' if status == 'TERMINATED' else result.get('reason', status), bars={})
+    try:
+        if (not isinstance(result.get('sent_at'), (int, float)) or not result.get('turns') or
+                not isinstance(result.get('final'), dict) or not result['final'] or
+                any(not isinstance(t.get('snapshot'), dict) or not t['snapshot'] for t in result['turns'])):
+            raise KeyError('incomplete')
+        return _score_cell(result)
+    except (KeyError, IndexError, StopIteration, TypeError, ValueError, AttributeError):
+        return dict(state='VOID', reason='incomplete_evidence', bars={})
+
+
+def _score_cell(result):
     bars = {}
     def bar(name, passed, reason, state='FAIL'):
         bars[name] = {'state': 'PASS' if passed else state, 'reason': 'ok' if passed else reason}
@@ -136,9 +231,10 @@ def score_cell(result):
             elif count < 2:
                 bar('B3-6', False, 'unanswered_below_2', 'NOT_EXERCISED')
             else:
-                bar('B3-6', len(third_messages) == 1 and len(deliveries) == 3 and all(
-                    sum(w['next_due_at'] - 60 <= m['date'] <= w['next_due_at'] + 180 for m in deliveries) == 1
-                    for w in wakes), 'reminder_delivery')
+                bar('B3-6', len(third_messages) == 1, 'third_reminder_delivery')
+            bar('B3-3', len(wakes) == 3 and all(
+                sum(w['next_due_at'] - 60 <= m['date'] <= w['next_due_at'] + 180 for m in deliveries) == 1
+                for w in wakes[:2]), 'reminder_delivery')
         else:
             bar('B3-3', len(deliveries) == 1 and due is not None and due - 60 <= deliveries[0]['date'] <= due + 180
                 and arms[0]['match'].casefold() in deliveries[0]['text'].casefold(), 'delivery_window_or_text')
@@ -149,7 +245,7 @@ def score_cell(result):
         reply = next(t for t in turns if t['role'] == 'reply')
         after = next((w for w in reply['snapshot']['wakes'] if w['id'] == wake.get('id')), {})
         bar('B3-4', after.get('status') in {'cancelled', 'done'} and after.get('status_reason') == 'owner_replied'
-            and not deliveries, 'not_cancelled_or_delivered')
+            and due is not None and not any(m['date'] <= due + 300 for m in deliveries), 'not_cancelled_or_delivered')
     elif sid == 'W':
         trigger = decoded(wake.get('trigger_json'))
         interval = trigger.get('check_every', 0)
@@ -188,6 +284,8 @@ def score_cell(result):
 
 
 def judge_packets(result):
+    if result.get('status') != 'COMPLETE' or score_cell(result)['reason'] == 'incomplete_evidence':
+        return
     replies = {i for t in result.get('turns', []) for i in t['bot_ids']}
     for turn in result.get('turns', []):
         if turn['role'] == 'arming':
@@ -201,37 +299,103 @@ def judge_packets(result):
             yield None, 'B3-8', [message], rows
 
 
+def summarize(declaration, results, fake=False):
+    cells = {sid: 'PLUMBING' if fake else aggregate([r['state'] for r in results if r['cell'] == sid])
+             for sid in declaration['cells']}
+    reasons = {sid: FAKE_BANNER if fake else next((r['reason'] for r in results
+               if r['cell'] == sid and r['state'] == state), 'missing_result') for sid, state in cells.items()}
+    return dict(round=6, claim_class=CLAIM_CLASS, labels={'S-stop': STOP_LABEL}, declaration=declaration,
+                fake=fake, repetitions=results, cells=cells, cell_reasons=reasons)
+
+
+def write_summary(out, summary, name):
+    (out / f'{name}.json').write_text(json.dumps(summary, indent=2))
+    lines = ([FAKE_BANNER, ''] if summary['fake'] else []) + [f'# Round 6 {name}', '',
+        'Claim class: ' + summary['claim_class'], 'S-stop: ' + STOP_LABEL, '',
+        'Declaration: ' + json.dumps(summary['declaration'], sort_keys=True), '']
+    lines += [f'- {r["cell"]}:{r["rep"]}: {r["state"]} ({r["reason"]})' for r in summary['repetitions']]
+    lines += ['', *[f'- {sid}: {state} ({summary["cell_reasons"][sid]})' for sid, state in summary['cells'].items()], '',
+        'Not proven: live gateways, other models/toolsets, customer sessions, or a rate claim; '
+        'mechanical scores alone do not prove B3-7/B3-8.', '']
+    (out / f'{name}.md').write_text('\n'.join(lines))
+
+
 def write_score(out):
     from .adjudicate import turn_fields
     from .round3 import turn_pulse
     declaration = json.loads((out / 'declaration.json').read_text())
     results, packets = [], []
+    fake = declaration.get('upstream') == 'fake'
     for sid, rep in declaration['scheduled']:
         path = out / f'{sid}-{rep}.json'
         result = json.loads(path.read_text()) if path.exists() else dict(cell=sid, rep=rep, status='NOT_RUN', reason='missing_result')
-        results.append(dict(cell=sid, rep=rep, **score_cell(result)))
+        fake |= result.get('upstream') == 'fake'
+        results.append(dict(cell=sid, rep=rep, upstream=result.get('upstream', declaration.get('upstream')), **score_cell(result)))
         for turn, bar, messages, rows in judge_packets(result):
+            index = next((i for i, t in enumerate(result['turns']) if t is turn), None)
+            history_turns = result['turns'][:index + 1] if index is not None else result['turns']
             measured = dict(type='capture' if turn else 'wake', owner_message=turn['owner']['text'] if turn else '',
-                            upstream_rows=rows, timezone=declaration['timezone'], sent_at=result['sent_at'])
+                            upstream_rows=rows, timezone=declaration.get('tz', declaration.get('timezone', 'UTC')),
+                            sent_at=result['sent_at'])
             fields, _ = turn_fields(measured, round=5)
             _, pulse_results = turn_pulse(rows)
-            packets.append(dict(id=f'{sid}-{rep}-{bar}-{messages[0]["id"] if messages else "missing"}',
-                bar=bar, history=[dict(role='user', content=t['owner']['text']) for t in result['turns']],
-                wake_note='; '.join(t['owner']['text'] for t in result['turns'] if t['role'] == 'arming'),
+            packet_id = f'{sid}-{rep}-{bar}-' + (f'turn-{index}' if turn else str(messages[0]['id']))
+            packets.append(dict(id=packet_id, cell=sid, rep=rep,
+                bar=bar, history=[dict(role='user', content=t['owner']['text']) for t in history_turns],
+                wake_note='; '.join(t['owner']['text'] for t in history_turns if t['role'] == 'arming'),
                 owner_message=turn['owner']['text'] if turn else None,
-                evidence=[dict(due=w.get('next_due_at'), note=w.get('note')) for t in result['turns'] for w in t['created']],
+                evidence=[json.dumps(dict(due=w.get('next_due_at'), note=w.get('note'))) for t in history_turns for w in t['created']],
                 delivered_text='\n'.join(m['text'] for m in messages), pulse_results=pulse_results,
                 receipts=[r['receipt'] for r in pulse_results if 'receipt' in r],
                 tool_contract=fields['pulse_description'], **fields))
-    summary = dict(round=6, repetitions=results, cells={sid: aggregate([r['state'] for r in results if r['cell'] == sid])
-                   for sid in declaration['cells']})
-    (out / 'packets.jsonl').write_text(''.join(json.dumps(p) + '\n' for p in packets))
-    (out / 'summary.json').write_text(json.dumps(summary, indent=2))
-    (out / 'summary.md').write_text('# Round 6 mechanical bars\n\n' + '\n'.join(
-        f'- {r["cell"]}:{r["rep"]}: {r["state"]} ({r["reason"]})' for r in results) +
-        '\n\nOverall: ' + ', '.join(f'{s} {v}' for s, v in summary['cells'].items()) +
-        '\n\nNot proven: live gateways, other models/toolsets, customer sessions, or a rate claim; B3-7/B3-8 need judging.\n')
+    summary = summarize(declaration, results, fake)
+    (out / 'packets.json').write_text(json.dumps(packets, indent=2))
+    write_summary(out, summary, 'summary')
     return summary
+
+
+def merge_verdicts(out, verdicts):
+    """Validate external judgments and combine them with immutable mechanical bars."""
+    summary = json.loads((out / 'summary.json').read_text())
+    packets = json.loads((out / 'packets.json').read_text())
+    known = {p['id']: p for p in packets}
+    if len(known) != len(packets):
+        raise ValueError('duplicate packet id in packets')
+    if not isinstance(verdicts, list):
+        raise ValueError('verdicts must be a JSON array')
+    seen = {}
+    for verdict in verdicts:
+        if not isinstance(verdict, dict) or verdict.get('id') not in known or verdict['id'] in seen:
+            raise ValueError('unknown or duplicate packet id')
+        if any(type(verdict.get(k)) is not bool for k in ('useful', 'narration', 'overpromise')):
+            raise ValueError('every judgment must be boolean')
+        why = verdict.get('why')
+        if not isinstance(why, str) or not why.strip() or len(why.splitlines()) != 1 or any(c in why for c in ('\n', '\r')):
+            raise ValueError('why must be a nonempty one-line explanation')
+        seen[verdict['id']] = verdict
+    results = []
+    for mechanical in summary['repetitions']:
+        result = dict(mechanical, bars={k: dict(v) for k, v in mechanical['bars'].items()})
+        for bar in ('B3-7', 'B3-8'):
+            group = [p for p in packets if p['cell'] == result['cell'] and p['rep'] == result['rep'] and p['bar'] == bar]
+            if not group:
+                continue
+            states = []
+            for packet in group:
+                verdict = seen.get(packet['id'])
+                failed = verdict and (verdict['overpromise'] if bar == 'B3-7' else not verdict['useful'] or verdict['narration'])
+                states.append('PENDING_JUDGE' if verdict is None else 'FAIL' if failed else 'PASS')
+            state = aggregate(states)
+            result['bars'][bar] = dict(state=state, reason='missing_verdict' if state == 'PENDING_JUDGE' else
+                                      'overpromise' if state == 'FAIL' and bar == 'B3-7' else
+                                      'not_useful_or_narration' if state == 'FAIL' else 'ok')
+        state = aggregate([mechanical['state'], *[b['state'] for b in result['bars'].values()]])
+        result.update(state=state, reason=next((b['reason'] for b in result['bars'].values() if b['state'] == state), mechanical['reason']))
+        results.append(result)
+    final = summarize(summary['declaration'], results, summary['fake'])
+    final['verdicts'] = verdicts
+    write_summary(out, final, 'final')
+    return final
 
 
 def cell(args, sid, rep):
@@ -249,7 +413,7 @@ def cell(args, sid, rep):
         valid_pin = False
     if not valid_pin:
         print('hermes_cli must resolve inside --pin', file=sys.stderr)
-        return 2
+        return 4
     from loopback import install
     install(allow_hosts=() if args.upstream == 'fake' else (urlsplit(args.upstream_url).hostname,))
     from harness import PulseRig
@@ -257,7 +421,8 @@ def cell(args, sid, rep):
     from .director import ForwardAllDirector
 
     variant = variants(args.seed, rep)
-    result = dict(cell=sid, rep=rep, status='PENDING', variant=variant, turns=[], bot_messages=[], snapshots=[])
+    result = dict(cell=sid, rep=rep, upstream=upstream_name(args), status='PENDING',
+                  variant=variant, turns=[], bot_messages=[], snapshots=[])
     def fake_reply(record):
         messages = record['body']['messages']
         if messages[-1]['role'] == 'tool':
@@ -276,18 +441,8 @@ def cell(args, sid, rep):
                 ZoneInfo(args.tz)).isoformat()))
         return ToolCall('pulse', dict(action='create', trigger=trigger, note=turn['owner']['text'],
             owner_asked=sid in {'R-rel', 'R-clock', 'M'}, until={'owner_replies': sid == 'C-reply'}))
-    fake = FakeLLMServer(fake_reply) if args.upstream == 'fake' else None
-    if fake:
-        fake.start()
-        args.key_env = 'R6_FAKE_KEY'
-        os.environ[args.key_env] = 'fake-loopback-only'
+    fake = upstream = rig = None
     budget = CallBudget(args.out / 'calls.json', args.max_calls)
-    upstream = JourneyUpstream(fake.base_url if fake else args.upstream_url, args.model, args.key_env,
-                               args.out / f'{sid}-{rep}.jsonl', call_budget=budget)
-    upstream.scenario, upstream.rep = sid, rep
-    director = ForwardAllDirector(upstream)
-    rig = PulseRig(f'r6-{sid}-{rep}', args.pin, director=director, replace_settings={'timezone': args.tz},
-        config={'timezone': args.tz, 'model': {'streaming': False}, 'logging': {'level': 'INFO'}})
     def snapshot():
         sessions = rig.rows('sessions')
         return dict(at=time.time(), wakes=rig.rows('wakes'), occurrences=rig.rows('occurrences'),
@@ -301,13 +456,11 @@ def cell(args, sid, rep):
             raise RuntimeError('upstream_unavailable')
         if args.until is not None and time.time() >= args.until:
             raise RuntimeError('deadline')
-    original_wait = rig.wait
     def guarded_wait(predicate, what, timeout=90):
         def checked():
             guard()
             return predicate()
         return original_wait(checked, what, timeout)
-    rig.wait = guarded_wait
     def wait_to(target):
         while time.time() < target:
             guard()
@@ -319,33 +472,27 @@ def cell(args, sid, rep):
         return [dict(id=str(c.response['message_id']), text=c.response['text'], date=c.response['date'])
                 for c in rig.driver.sends(rig.driver.user_id)]
     def send(text, role='arming', minutes=20, match=''):
-        before, call_start = snapshot(), len(upstream.rows)
-        prior = {m['id'] for m in bots()}
-        turn = dict(role=role, minutes=minutes, match=match, owner=dict(text=text, sent_at=time.time()),
-                    bot_ids=[], created=[], upstream_rows=[], snapshot=before)
-        result['turns'].append(turn)
-        original_dm = rig.driver.dm
-        def recorded_dm(text):
-            inbound = original_dm(text)
-            turn['owner'].update(id=inbound.message_id, date=inbound.raw['message']['date'])
-            result.setdefault('sent_at', turn['owner']['date'])
-            return inbound
-        rig.driver.dm = recorded_dm
-        try:
-            rig.owner(text)
-        finally:
-            rig.driver.dm = original_dm
-            turn.update(snapshot=snapshot(), bot_ids=[m['id'] for m in bots() if m['id'] not in prior],
-                        upstream_rows=upstream.rows[call_start:])
-            turn['created'] = [w for w in turn['snapshot']['wakes'] if w['id'] not in {w['id'] for w in before['wakes']}]
-            result['snapshots'].append(turn['snapshot'])
-        guard()
-        return turn
+        return capture_turn(rig, text, result, upstream, snapshot, bots, guard,
+                            role=role, minutes=minutes, match=match)
     def terminated(signum, frame):
-        raise QuotaError('quota')
-    signal.signal(signal.SIGTERM, terminated)
+        raise CellTerminated('terminated')
+    previous_handlers = {sig: signal.signal(sig, terminated) for sig in (signal.SIGTERM, signal.SIGINT)}
     code = 0
     try:
+        fake = FakeLLMServer(fake_reply) if args.upstream == 'fake' else None
+        if fake:
+            fake.start()
+            args.key_env = 'R6_FAKE_KEY'
+            os.environ[args.key_env] = 'fake-loopback-only'
+        budget = CallBudget(args.out / 'calls.json', args.max_calls)
+        upstream = JourneyUpstream(fake.base_url if fake else args.upstream_url, args.model, args.key_env,
+                                   args.out / f'{sid}-{rep}.jsonl', call_budget=budget)
+        upstream.scenario, upstream.rep = sid, rep
+        director = ForwardAllDirector(upstream)
+        rig = PulseRig(f'r6-{sid}-{rep}', args.pin, director=director, replace_settings={'timezone': args.tz},
+            config={'timezone': args.tz, 'model': {'streaming': False}, 'logging': {'level': 'INFO'}})
+        original_wait = rig.wait
+        rig.wait = guarded_wait
         key = os.environ.pop(args.key_env)
         try:
             rig.start(bootstrap=False)
@@ -378,6 +525,8 @@ def cell(args, sid, rep):
             text = f'remind me in {minutes} minutes to {task["task"]}'
         arm = send(text, minutes=minutes, match=task['match'])
         end = result['sent_at'] + WINDOWS[sid]
+        if quiet_intersects(result['sent_at'], end, args.tz):
+            raise RuntimeError('quiet_hours')
         if sid == 'R-clock' and result['sent_at'] > result['target_due'] - 720:
             raise RuntimeError('send_slipped')
         if sid == 'C-reply':
@@ -387,6 +536,8 @@ def cell(args, sid, rep):
             send('stop checking in on me', 'stop')
             if len(arm['created']) == 1 and arm['created'][0].get('next_due_at'):
                 end = max(end, arm['created'][0]['next_due_at'] + 600)
+                if quiet_intersects(result['sent_at'], end, args.tz):
+                    raise RuntimeError('quiet_hours')
                 if args.until is not None and end > args.until:
                     raise RuntimeError('observation_incomplete')
         elif sid == 'M':
@@ -415,81 +566,164 @@ def cell(args, sid, rep):
                 result['flipped_at'] = int(time.time())
         wait_to(end)
         result.update(status='COMPLETE', final=snapshot())
+    except CellTerminated:
+        budget.transaction()
+        quota = budget.reason or (upstream.reason if upstream and upstream.quota else '')
+        code = 2
+        result.update(status='QUOTA' if quota else 'TERMINATED', reason=quota or 'terminated')
     except Exception as exc:
-        code = 2 if isinstance(exc, QuotaError) or upstream.quota else 3
-        result.update(status='QUOTA' if code == 2 else 'VOID', reason=upstream.reason or str(exc))
+        code = 2 if isinstance(exc, QuotaError) or upstream and upstream.quota else 3
+        result.update(status='QUOTA' if code == 2 else 'VOID', reason=(upstream.reason if upstream else '') or str(exc))
     finally:
-        # Preserve partial owner sends too, even if their model turn failed.
-        result.update(bot_messages=bots(), upstream_rows=upstream.rows, final=snapshot())
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        cleanup_cell(args.out / f'{sid}-{rep}.json', result, rig, fake, upstream, bots, snapshot)
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+    return code
+
+
+class CellTerminated(Exception):
+    pass
+
+
+def cleanup_cell(path, result, rig, fake, upstream, bots, snapshot):
+    # A second signal must not interrupt gateway teardown or evidence preservation.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    errors = []
+    try:
+        if rig:
+            try:
+                result.update(bot_messages=bots(), final=snapshot())
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+            try:
+                rig.close()
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+    finally:
         try:
-            rig.close()
-        finally:
             if fake:
                 fake.stop()
-            (args.out / f'{sid}-{rep}.json').write_text(json.dumps(result, indent=2))
-    return code
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+        if upstream:
+            result['upstream_rows'] = upstream.rows
+        if errors:
+            result['cleanup_errors'] = errors
+            if result['status'] == 'COMPLETE':
+                result.update(status='VOID', reason='cleanup_failed')
+        try:
+            path.write_text(json.dumps(result, indent=2))
+        except Exception as exc:
+            print('result write failed: ' + type(exc).__name__, file=sys.stderr)
 
 
 def orchestrate(args, argv, selected):
     jobs = [(s, r, 0) for s in selected for r in range(1, args.reps + 1)]
-    active, code = [], 0
-    def not_run(sid, rep, reason):
+    scheduled = [(s, r) for s in selected for r in range(1, args.reps + 1)]
+    active, stop_reason = [], ''
+    def stopped(signum, frame):
+        nonlocal stop_reason
+        stop_reason = 'terminated'
+    previous_handlers = {sig: signal.signal(sig, stopped) for sig in (signal.SIGTERM, signal.SIGINT)}
+    def read(sid, rep):
         path = args.out / f'{sid}-{rep}.json'
-        result = json.loads(path.read_text()) if path.exists() else dict(cell=sid, rep=rep)
-        result.update(status='NOT_RUN', reason=reason)
-        path.write_text(json.dumps(result))
+        return json.loads(path.read_text()) if path.exists() else dict(cell=sid, rep=rep)
+    def record(sid, rep, reason, rerun=False):
+        result = read(sid, rep)
+        if rerun and result.get('status') == 'VOID':
+            result['reason'] = result.get('reason', 'void') + ';rerun_refused:' + reason
+        else:
+            result.update(status='NOT_RUN', reason=reason)
+        result['upstream'] = upstream_name(args)
+        (args.out / f'{sid}-{rep}.json').write_text(json.dumps(result))
+    def shutdown(reason):
+        for proc, *_ in active:
+            if proc.poll() is None:
+                proc.terminate()
+        deadline = time.monotonic() + 60
+        for proc, log, sid, rep, attempt in active:
+            try:
+                proc.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            finally:
+                log.close()
+            record(sid, rep, reason)
+        active.clear()
+        for sid, rep, attempt in jobs:
+            record(sid, rep, reason)
+        jobs.clear()
+        if reason == 'refused':
+            for sid, rep in scheduled:
+                record(sid, rep, reason)
     try:
         while jobs or active:
-            # Reap before launching: a completed quota cell must veto the queue.
-            for proc, log, sid, rep, attempt in list(active):
+            # Reap before launching: a completed quota/refusal cell vetoes the queue.
+            for item in list(active):
+                proc, log, sid, rep, attempt = item
                 rc = proc.poll()
                 if rc is None:
                     continue
                 log.close()
-                active.remove((proc, log, sid, rep, attempt))
-                if rc == 2:
-                    code = 2
-                elif rc == 3 and not attempt:
-                    (args.out / f'{sid}-{rep}.json').replace(args.out / f'{sid}-{rep}-void.json')
-                    jobs.append((sid, rep, 1))
-                elif rc and code != 2:
-                    code = max(code, 3)
-            if code == 2:
-                for proc, log, sid, rep, attempt in active:
-                    proc.terminate()
-                for proc, log, sid, rep, attempt in active:
-                    proc.wait(timeout=30)
-                    log.close()
-                    not_run(sid, rep, 'quota')
-                for sid, rep, attempt in jobs:
-                    not_run(sid, rep, 'quota')
+                active.remove(item)
+                result = read(sid, rep)
+                if rc == 4:
+                    stop_reason = 'refused'
+                elif rc == 2 and stop_reason not in {'refused', 'terminated'}:
+                    stop_reason = 'terminated' if result.get('status') == 'TERMINATED' else 'quota'
+                elif rc not in (0, 2, 4) or result.get('status') == 'VOID':
+                    if result.get('status') != 'VOID':
+                        result.update(status='VOID', reason='incomplete_evidence', upstream=upstream_name(args))
+                        (args.out / f'{sid}-{rep}.json').write_text(json.dumps(result))
+                    if not attempt:
+                        (args.out / f'{sid}-{rep}-void.json').write_text(json.dumps(result))
+                        jobs.append((sid, rep, 1))
+            if stop_reason:
+                shutdown(stop_reason)
                 return 2
-            while jobs and len(active) < args.workers:
+            while jobs and len(active) < args.workers and not stop_reason:
                 sid, rep, attempt = jobs.pop(0)
-                if not deadline_allows(sid, time.time(), args.until):
-                    not_run(sid, rep, 'deadline')
+                now = time.time()
+                reason = 'deadline' if not deadline_allows(sid, now, args.until) else (
+                    'quiet_hours' if quiet_intersects(now, now + WINDOWS[sid] + 600, args.tz) else '')
+                if reason:
+                    record(sid, rep, reason, rerun=bool(attempt))
                     continue
                 log = (args.out / f'{sid}-{rep}-{attempt}.log').open('w')
-                proc = subprocess.Popen([sys.executable, '-m', 'bench.live.round6', *argv, '--cell', f'{sid}:{rep}'],
-                                        stdout=log, stderr=subprocess.STDOUT)
+                try:
+                    proc = subprocess.Popen([sys.executable, '-m', 'bench.live.round6', *argv, '--cell', f'{sid}:{rep}'],
+                                            stdout=log, stderr=subprocess.STDOUT)
+                except Exception:
+                    log.close()
+                    raise
                 active.append((proc, log, sid, rep, attempt))
+            if stop_reason:
+                shutdown(stop_reason)
+                return 2
             time.sleep(.1)
+        states = [read(sid, rep).get('status') for sid, rep in scheduled]
+        return 3 if 'VOID' in states else 0 if all(s == 'COMPLETE' for s in states) else 2
     finally:
-        for proc, log, *_ in active:
-            if proc.poll() is None:
-                proc.terminate()
-                proc.wait(timeout=30)
-            log.close()
-    return code
+        if active:
+            shutdown(stop_reason or 'terminated')
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
-    scoring = bool(argv and argv[0] == 'score')
+    command = argv[0] if argv and argv[0] in {'score', 'merge'} else None
+    scoring = command is not None
     if scoring:
         argv.pop(0)
     parser.add_argument('--out', type=Path, required=True)
+    if command == 'merge':
+        parser.add_argument('--verdicts', type=Path, required=True)
     if not scoring:
         parser.add_argument('--pin', type=Path, required=True)
         parser.add_argument('--upstream', choices=['fake'])
@@ -509,7 +743,13 @@ def main(argv=None):
     if args.out == ROOT or ROOT in args.out.parents:
         parser.error('results must stay outside the repository')
     if scoring:
-        write_score(args.out)
+        if command == 'merge':
+            try:
+                merge_verdicts(args.out, json.loads(args.verdicts.read_text()))
+            except ValueError as exc:
+                parser.error(str(exc))
+        else:
+            write_score(args.out)
         return 0
     args.pin = args.pin.resolve()
     if '.hermes' in args.pin.parts or not (args.pin / 'tests/fakes/fake_llm_provider.py').is_file():
@@ -540,12 +780,12 @@ def main(argv=None):
     if args.cell:
         sid, rep = args.cell.split(':')
         return cell(args, sid, int(rep))
+    if (args.out / 'calls.json').exists() or any(args.out.glob('*-*.json')):
+        parser.error('--out must be fresh: calls.json or result JSON already exists')
     sys.path.insert(0, str(ROOT / 'tests/e2e'))
     from loopback import install
     install(allow_hosts=() if args.upstream == 'fake' else (urlsplit(args.upstream_url).hostname,))
-    (args.out / 'declaration.json').write_text(json.dumps(dict(round=6, timezone=args.tz, seed=args.seed,
-        cells=selected, scheduled=[(s, r) for s in selected for r in range(1, args.reps + 1)],
-        commit=subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip())))
+    (args.out / 'declaration.json').write_text(json.dumps(declaration_for(args, selected), indent=2))
     return orchestrate(args, argv, selected)
 
 
