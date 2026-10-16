@@ -265,3 +265,13 @@ def test_unknown_chat_type_is_tagged(group):
     assert e.store.cas_session(GROUP, {'chat_type':'group'}, chat_type='')
     _, o, text = claim(e)
     assert text.startswith(tagged(e, o)+' ')
+
+
+def test_stale_signed_decoy_in_name_does_not_block_genuine_group_wake(group):
+    e = group
+    w, o, text = claim(e)
+    # A correctly signed marker for another attempt (as if copied from an earlier wake).
+    decoy = tagged(e, o, attempt=o.attempt+1)+' '
+    start(e, message='[Owner] '+decoy+'] '+text)
+    occurrence = e.store.get_occurrence(w.id, o.dedupe_key)
+    assert occurrence.state == 'started' and occurrence.attempt == o.attempt

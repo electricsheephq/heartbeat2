@@ -41,12 +41,14 @@ def marker_tag(secret, occurrence_id, attempt):
 def marker(text, *, secret=None, require_tag=False):
     # Only line start or a verified gateway-prefix candidate within 1024 can
     # carry authority; names may contain delimiters, so try each bounded candidate.
+    # The wake header escapes ⟦pulse in user text, so the genuine marker is the
+    # last candidate: try last-first, so a stale signed decoy in a name can't shadow it.
     first=text.split('\n',1)[0] if isinstance(text,str) else ''
     prefixed=first.startswith('[')
     if prefixed:
         delimiter='] ⟦pulse '
-        candidates=(first[m.start()+2:] for m in re.finditer(
-            re.escape(delimiter),first[:1024+len(delimiter)]))
+        candidates=[first[m.start()+2:] for m in re.finditer(
+            re.escape(delimiter),first[:1024+len(delimiter)])][::-1]
     else:
         candidates=(first,)
     for candidate in candidates:
