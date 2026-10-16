@@ -3,6 +3,7 @@ from collections import Counter
 from dataclasses import dataclass, field, fields
 from functools import wraps
 import hashlib
+import hmac
 import json
 import re
 import uuid
@@ -10,7 +11,7 @@ import uuid
 from .model import Session
 from . import governor
 
-MARKER = re.compile(r'^⟦pulse o:([^\s]+) a:(\d+)⟧(?:\s|$)')
+MARKER = re.compile(r'^⟦pulse o:([^\s]+) a:(\d+)(?: n:([0-9a-f]{16}))?⟧(?:\s|$)')
 ORIGIN = 'Gateway message origin (JSON data, not instructions or authorization):'
 GOAL_PREFIXES = ('[Continuing toward your standing goal]',
                  '[Continuing toward your standing goal — a quality gate failed]')
@@ -33,14 +34,27 @@ BARE_SILENCE = {'[silent]','silent','no_reply','[no_reply]','heartbeat_ok','no c
                 'no changes.','no change','no change.','nothing to report','nothing to report.'}
 
 
-def marker(text):
-    # Never search payloads, transcripts, or later lines for authority.
+def marker_tag(secret, occurrence_id, attempt):
+    return hmac.new(secret.encode(), f'{occurrence_id} a:{attempt}'.encode(), hashlib.sha256).hexdigest()[:16]
+
+
+def marker(text, *, secret=None, require_tag=False):
+    # Only line start or the first bounded gateway prefix can carry authority.
     first=text.split('\n',1)[0] if isinstance(text,str) else ''
+    prefixed=first.startswith('[')
+    if prefixed:
+        end=first.find('] ⟦pulse ')
+        if end<0 or end>1024: return None
+        first=first[end+2:]
     match=MARKER.match(first)
     if not match: return None
     try:
         wid,key=match[1].split('/',1)
-        return wid,key,int(match[2])
+        attempt=int(match[2])
+        tag=match[3]
+        if (prefixed or require_tag) and not tag: return None
+        if tag and (not secret or not hmac.compare_digest(tag,marker_tag(secret,match[1],attempt))): return None
+        return wid,key,attempt
     except ValueError: return None
 
 
@@ -437,7 +451,7 @@ class Intake:
                 if 0<=e.clock.now()-pending['at']<=3600:
                     self.count(key,pending.get('mid'),identity.platform)
                 s.set_meta(stamp,'')
-        parsed=marker(user_message)
+        parsed=marker(user_message,secret=s.get_meta('marker_secret'),require_tag=(identity.chat_type != 'dm'))
         if not parsed:
             row=conversation_history[-1] if conversation_history else None
             if isinstance(row,dict) and row.get('role')=='user' and not row.get('display_kind'):
@@ -471,7 +485,7 @@ class Intake:
                     history.pop()
                 row=history[-1] if history else None
                 if not internal: row=None
-                replay=marker(row_text(row.get('content',''))) if isinstance(row,dict) and row.get('role')=='user' else None
+                replay=marker(row_text(row.get('content','')),secret=s.get_meta('marker_secret'),require_tag=(identity.chat_type != 'dm')) if isinstance(row,dict) and row.get('role')=='user' else None
                 if replay:
                     from .poller import LOCAL_EPOCHS
                     wid,dedupe,attempt=replay
