@@ -54,6 +54,30 @@ def test_missing_turn_unresolved_at_five_minutes(tmp_path, monkeypatch):
     store.close()
 
 
+@pytest.mark.parametrize('kind', ['N', 'M'])
+def test_turn_finished_after_deadline_is_not_rescued(tmp_path, monkeypatch, kind):
+    r, c, store, e = rig(tmp_path, kind)
+    start = epoch(e['sends'][0]['at']); r.clock.wall = start
+    original_row = c.row
+    def row(role, text, at, *args, **kwargs):
+        finished_at = start + 360 if role == 'assistant' and text else at
+        original_row(role, text, finished_at, *args, **kwargs)
+    monkeypatch.setattr(c, 'row', row)
+    r.tick_episode(e)
+    r.clock.wall = start + 400; r.turns()
+    assert not r.has('turn', e['id'])
+    if kind == 'M':
+        assert r.pending and not r.has('turn_unresolved', e['id'])
+        assert not r.has('void', e['id'])
+        r.tick_episode(e)
+        assert [row['reason'] for row in r.rows if row['kind'] == 'void'] == ['m_arming_timeout']
+    else:
+        assert r.has('turn_unresolved', e['id'])
+        assert [row['reason'] for row in r.rows if row['kind'] == 'void'] == ['turn_unresolved']
+    assert not r.pending
+    store.close()
+
+
 def test_m_request_excluded_from_turn_unresolved_deadline(tmp_path, monkeypatch):
     r, c, store, e = rig(tmp_path, 'M')
     r.active = e; start = epoch(e['sends'][0]['at']); r.clock.wall = start
@@ -90,6 +114,21 @@ def test_read_outage_voids_once_at_five_minutes(tmp_path):
     voids = [row for row in r.rows if row['kind'] == 'void']
     assert len(voids) == 1 and voids[0]['reason'] == 'client_outage_5m'
     assert epoch(voids[0]['t']) == start + 300
+    store.close()
+
+
+@pytest.mark.parametrize('blocked_seconds', [100, 300])
+def test_blocking_failed_read_counts_toward_outage(tmp_path, monkeypatch, blocked_seconds):
+    r, c, store, e = rig(tmp_path, 'R-rel')
+    r.active = e; start = r.clock.now()
+    def slow_failed_read(*args, **kwargs):
+        r.clock.wall += blocked_seconds
+        fail_client()
+    monkeypatch.setattr(c, 'read', slow_failed_read)
+    r.poll()
+    voids = [row['reason'] for row in r.rows if row['kind'] == 'void']
+    assert voids == (['client_outage_5m'] if blocked_seconds == 300 else [])
+    assert r.outage == start
     store.close()
 
 

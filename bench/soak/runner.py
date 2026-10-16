@@ -173,11 +173,13 @@ class Runner:
                     rows = self.transcript.turn(sid,owner['timestamp'])
                     texts = [r['content'] for r in rows if r['role'] == 'assistant' and r.get('content')]
                     if texts:
-                        self.emit('turn',eid,key=key,message_id=message['id'],sent_at=epoch(message['date']),session_id=sid,owner=owner,
-                                  rows=rows,pulse_results=self.transcript.pulse_results(sid,owner['timestamp']),
-                                  final_text=texts[-1],snapshot=self.snapshot(),before=before,purpose=purpose)
-                        self.pending.remove(item)
-                        continue
+                        finished_at = rows[-1]['timestamp']
+                        if not (self.clock.now() >= epoch(message['date'])+300 and finished_at > epoch(message['date'])+300):
+                            self.emit('turn',eid,key=key,message_id=message['id'],sent_at=epoch(message['date']),session_id=sid,owner=owner,
+                                      rows=rows,pulse_results=self.transcript.pulse_results(sid,owner['timestamp']),
+                                      final_text=texts[-1],snapshot=self.snapshot(),before=before,purpose=purpose)
+                            self.pending.remove(item)
+                            continue
             if self.clock.now() >= epoch(message['date'])+300 and not (episode and episode['kind'] == 'M' and key.startswith('request:')):
                 active = self.active; self.active = episode; self.void('turn_unresolved'); self.active = active
                 self.emit('turn_unresolved', eid, key=key, message_id=message['id'])
@@ -186,12 +188,13 @@ class Runner:
     def poll(self):
         if self.clock.now() - self.last_poll < 30: return
         self.last_poll = self.clock.now()
+        attempt_started = self.clock.now()
         try:
             messages = self.client.read(self.last_seen or None,100)
             if self.last_seen: messages += self.client.read(None,100)  # bounded chat-history overlap catches streaming edits
         except ClientError as exc:
             self.emit('client_error', self.active['id'] if self.active else None, operation='read', exit_code=exc.exit_code, detail=exc.detail)
-            if self.outage is None: self.outage = self.clock.now()
+            if self.outage is None: self.outage = attempt_started
             if self.clock.now() - self.outage >= 300: self.void('client_outage_5m')
             return
         self.outage = None
