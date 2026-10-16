@@ -578,6 +578,8 @@ class Poller:
             health['trial']=o.id
             s.set_meta('provider_health',json.dumps(health))
         from .wake_text import render_wake
+        from .intake import marker_tag
+        tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
         recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
         late=None
         if o.dedupe_key.startswith('t:'):
@@ -586,7 +588,7 @@ class Poller:
         text=render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-1,
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
-             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,cache_line=cache_line)
+             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,cache_line=cache_line,marker_tag=tag)
         try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
         except Exception: accepted=False
         if accepted:

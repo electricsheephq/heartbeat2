@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Group and topic wakes are recognised behind the gateway's sender prefix using a per-profile keyed tag; in group and topic chats a marker without a valid tag never counts as a wake; DM wake text stays unchanged (#98).
 - A proposed wake (`agent_can_create: ask_first`) now reads as not set. Its tool result carries `armed: false`, and its receipt starts "Not set yet: it is armed only after the owner sends /pulse ok <id>." Every create, update, pause and resume result carries `armed` (#91).
 - The wake text adds one contract line: if the chat shows the note's subject was settled after the wake was armed, the turn ends silently with `outcome="done"` and `notify=false` (#92).
 - A bundled `heartbeat2-report-problem` skill drafts a bug report from status and logs, without firing wakes or sending DMs. It files to this repository with `gh` only after the user approves the draft.

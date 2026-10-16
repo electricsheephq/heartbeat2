@@ -161,7 +161,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 |---|---|---|---|
 | Enabled | `enabled` | on | Master switch for wakes and watchers in this profile. |
 | Agent can arm wakes | `agent_can_create` | `yes` | yes · ask_first (the agent's wakes wait for `/pulse ok <id>`) · no |
-| Direct messages only | `dm_only` | on | Refuse group chats. Unknown chat types are refused too. |
+| Direct messages only | `dm_only` | on | Refuse group chats. Unknown chat types are refused too. When off, group and topic wakes are recognised behind the gateway's sender prefix. |
 | Time zone | `timezone` | (blank) | IANA name such as Europe/Paris. Blank uses the profile's time zone. |
 | Quiet hours | `quiet_hours` | `22:00-08:00` | HH:MM-HH:MM, may cross midnight; blank for none. Due one-shots wait until the end; recurring ticks inside are skipped. |
 | Urgent wakes ignore quiet hours | `quiet_hours_urgent` | off | Let wakes marked urgent through quiet hours. |

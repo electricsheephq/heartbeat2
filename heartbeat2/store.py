@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
+import secrets
 import sqlite3
 import threading
 import time
@@ -243,6 +244,15 @@ class Store:
         with self.atomic():
             self.connection.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                     (key, str(value)))
+
+    def marker_secret(self) -> str:
+        secret = self.get_meta('marker_secret')
+        if secret is not None: return secret
+        candidate = secrets.token_hex(32)
+        with self.atomic():
+            self.connection.execute("INSERT OR IGNORE INTO meta(key,value) VALUES ('marker_secret',?)",
+                                    (candidate,))
+            return self.get_meta('marker_secret')
 
     def create_wake(self, wake: Wake) -> Wake:
         _validate_wake(wake)
