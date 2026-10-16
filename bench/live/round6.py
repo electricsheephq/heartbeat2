@@ -196,7 +196,9 @@ class JourneyUpstream(Upstream):
 
 
 def decoded(value):
-    return json.loads(value) if isinstance(value, str) else value or {}
+    # The store keeps an absent probe state or trigger as the JSON text 'null'.
+    value = json.loads(value) if isinstance(value, str) else value
+    return value if isinstance(value, dict) else {}
 
 
 def aggregate(states):

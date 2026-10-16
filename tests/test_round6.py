@@ -14,7 +14,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from bench.live.round6 import (CallBudget, JourneyUpstream, ROOT, aggregate,
+from bench.live.round6 import (CallBudget, JourneyUpstream, ROOT, aggregate, decoded,
                                deadline_allows, orchestrate, score_cell, variants, write_score,
                                capture_turn, cleanup_cell, declaration_for, main, merge_verdicts, quiet_intersects)
 from bench.live.score import VERDICT_KEYS
@@ -934,3 +934,17 @@ def test_stopped_active_rerun_keeps_first_void(monkeypatch, tmp_path):
     assert len(launched) == 2
     result = json.loads((tmp_path / 'W-1.json').read_text())
     assert result['status'] == 'VOID' and result['reason'] == 'upstream_unavailable;stopped:terminated'
+
+
+@pytest.mark.parametrize('stored,expected', [('null', {}), (None, {}), ('[]', {}), ('{"offset": 7}', {'offset': 7}),
+                                             ({'offset': 7}, {'offset': 7})])
+def test_decoded_tolerates_stored_null(stored, expected):
+    # A new file watcher's probe state is stored as 'null' until its first probe.
+    assert decoded(stored) == expected
+    assert 'offset' in decoded(stored) or not expected
+
+
+def test_watcher_with_null_trigger_scores_not_crashes():
+    result = evidence('W')
+    result['turns'][0]['created'][0]['trigger_json'] = 'null'
+    assert score_cell(result)['bars']['B3-1']['state'] == 'FAIL'
