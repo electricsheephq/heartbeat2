@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import io
 import json
+import re
 import socket
 import signal
 from datetime import datetime
@@ -16,6 +17,7 @@ import pytest
 from bench.live.round6 import (CallBudget, JourneyUpstream, ROOT, aggregate,
                                deadline_allows, orchestrate, score_cell, variants, write_score,
                                capture_turn, cleanup_cell, declaration_for, main, merge_verdicts, quiet_intersects)
+from bench.live.score import VERDICT_KEYS
 
 
 def local_module(name, path):
@@ -228,7 +230,8 @@ def test_score_outputs_include_missing_reps_and_packets(tmp_path):
     summary = write_score(tmp_path)
     assert summary['cells']['R-rel'] == 'NOT_RUN'
     packets = json.loads((tmp_path / 'packets.json').read_text())
-    assert {p['bar'] for p in packets} == {'B3-7', 'B3-8'}
+    packet_map = json.loads((tmp_path / 'packets-map.json').read_text())
+    assert {p['bar'] for p in packet_map.values()} == {'B3-7', 'B3-8'}
     assert all('tool_contract' in p and 'tool_results' in p for p in packets)
     assert (tmp_path / 'summary.md').is_file()
 
@@ -268,7 +271,8 @@ def test_orchestrator_without_subprocesses(monkeypatch, tmp_path, mode):
     elif mode == 'mixed_quota':
         assert rc == 2
         assert launched == [('R-rel', '1'), ('W', '1'), ('M', '1'), ('W', '1')]
-        assert json.loads((tmp_path / 'M-1.json').read_text())['reason'] == 'quota'
+        result = json.loads((tmp_path / 'M-1.json').read_text())
+        assert result['status'] == 'VOID' and result['reason'] == 'void;stopped:quota'
     elif mode == 'quota':
         assert rc == 2 and launched == [('R-rel', '1'), ('W', '1')]
         assert processes[1].terminated
@@ -312,6 +316,34 @@ def test_m_separate_delivery_bars():
     assert bars['B3-6']['state'] == 'FAIL'
 
 
+@pytest.mark.parametrize('index', [0, 1])
+@pytest.mark.parametrize('missing', ['due', 'delivery'])
+def test_m_missing_due_or_delivery_fails_not_void(index, missing):
+    result = evidence('M')
+    if missing == 'due':
+        result['turns'][index]['created'][0]['next_due_at'] = None
+    else:
+        result['bot_messages'].pop(index)
+    scored = score_cell(result)
+    assert scored['state'] == 'FAIL'
+    assert scored['bars']['B3-3']['state'] == 'FAIL'
+    assert scored['bars']['B3-6']['state'] == 'PASS'
+
+
+@pytest.mark.parametrize('offset,passes', [(-91, False), (-90, True), (90, True), (91, False), (None, False)])
+def test_reply_requires_twenty_minute_due(offset, passes):
+    result = evidence('C-reply')
+    result['turns'][0]['created'][0]['next_due_at'] = None if offset is None else result['sent_at'] + 1200 + offset
+    assert score_cell(result)['bars']['B3-1']['state'] == ('PASS' if passes else 'FAIL')
+
+
+@pytest.mark.parametrize('status,reason,state', [
+    ('VOID', 'rig_config', 'VOID'), ('VOID', 'rig_config;rerun_refused:quiet_hours', 'VOID'),
+    ('QUOTA', 'call_cap', 'NOT_RUN'), ('TERMINATED', 'terminated', 'NOT_RUN')])
+def test_pre_send_status_reason_is_preserved(status, reason, state):
+    assert score_cell(dict(status=status, reason=reason)) == dict(state=state, reason=reason, bars={})
+
+
 def test_reply_delivery_cutoff():
     result = evidence('C-reply')
     due = result['turns'][0]['created'][0]['next_due_at']
@@ -326,34 +358,36 @@ def test_turn_waits_for_idle_and_receipt(monkeypatch):
     monkeypatch.setattr('bench.live.round6.time.monotonic', lambda: clock[0])
     monkeypatch.setattr('bench.live.round6.time.sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     base = evidence('R-rel')
+    monkeypatch.setattr('bench.live.round6.time.time', lambda: base['sent_at'] + clock[0])
     wake = base['turns'][0]['created'][0]
-    messages, idles = [], []
+    messages, guards = [], []
     upstream = SimpleNamespace(rows=[])
-    driver = SimpleNamespace(dm=lambda text: SimpleNamespace(message_id=42, raw={'message': {'date': base['sent_at']}}))
     def bots():
         if clock[0] >= 2 and not any(m['id'] == 'receipt' for m in messages):
             messages.append(dict(id='receipt', text='Reminder set.', date=base['sent_at'] + 2))
         return list(messages)
     def snapshot():
         return dict(wakes=[wake] if clock[0] >= 2 else [], session={})
-    def owner(text):
-        driver.dm(text)
+    def dm(text):
         messages.append(dict(id='interim', text='Setting that now.', date=base['sent_at']))
-    def idle(timeout):
-        assert timeout == 180
-        idles.append(clock[0])
-    rig = SimpleNamespace(driver=driver, owner=owner, gateway=SimpleNamespace(wait_idle=idle))
+        return SimpleNamespace(message_id=42, raw={'message': {'date': base['sent_at']}})
+    driver = SimpleNamespace(dm=dm)
+    rig = SimpleNamespace(driver=driver, owner=lambda _: pytest.fail('must bypass rig.owner'),
+                          gateway=SimpleNamespace(active_agents=lambda: int(clock[0] < 1), alive=lambda: True))
     original_dm = driver.dm
     result = dict(turns=[], snapshots=[])
-    turn = capture_turn(rig, 'remind me', result, upstream, snapshot, bots, lambda: None, minutes=10, match='basil')
-    assert idles == [0] and clock[0] == 7
+    turn = capture_turn(rig, 'remind me', result, upstream, snapshot, bots, lambda: guards.append(clock[0]), minutes=10, match='basil')
+    assert clock[0] == 7 and .5 in guards  # guards run while the agent is active
     assert driver.dm is original_dm
     assert turn['created'] == [wake]
     assert turn['bot_ids'] == ['interim', 'receipt']
     base.update(turns=[turn], bot_messages=messages + base['bot_messages'])
     assert score_cell(base)['state'] == 'PASS'  # receipt is not a wake delivery
     # A subsequent stop/reply send cannot overtake this settled arming turn.
-    rig.owner = lambda text: (driver.dm(text), messages.append(dict(id='stop-ack', text='Stopped', date=base['sent_at'] + 7)))
+    def stop_dm(text):
+        messages.append(dict(id='stop-ack', text='Stopped', date=base['sent_at'] + 7))
+        return SimpleNamespace(message_id=43, raw={'message': {'date': base['sent_at'] + 7}})
+    driver.dm = stop_dm
     stop = capture_turn(rig, 'stop', result, upstream, snapshot, bots, lambda: None, role='stop')
     assert stop['bot_ids'] == ['stop-ack'] and clock[0] == 12
 
@@ -362,13 +396,94 @@ def test_turn_settle_cap_is_void_reason(monkeypatch):
     clock = [0.0]
     monkeypatch.setattr('bench.live.round6.time.monotonic', lambda: clock[0])
     monkeypatch.setattr('bench.live.round6.time.sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
-    driver = SimpleNamespace(dm=lambda text: SimpleNamespace(message_id=1, raw={'message': {'date': 123}}))
+    sent = []
+    def dm(text):
+        sent.append(True)
+        return SimpleNamespace(message_id=1, raw={'message': {'date': 123}})
+    driver = SimpleNamespace(dm=dm)
     original_dm = driver.dm
-    rig = SimpleNamespace(driver=driver, owner=lambda text: driver.dm(text), gateway=SimpleNamespace(wait_idle=lambda timeout: None))
+    rig = SimpleNamespace(driver=driver, gateway=SimpleNamespace(active_agents=lambda: 0, alive=lambda: True))
     with pytest.raises(RuntimeError, match='^turn_not_settled$'):
         capture_turn(rig, 'arm', dict(turns=[], snapshots=[]), SimpleNamespace(rows=[]),
-                     lambda: dict(wakes=[]), lambda: [dict(id=str(clock[0]))], lambda: None)
+                     lambda: dict(wakes=[]), lambda: [dict(id=str(clock[0]))] if sent else [], lambda: None)
     assert clock[0] == 60 and driver.dm is original_dm
+
+
+@pytest.mark.parametrize('reply_at,idle_at,reason,elapsed', [
+    (45, 50, None, 55), (0, 45, None, 50), (None, 0, 'no_reply', 180),
+    (0, 181, 'gateway_not_idle', 180)])
+def test_turn_uses_guarded_180_second_budgets(monkeypatch, reply_at, idle_at, reason, elapsed):
+    clock, polls = [0.0], []
+    monkeypatch.setattr('bench.live.round6.time.monotonic', lambda: clock[0])
+    monkeypatch.setattr('bench.live.round6.time.time', lambda: 1000 + clock[0])
+    monkeypatch.setattr('bench.live.round6.time.sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    sends = []
+    def dm(text):
+        sends.append(text)
+        return SimpleNamespace(message_id=42, raw={'message': {'date': 1000}})
+    def bots():
+        return [dict(id='reply', text='Set', date=1000 + reply_at)] if sends and reply_at is not None and clock[0] >= reply_at else []
+    rig = SimpleNamespace(driver=SimpleNamespace(dm=dm), owner=lambda _: pytest.fail('30 s harness called'),
+                          gateway=SimpleNamespace(active_agents=lambda: int(clock[0] < idle_at), alive=lambda: True))
+    result = dict(turns=[], snapshots=[])
+    def capture():
+        return capture_turn(rig, 'arm', result, SimpleNamespace(rows=[]), lambda: dict(wakes=[]), bots,
+                            lambda: polls.append(clock[0]))
+    if reason:
+        with pytest.raises(RuntimeError, match='^' + reason + '$'):
+            capture()
+        assert score_cell(dict(status='VOID', reason=reason))['reason'] == reason
+    else:
+        assert capture()['bot_ids'] == ['reply']
+    assert clock[0] == elapsed and len(polls) >= elapsed * 4
+    assert sends == ['arm'] and rig.driver.dm is dm
+    assert result['turns'][0]['owner']['id'] == 42 and result['sent_at'] == 1000
+
+
+@pytest.mark.parametrize('sid', ['R-rel', 'R-clock', 'C-reply', 'W', 'M', 'S-stop'])
+def test_claimed_delivery_during_turn_is_not_a_reply(monkeypatch, sid, tmp_path):
+    result = evidence(sid)
+    base = result['sent_at']
+    # In M this is the second arming turn, with reminder 1 claimed mid-turn.
+    index = 1 if sid == 'M' else 0
+    turn = result['turns'][index]
+    created = turn['created']
+    wake_id = result['turns'][0]['created'][0]['id']
+    due = result['turns'][0]['created'][0]['next_due_at']
+    clock, sent = [0.0], []
+    monkeypatch.setattr('bench.live.round6.time.monotonic', lambda: clock[0])
+    monkeypatch.setattr('bench.live.round6.time.time', lambda: due - 2 + clock[0])
+    monkeypatch.setattr('bench.live.round6.time.sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    delivery = dict(id='during', text='basil DONE', date=due)
+    def bots():
+        return [delivery] if sent and clock[0] >= 2 else []
+    def snapshot():
+        return dict(at=due - 2 + clock[0], wakes=created if clock[0] >= 2 else [], session={},
+                    occurrences=[dict(wake_id=wake_id, claimed_at=due)] if clock[0] >= 2 else [])
+    def dm(text):
+        sent.append(text)
+        return SimpleNamespace(message_id=42, raw={'message': {'date': due - 2}})
+    captured = dict(turns=result['turns'][:index], snapshots=[])
+    rig = SimpleNamespace(driver=SimpleNamespace(dm=dm), gateway=SimpleNamespace(active_agents=lambda: 0, alive=lambda: True))
+    measured = capture_turn(rig, 'arm', captured, SimpleNamespace(rows=[]), snapshot, bots, lambda: None)
+    assert measured['bot_ids'] == []
+    assert measured['deliveries_during_turn'] == [delivery]
+    # Keep original timing/capture evidence; use measured attribution to test scoring and packets.
+    turn.update(bot_ids=measured['bot_ids'], deliveries_during_turn=measured['deliveries_during_turn'])
+    result['bot_messages'] = [delivery, *result['bot_messages'][1:]] if sid not in {'C-reply', 'S-stop'} else [delivery]
+    if sid == 'M':
+        assert score_cell(result)['bars']['B3-3']['state'] == 'PASS'
+    elif sid == 'C-reply':
+        assert score_cell(result)['bars']['B3-4']['state'] == 'FAIL'
+    elif sid == 'S-stop':
+        assert score_cell(result)['bars']['B3-5']['state'] == 'FAIL'
+    (tmp_path / 'declaration.json').write_text(json.dumps(dict(cells=[sid], scheduled=[[sid, 1]])))
+    (tmp_path / f'{sid}-1.json').write_text(json.dumps(result))
+    write_score(tmp_path)
+    packets = json.loads((tmp_path / 'packets.json').read_text())
+    packet_map = json.loads((tmp_path / 'packets-map.json').read_text())
+    assert any(packet_map[p['id']]['bar'] == 'B3-8' and p['delivered_text'] == delivery['text'] for p in packets)
+    assert all(p['delivered_text'] != delivery['text'] for p in packets if packet_map[p['id']]['bar'] == 'B3-7')
 
 
 def scored_fixture(tmp_path, sid='R-rel', reps=1, upstream='live.invalid'):
@@ -403,6 +518,16 @@ def test_fake_summary_is_plumbing(tmp_path, fake_source):
     assert summary['repetitions'][0]['reason'] == 'ok'
     final = merge_verdicts(tmp_path, [])
     assert final['cells']['M'] == 'PLUMBING'
+    for name in ('summary', 'final'):
+        written = json.loads((tmp_path / f'{name}.json').read_text())
+        rep = written['repetitions'][0]
+        assert rep['state'] == 'PLUMBING' and rep['mechanical_state'] == 'PASS'
+        assert all(b['state'] == 'PLUMBING' for b in rep['bars'].values())
+        assert not re.search(r'"state"\s*:\s*"PASS"', (tmp_path / f'{name}.json').read_text())
+        assert ': PASS (' not in (tmp_path / f'{name}.md').read_text()
+    packets = json.loads((tmp_path / 'packets.json').read_text())
+    final = merge_verdicts(tmp_path, [verdict(p) for p in packets])
+    assert final['repetitions'][0]['state'] == 'PLUMBING'
 
 
 @pytest.mark.parametrize('missing', ['sent_at', 'turns', 'final', 'snapshot'])
@@ -424,9 +549,18 @@ def test_partial_results_never_crash_scoring(tmp_path, missing):
 def test_packets_complete_only_unique_history_and_text(tmp_path):
     scored_fixture(tmp_path, 'M', reps=2)
     packets = json.loads((tmp_path / 'packets.json').read_text())
-    arms = [p for p in packets if p['bar'] == 'B3-7' and p['rep'] == 1]
+    packet_map = json.loads((tmp_path / 'packets-map.json').read_text())
+    arms = [p for p in packets if packet_map[p['id']]['bar'] == 'B3-7' and packet_map[p['id']]['rep'] == 1]
     assert len(arms) == 3
-    assert [len(p['history']) for p in arms] == [1, 2, 3]
+    assert [len(p['history']) for p in arms] == [2, 4, 6]
+    assert arms[-1]['history'] == [row for i in range(3) for row in (
+        dict(role='user', content=f'turn {i}'), dict(role='assistant', content='Interim\nReceipt'))]
+    assert all(not {'cell', 'rep', 'bar'} & p.keys() for p in packets)
+    assert all(re.fullmatch('[0-9a-f]{64}', p['id']) for p in packets)
+    assert set(packet_map) == {p['id'] for p in packets}
+    assert all(set(p) == {'cell', 'rep', 'bar', 'turn'} for p in packet_map.values())
+    write_score(tmp_path)
+    assert packets == json.loads((tmp_path / 'packets.json').read_text())  # stable ids
     assert all(p['delivered_text'] == 'Interim\nReceipt' for p in arms)
     assert all(isinstance(v, str) for p in packets for v in p['evidence'])
     result_path = tmp_path / 'M-2.json'
@@ -441,16 +575,20 @@ def test_packets_complete_only_unique_history_and_text(tmp_path):
     result_path.write_text(json.dumps(result))
     write_score(tmp_path)
     packets = json.loads((tmp_path / 'packets.json').read_text())
-    assert all(p['rep'] == 1 for p in packets)
+    packet_map = json.loads((tmp_path / 'packets-map.json').read_text())
+    assert all(p['rep'] == 1 for p in packet_map.values())
     assert len({p['id'] for p in packets}) == len(packets)
-    assert len([p for p in packets if p['bar'] == 'B3-7']) == 3
+    assert len([p for p in packet_map.values() if p['bar'] == 'B3-7']) == 3
 
 
 def verdict(packet, **changes):
-    return dict(id=packet['id'], useful=True, narration=False, overpromise=False, why='Supported by fixture.', **changes)
+    row = dict(id=packet['id'], **{k: k == 'answers_the_wake' for k in VERDICT_KEYS},
+               overpromise=False, why='Supported by fixture.')
+    return row | changes
 
 
-@pytest.mark.parametrize('bad', ['unknown', 'duplicate', 'boolean', 'empty', 'multiline', 'carriage', 'array'])
+@pytest.mark.parametrize('bad', ['unknown', 'duplicate', 'boolean', 'empty', 'multiline', 'carriage', 'array',
+                                'unhashable_list', 'unhashable_dict', 'extra', 'missing_key', 'old_keys'])
 def test_merge_rejects_invalid_verdicts(tmp_path, bad):
     scored_fixture(tmp_path)
     packet = json.loads((tmp_path / 'packets.json').read_text())[0]
@@ -461,24 +599,34 @@ def test_merge_rejects_invalid_verdicts(tmp_path, bad):
     elif bad == 'empty': rows[0]['why'] = ' '
     elif bad == 'multiline': rows[0]['why'] = 'line\nline'
     elif bad == 'carriage': rows[0]['why'] = 'line\rline'
+    elif bad == 'unhashable_list': rows[0]['id'] = ['x']
+    elif bad == 'unhashable_dict': rows[0]['id'] = {'x': 1}
+    elif bad == 'extra': rows[0]['useful'] = True
+    elif bad == 'missing_key': del rows[0]['stale']
+    elif bad == 'old_keys': rows = [dict(id=packet['id'], useful=True, narration=False, overpromise=False, why='old')]
     else: rows = {}
     with pytest.raises(ValueError):
         merge_verdicts(tmp_path, rows)
     assert not (tmp_path / 'final.json').exists()
+    path = tmp_path / 'verdicts.json'
+    path.write_text(json.dumps(rows))
+    with pytest.raises(SystemExit) as exc:
+        main(['merge', '--out', str(tmp_path), '--verdicts', str(path)])
+    assert exc.value.code == 2
 
 
-@pytest.mark.parametrize('failure', ['overpromise', 'useful', 'narration', 'missing', 'none'])
-def test_merge_aggregation(tmp_path, failure):
+@pytest.mark.parametrize('bar,key', [('B3-7', 'overpromise'), ('B3-7', 'fabricated'),
+    *[('B3-8', k) for k in VERDICT_KEYS], ('B3-8', 'missing'), ('B3-8', 'none')])
+def test_merge_aggregation(tmp_path, bar, key):
     scored_fixture(tmp_path, reps=2)
     packets = json.loads((tmp_path / 'packets.json').read_text())
+    packet_map = json.loads((tmp_path / 'packets-map.json').read_text())
     rows = [verdict(p) for p in packets]
-    if failure == 'overpromise':
-        next(v for v in rows if 'B3-7' in v['id'])['overpromise'] = True
-    elif failure in {'useful', 'narration'}:
-        next(v for v in rows if 'B3-8' in v['id'])[failure] = failure == 'narration'
-    elif failure == 'missing': rows.pop()
+    if key == 'missing': rows.pop()
+    elif key != 'none':
+        next(v for v in rows if packet_map[v['id']]['bar'] == bar)[key] = key != 'answers_the_wake'
     final = merge_verdicts(tmp_path, rows)
-    assert final['cells']['R-rel'] == ('PASS' if failure == 'none' else 'PENDING_JUDGE' if failure == 'missing' else 'FAIL')
+    assert final['cells']['R-rel'] == ('PASS' if key == 'none' else 'PENDING_JUDGE' if key == 'missing' else 'FAIL')
     assert (tmp_path / 'final.md').is_file()
     assert aggregate(['VOID', 'PENDING_JUDGE', 'FAIL']) == 'FAIL'
     assert aggregate(['VOID', 'PENDING_JUDGE']) == 'PENDING_JUDGE'
@@ -621,6 +769,45 @@ def test_cell_pin_refusal_exits_four_without_rig(monkeypatch, tmp_path):
     assert cell(SimpleNamespace(out=tmp_path, pin=tmp_path / 'pin', tz='UTC'), 'R-rel', 1) == 4
 
 
+@pytest.mark.parametrize('reason', ['quota', 'terminated'])
+def test_shutdown_preserves_queued_void_rerun(monkeypatch, tmp_path, reason):
+    calls, handlers = [], {}
+    def signal_handler(sig, action):
+        previous = handlers.get(sig)
+        handlers[sig] = action
+        return previous
+    monkeypatch.setattr('bench.live.round6.signal.signal', signal_handler)
+    monkeypatch.setattr('bench.live.round6.time.sleep', lambda _: None)
+    monkeypatch.setattr('bench.live.round6.time.time', lambda: datetime.fromisoformat('2026-10-16T10:00+09:00').timestamp())
+    class Process:
+        def __init__(self, command, **kwargs):
+            self.sid, rep = command[-1].split(':')
+            calls.append(self.sid)
+            self.rc, self.polls = (3 if self.sid == 'W' else None), 0
+            self.path = tmp_path / f'{self.sid}-{rep}.json'
+            self.path.write_text(json.dumps(dict(cell=self.sid, rep=int(rep),
+                status='VOID' if self.sid == 'W' else 'PENDING', reason='upstream_unavailable')))
+        def poll(self):
+            self.polls += 1
+            if self.sid == 'R-rel' and self.polls == 2:
+                if reason == 'quota':
+                    self.rc = 2
+                    self.path.write_text(json.dumps(dict(cell=self.sid, rep=1, status='QUOTA', reason='429')))
+                else:
+                    handlers[signal.SIGTERM](0, None)
+            return self.rc
+        def terminate(self): self.rc = -15
+        def wait(self, timeout=None): return self.rc
+    monkeypatch.setattr('bench.live.round6.subprocess.Popen', Process)
+    args = SimpleNamespace(out=tmp_path, reps=1, workers=2, tz='Asia/Tokyo', upstream='fake', until=None)
+    assert orchestrate(args, [], ['R-rel', 'W', 'M']) == 2
+    result = json.loads((tmp_path / 'W-1.json').read_text())
+    assert calls.count('W') == 1
+    assert result['status'] == 'VOID' and result['reason'] == 'upstream_unavailable;stopped:' + reason
+    assert score_cell(result)['reason'] == result['reason']
+    assert json.loads((tmp_path / 'W-1-void.json').read_text())['reason'] == 'upstream_unavailable'
+
+
 def test_packets_retain_contract_receipts_and_occurrence_scope(tmp_path):
     scored_fixture(tmp_path)
     path = tmp_path / 'R-rel-1.json'
@@ -639,8 +826,9 @@ def test_packets_retain_contract_receipts_and_occurrence_scope(tmp_path):
     path.write_text(json.dumps(result))
     write_score(tmp_path)
     packets = json.loads((tmp_path / 'packets.json').read_text())
-    arm = next(p for p in packets if p['bar'] == 'B3-7')
-    delivery = next(p for p in packets if p['bar'] == 'B3-8')
+    packet_map = json.loads((tmp_path / 'packets-map.json').read_text())
+    arm = next(p for p in packets if packet_map[p['id']]['bar'] == 'B3-7')
+    delivery = next(p for p in packets if packet_map[p['id']]['bar'] == 'B3-8')
     assert arm['tool_contract'] == 'fixture tool contract' and arm['tool_results']
     assert arm['receipts'] == ['arming receipt']
     assert delivery['receipts'] == ['delivery receipt']

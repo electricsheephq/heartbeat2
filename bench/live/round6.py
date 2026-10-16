@@ -1,6 +1,7 @@
 """Isolated promise-to-delivery journeys. Pure scoring imports no Hermes."""
 import argparse
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -19,6 +20,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from .upstream import QuotaError, Upstream
+from .score import VERDICT_KEYS
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = yaml.safe_load(Path(__file__).with_name('journey.yaml').read_text())
@@ -90,8 +92,23 @@ def capture_turn(rig, text, result, upstream, snapshot, bots, guard, *, role='ar
         return inbound
     rig.driver.dm = recorded_dm
     try:
-        rig.owner(text)
-        rig.gateway.wait_idle(timeout=180)
+        rig.driver.dm(text)
+        started = time.monotonic()
+        while True:
+            guard()
+            if any(m['id'] not in prior for m in bots()):
+                break
+            if time.monotonic() - started >= 180:
+                raise RuntimeError('no_reply')
+            time.sleep(.25)
+        started = time.monotonic()
+        while True:
+            guard()
+            if rig.gateway.active_agents() == 0 or not rig.gateway.alive():
+                break
+            if time.monotonic() - started >= 180:
+                raise RuntimeError('gateway_not_idle')
+            time.sleep(.25)
         started = changed = time.monotonic()
         seen = {m['id'] for m in bots()}
         while True:
@@ -107,9 +124,16 @@ def capture_turn(rig, text, result, upstream, snapshot, bots, guard, *, role='ar
             if now - changed >= 5:
                 break
             time.sleep(.25)
-        turn.update(snapshot=snapshot(), bot_ids=[m['id'] for m in current if m['id'] not in prior],
-                    upstream_rows=upstream.rows[call_start:])
+        settled = snapshot()
+        turn.update(snapshot=settled, settled_at=time.time(), upstream_rows=upstream.rows[call_start:])
         turn['created'] = [w for w in turn['snapshot']['wakes'] if w['id'] not in {w['id'] for w in before['wakes']}]
+        wake_ids = {w['id'] for t in result['turns'] for w in t['created']}
+        claimed = any(o.get('wake_id') in wake_ids and o.get('claimed_at') is not None and
+                      turn['owner']['date'] <= o['claimed_at'] <= turn['settled_at']
+                      for o in settled.get('occurrences', []))
+        messages = [m for m in current if m['id'] not in prior]
+        turn['deliveries_during_turn'] = messages if claimed else []
+        turn['bot_ids'] = [] if claimed else [m['id'] for m in messages]
         result['snapshots'].append(turn['snapshot'])
     finally:
         rig.driver.dm = original_dm
@@ -177,8 +201,9 @@ def aggregate(states):
 
 def score_cell(result):
     status = result.get('status')
-    if status in {'NOT_RUN', 'QUOTA', 'TERMINATED'}:
-        return dict(state='NOT_RUN', reason='terminated' if status == 'TERMINATED' else result.get('reason', status), bars={})
+    if status != 'COMPLETE':
+        state = 'NOT_RUN' if status in {'NOT_RUN', 'QUOTA', 'TERMINATED'} else 'VOID'
+        return dict(state=state, reason=result.get('reason', 'terminated' if status == 'TERMINATED' else status), bars={})
     try:
         if (not isinstance(result.get('sent_at'), (int, float)) or not result.get('turns') or
                 not isinstance(result.get('final'), dict) or not result['final'] or
@@ -193,9 +218,6 @@ def _score_cell(result):
     bars = {}
     def bar(name, passed, reason, state='FAIL'):
         bars[name] = {'state': 'PASS' if passed else state, 'reason': 'ok' if passed else reason}
-    if result['status'] != 'COMPLETE':
-        state = 'NOT_RUN' if result['status'] in {'NOT_RUN', 'QUOTA'} else 'VOID'
-        return {'state': state, 'reason': result.get('reason', result['status']), 'bars': {}}
     sid, turns = result['cell'], result['turns']
     arms = [t for t in turns if t['role'] == 'arming']
     wakes = [w for t in arms for w in t['created']]
@@ -233,6 +255,7 @@ def _score_cell(result):
             else:
                 bar('B3-6', len(third_messages) == 1, 'third_reminder_delivery')
             bar('B3-3', len(wakes) == 3 and all(
+                w.get('next_due_at') is not None and
                 sum(w['next_due_at'] - 60 <= m['date'] <= w['next_due_at'] + 180 for m in deliveries) == 1
                 for w in wakes[:2]), 'reminder_delivery')
         else:
@@ -240,7 +263,8 @@ def _score_cell(result):
                 and arms[0]['match'].casefold() in deliveries[0]['text'].casefold(), 'delivery_window_or_text')
     elif sid == 'C-reply':
         alternative = wake.get('kind') == 'owner_silent'
-        bar('B3-1', len(wakes) == 1 and wake.get('kind') == 'at' and bool(wake.get('cancel_on_reply')),
+        bar('B3-1', len(wakes) == 1 and wake.get('kind') == 'at' and bool(wake.get('cancel_on_reply')) and
+            due is not None and abs(due - arms[0]['owner']['date'] - 1200) <= 90,
             'owner_silent_alternative' if alternative else 'capture')
         reply = next(t for t in turns if t['role'] == 'reply')
         after = next((w for w in reply['snapshot']['wakes'] if w['id'] == wake.get('id')), {})
@@ -300,6 +324,11 @@ def judge_packets(result):
 
 
 def summarize(declaration, results, fake=False):
+    if fake:
+        # Preserve mechanical evidence without publishing live-looking states, even in bars.
+        results = [dict(r, state='PLUMBING', mechanical_state=r.get('mechanical_state', r['state']),
+                        bars={k: dict(b, state='PLUMBING', mechanical_state=b.get('mechanical_state', b['state']))
+                              for k, b in r['bars'].items()}) for r in results]
     cells = {sid: 'PLUMBING' if fake else aggregate([r['state'] for r in results if r['cell'] == sid])
              for sid in declaration['cells']}
     reasons = {sid: FAKE_BANNER if fake else next((r['reason'] for r in results
@@ -324,7 +353,7 @@ def write_score(out):
     from .adjudicate import turn_fields
     from .round3 import turn_pulse
     declaration = json.loads((out / 'declaration.json').read_text())
-    results, packets = [], []
+    results, packets, packet_map = [], [], {}
     fake = declaration.get('upstream') == 'fake'
     for sid, rep in declaration['scheduled']:
         path = out / f'{sid}-{rep}.json'
@@ -333,15 +362,21 @@ def write_score(out):
         results.append(dict(cell=sid, rep=rep, upstream=result.get('upstream', declaration.get('upstream')), **score_cell(result)))
         for turn, bar, messages, rows in judge_packets(result):
             index = next((i for i, t in enumerate(result['turns']) if t is turn), None)
-            history_turns = result['turns'][:index + 1] if index is not None else result['turns']
+            history_turns = result['turns'][:index + 1] if index is not None else [
+                t for t in result['turns'] if t['owner']['date'] <= messages[0]['date']]
+            history = [row for t in history_turns for row in (
+                dict(role='user', content=t['owner']['text']),
+                dict(role='assistant', content='\n'.join(m['text'] for m in result['bot_messages']
+                                                      if m['id'] in t['bot_ids'])))]
             measured = dict(type='capture' if turn else 'wake', owner_message=turn['owner']['text'] if turn else '',
                             upstream_rows=rows, timezone=declaration.get('tz', declaration.get('timezone', 'UTC')),
                             sent_at=result['sent_at'])
             fields, _ = turn_fields(measured, round=5)
             _, pulse_results = turn_pulse(rows)
-            packet_id = f'{sid}-{rep}-{bar}-' + (f'turn-{index}' if turn else str(messages[0]['id']))
-            packets.append(dict(id=packet_id, cell=sid, rep=rep,
-                bar=bar, history=[dict(role='user', content=t['owner']['text']) for t in history_turns],
+            identity = dict(cell=sid, rep=rep, bar=bar, turn=index if turn else messages[0]['id'])
+            packet_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+            packet_map[packet_id] = identity
+            packets.append(dict(id=packet_id, history=history[-6:],
                 wake_note='; '.join(t['owner']['text'] for t in history_turns if t['role'] == 'arming'),
                 owner_message=turn['owner']['text'] if turn else None,
                 evidence=[json.dumps(dict(due=w.get('next_due_at'), note=w.get('note'))) for t in history_turns for w in t['created']],
@@ -350,6 +385,7 @@ def write_score(out):
                 tool_contract=fields['pulse_description'], **fields))
     summary = summarize(declaration, results, fake)
     (out / 'packets.json').write_text(json.dumps(packets, indent=2))
+    (out / 'packets-map.json').write_text(json.dumps(packet_map, indent=2))
     write_summary(out, summary, 'summary')
     return summary
 
@@ -358,16 +394,23 @@ def merge_verdicts(out, verdicts):
     """Validate external judgments and combine them with immutable mechanical bars."""
     summary = json.loads((out / 'summary.json').read_text())
     packets = json.loads((out / 'packets.json').read_text())
+    packet_map = json.loads((out / 'packets-map.json').read_text())
+    if any(not isinstance(p, dict) or not isinstance(p.get('id'), str) for p in packets):
+        raise ValueError('packet id must be a string')
     known = {p['id']: p for p in packets}
     if len(known) != len(packets):
         raise ValueError('duplicate packet id in packets')
     if not isinstance(verdicts, list):
         raise ValueError('verdicts must be a JSON array')
     seen = {}
+    keys = (*VERDICT_KEYS, 'overpromise')
     for verdict in verdicts:
-        if not isinstance(verdict, dict) or verdict.get('id') not in known or verdict['id'] in seen:
+        if (not isinstance(verdict, dict) or not isinstance(verdict.get('id'), str) or
+                verdict['id'] not in known or verdict['id'] in seen):
             raise ValueError('unknown or duplicate packet id')
-        if any(type(verdict.get(k)) is not bool for k in ('useful', 'narration', 'overpromise')):
+        if set(verdict) != {'id', 'why', *keys}:
+            raise ValueError('verdict must contain exactly id, why and the round-5 judgment keys')
+        if any(type(verdict.get(k)) is not bool for k in keys):
             raise ValueError('every judgment must be boolean')
         why = verdict.get('why')
         if not isinstance(why, str) or not why.strip() or len(why.splitlines()) != 1 or any(c in why for c in ('\n', '\r')):
@@ -375,21 +418,25 @@ def merge_verdicts(out, verdicts):
         seen[verdict['id']] = verdict
     results = []
     for mechanical in summary['repetitions']:
-        result = dict(mechanical, bars={k: dict(v) for k, v in mechanical['bars'].items()})
+        result = dict(mechanical, bars={k: dict(v, state=v.get('mechanical_state', v['state']))
+                                       for k, v in mechanical['bars'].items()})
         for bar in ('B3-7', 'B3-8'):
-            group = [p for p in packets if p['cell'] == result['cell'] and p['rep'] == result['rep'] and p['bar'] == bar]
+            group = [p for p in packets if packet_map[p['id']]['cell'] == result['cell'] and
+                     packet_map[p['id']]['rep'] == result['rep'] and packet_map[p['id']]['bar'] == bar]
             if not group:
                 continue
             states = []
             for packet in group:
                 verdict = seen.get(packet['id'])
-                failed = verdict and (verdict['overpromise'] if bar == 'B3-7' else not verdict['useful'] or verdict['narration'])
+                failed = verdict and (verdict['overpromise'] or verdict['fabricated'] if bar == 'B3-7' else
+                    any(verdict[k] for k in VERDICT_KEYS if k != 'answers_the_wake') or not verdict['answers_the_wake'])
                 states.append('PENDING_JUDGE' if verdict is None else 'FAIL' if failed else 'PASS')
             state = aggregate(states)
             result['bars'][bar] = dict(state=state, reason='missing_verdict' if state == 'PENDING_JUDGE' else
-                                      'overpromise' if state == 'FAIL' and bar == 'B3-7' else
-                                      'not_useful_or_narration' if state == 'FAIL' else 'ok')
-        state = aggregate([mechanical['state'], *[b['state'] for b in result['bars'].values()]])
+                                      'overpromise_or_fabricated' if state == 'FAIL' and bar == 'B3-7' else
+                                      'delivery_judgment' if state == 'FAIL' else 'ok')
+        state = aggregate([mechanical.get('mechanical_state', mechanical['state']),
+                           *[b['state'] for b in result['bars'].values()]])
         result.update(state=state, reason=next((b['reason'] for b in result['bars'].values() if b['state'] == state), mechanical['reason']))
         results.append(result)
     final = summarize(summary['declaration'], results, summary['fake'])
@@ -631,10 +678,10 @@ def orchestrate(args, argv, selected):
     def read(sid, rep):
         path = args.out / f'{sid}-{rep}.json'
         return json.loads(path.read_text()) if path.exists() else dict(cell=sid, rep=rep)
-    def record(sid, rep, reason, rerun=False):
+    def record(sid, rep, reason, rerun=False, stopped=False):
         result = read(sid, rep)
         if rerun and result.get('status') == 'VOID':
-            result['reason'] = result.get('reason', 'void') + ';rerun_refused:' + reason
+            result['reason'] = result.get('reason', 'void') + (';stopped:' if stopped else ';rerun_refused:') + reason
         else:
             result.update(status='NOT_RUN', reason=reason)
         result['upstream'] = upstream_name(args)
@@ -655,7 +702,7 @@ def orchestrate(args, argv, selected):
             record(sid, rep, reason)
         active.clear()
         for sid, rep, attempt in jobs:
-            record(sid, rep, reason)
+            record(sid, rep, reason, rerun=bool(attempt), stopped=True)
         jobs.clear()
         if reason == 'refused':
             for sid, rep in scheduled:
