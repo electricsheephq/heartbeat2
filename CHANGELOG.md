@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.19 — 2026-10-17
 
 - Group and topic wakes are recognised behind the gateway's sender prefix using a per-profile keyed tag; in group and topic chats a marker without a valid tag never counts as a wake; DM wake text stays unchanged (#98).
 - A proposed wake (`agent_can_create: ask_first`) now reads as not set. Its tool result carries `armed: false`, and its receipt starts "Not set yet: it is armed only after the owner sends /pulse ok <id>." Every create, update, pause and resume result carries `armed` (#91).

@@ -256,7 +256,7 @@ The default command allowlist still permits `gh -R HOST/...` and `git ls-remote 
 In the affected messaging-gateway DM, run `/pulse status` (or `/pulse`) for scheduler state, consent, counts and next due.
 Read recent logs with `hermes logs -n 300 | grep -i heartbeat`; share only short excerpts with secrets, identifiers and private text removed.
 Do not fire a wake, send a DM or change consent just to reproduce a problem.
-From the next release, ask your Hermes agent to report a problem with HeartBeat 2.0; review its draft before approving publication.
+Ask your Hermes agent to report a problem with HeartBeat 2.0; review its draft before approving publication.
 Use the [bug report form](https://github.com/electricsheephq/heartbeat2/issues/new?template=bug_report.yml) for plugin bugs.
 For unauthorized delivery, cross-profile data exposure or exposed credentials, use a [private security advisory](https://github.com/electricsheephq/heartbeat2/security/advisories/new).
 
