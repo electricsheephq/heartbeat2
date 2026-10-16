@@ -4,6 +4,7 @@ from datetime import datetime
 import pytest
 
 from bench.soak.score import epoch, score
+from bench.soak.runner import Runner
 from test_b3_runner import rig
 from test_b3_score import corpus
 
@@ -81,6 +82,23 @@ def test_three_day_one_unflagged_matching_wake_fails():
     assert score(schedule, logs, verdicts)['bars']['B3-1'] == 'FAIL'
 
 
+@pytest.mark.parametrize('until_day', [0, 1, 2])
+def test_horizon_that_leaves_out_an_episode_kind_is_rejected(until_day):
+    schedule, logs, verdicts = run_corpus()
+    logs[0]['until_day'] = logs[-1]['until_day'] = until_day
+    with pytest.raises(ValueError, match='leaves out an episode kind'):
+        score(schedule, logs, verdicts)
+
+
+def test_three_day_unflagged_wake_before_a_void_still_fails():
+    schedule, logs, verdicts = run_corpus()
+    unflag_matching(logs)
+    turn = next(r for r in logs if r['kind'] == 'turn' and r['pulse_results'])
+    logs.append(dict(kind='void', episode=turn['episode'], t=datetime.fromtimestamp(epoch(turn['t'])+1).astimezone().isoformat(), reason='client_error'))
+    result = score(schedule, logs, verdicts)
+    assert result['bars']['B3-1'] == 'FAIL'
+
+
 def test_three_day_one_late_delivery_fails():
     schedule, logs, verdicts = run_corpus()
     late_delivery(logs)
@@ -124,6 +142,18 @@ def test_seven_day_tolerances_and_legacy_horizon_are_unchanged():
     assert set(result['bars'].values()) == {'PASS'}
     next(r for r in logs if r['kind'] == 'run_end').pop('until_day')
     assert score(schedule, logs, verdicts) == result
+
+
+def test_runner_refuses_to_resume_with_another_horizon(tmp_path):
+    runner, client, _, e = rig(tmp_path, 'R-clock')
+    runner.emit('declaration', start=runner.schedule['start'], tz=runner.schedule['tz'], seed=runner.schedule['seed'],
+                schedule_sha256=runner.schedule['sha256'], frozen=runner.state(), until_day=e['day'])
+    resumed = Runner(runner.schedule, runner.path, client, runner.home, runner.soak_dir, 'chat', clock=runner.clock,
+                     pulse=runner.pulse, transcript=runner.transcript, until_day=8)
+    resumed.state = runner.state
+    with pytest.raises(ValueError, match='resume until_day mismatch'):
+        resumed.run()
+    assert not client.sent and not any(r['kind'] == 'runner_start' for r in resumed.rows)
 
 
 def test_runner_records_horizon_in_declaration(tmp_path):

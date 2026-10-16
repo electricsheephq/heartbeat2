@@ -216,11 +216,13 @@ def score(schedule, rows, verdicts=None):
     smoke = schedule.get('mode') == 'smoke'
     short_run = not smoke and until_day < 7
     required_episodes = [e for e in schedule['episodes'] if smoke or e['day'] <= until_day]
+    if {e['kind'] for e in required_episodes} != {e['kind'] for e in schedule['episodes']}:
+        raise ValueError('until_day leaves out an episode kind')
     verdicts = {v['id']: v for v in (verdicts or [])}
     deliveries, unresolved, reply_map = correlate(rows)
     packets, evidence, violations = [], {i: True for i in range(1, 9)}, {i: [] for i in range(1, 9)}
     pending = {7: False, 8: False}; capture_misses, flagged, delivery_checks, latencies = 0, 0, [], []
-    owner_matches = 0
+    unflagged = 0
     voids = [r for r in rows if r['kind'] == 'void']
     void_ids = {r['episode'] for r in voids}
     episodes = list(required_episodes)
@@ -289,8 +291,9 @@ def score(schedule, rows, verdicts=None):
             if len(matches) == 1:
                 w = matches[0]; matched.append((n, w, t)); measured_ids.add(w['id'])
                 if k.startswith('R') or k.startswith('C') or k == 'M':
-                    owner_matches += included
                     flagged += included and bool(w.get('owner_requested'))
+                    # A short run requires the flag on every matching wake, so one seen before a void still counts.
+                    unflagged += not w.get('owner_requested') and before_void(logs, t['t'])
         # A timed-out M arming can still have created its matching wake; its deliveries belong to the request.
         partial_path = next((r['path'] for r in logs if r['kind'] == 'file_write' and r['mode'] == 'wb'), None)
         for r in logs:
@@ -403,8 +406,8 @@ def score(schedule, rows, verdicts=None):
     if len(covered) < len(required_episodes):
         for i in evidence: evidence[i] = False
     max_misses = 0 if smoke or short_run else 1
-    min_flagged = 1 if smoke else owner_matches if short_run else 20
-    if capture_misses > max_misses or evidence[1] and flagged < min_flagged: violations[1].append(dict(capture_misses=capture_misses, owner_requested=flagged))
+    missing_flags = unflagged if short_run else evidence[1] and flagged < (1 if smoke else 20)
+    if capture_misses > max_misses or missing_flags: violations[1].append(dict(capture_misses=capture_misses, owner_requested=flagged))
     delivery_threshold = 1 if short_run else .95
     if delivery_checks and sum(delivery_checks)/len(delivery_checks) < delivery_threshold: violations[3].append(dict(reason='not_all_on_time' if short_run else 'under_95_percent_on_time'))
     windows = []

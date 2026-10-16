@@ -547,6 +547,7 @@ class Runner:
             source_hash = hashlib.sha256(Path(__file__).with_name('schedule.py').read_bytes()).hexdigest()
             self.emit('declaration', rubric_sha256=hashlib.sha256(Path(__file__).with_name('RUBRIC.md').read_bytes()).hexdigest(), generator_commit=commit, generator_source_sha256=source_hash, start=self.schedule['start'], tz=self.schedule['tz'], schedule_sha256=self.schedule['sha256'], seed=self.schedule['seed'], frozen=self.frozen,mode=self.schedule.get('mode'),smoke_at=self.schedule.get('smoke_at'), until_day=self.until_day)
         if self.rows[0].get('schedule_sha256') != self.schedule['sha256']: raise ValueError('resume schedule mismatch')
+        if self.rows[0].get('until_day', self.until_day) != self.until_day: raise ValueError('resume until_day mismatch')
         self.emit('runner_start', resumed=resumed)
         if resumed:
             for e in self.episodes:
