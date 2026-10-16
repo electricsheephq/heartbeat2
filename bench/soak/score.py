@@ -205,15 +205,27 @@ def score(schedule, rows, verdicts=None):
     regenerated = (smoke_schedule(declaration['start'], declaration.get('smoke_at')) if declaration.get('mode') == 'smoke' else build(date.fromisoformat(declaration['start']), declaration['tz']))
     if regenerated != schedule or declaration.get('schedule_sha256') != regenerated['sha256']:
         raise ValueError('regenerated schedule hash mismatch')
+    # The declaration fixes the run length; a later runner session may not change it.
+    # Runs declared before amendment 20 fall back to the last run_end, then 8.
+    if 'until_day' in declaration:
+        until_day = declaration['until_day']
+        if any(r['kind'] == 'run_end' and r.get('until_day', until_day) != until_day for r in rows):
+            raise ValueError('until_day changed during the run')
+    else:
+        until_day = next((r['until_day'] for r in reversed(rows) if r['kind'] == 'run_end' and 'until_day' in r), 8)
+    smoke = schedule.get('mode') == 'smoke'
+    short_run = not smoke and until_day < 7
+    required_episodes = [e for e in schedule['episodes'] if smoke or e['day'] <= until_day]
     verdicts = {v['id']: v for v in (verdicts or [])}
     deliveries, unresolved, reply_map = correlate(rows)
     packets, evidence, violations = [], {i: True for i in range(1, 9)}, {i: [] for i in range(1, 9)}
     pending = {7: False, 8: False}; capture_misses, flagged, delivery_checks, latencies = 0, 0, [], []
+    owner_matches = 0
     voids = [r for r in rows if r['kind'] == 'void']
     void_ids = {r['episode'] for r in voids}
-    episodes = list(schedule['episodes'])
+    episodes = list(required_episodes)
     for r in rows:
-        if r['kind'] == 'requeue': episodes.extend(r['episodes'])
+        if r['kind'] == 'requeue': episodes.extend(e for e in r['episodes'] if smoke or e['day'] <= until_day)
     selected = {e.get('replaces', e['id']): e for e in episodes if e['id'] not in void_ids}
     last_snapshot = next((r['snapshot'] for r in reversed(rows) if r.get('snapshot')), None)
     baseline = next((r for r in rows if r['kind'] == 'baseline_setup'), {})
@@ -276,7 +288,9 @@ def score(schedule, rows, verdicts=None):
             if false: violation(2, dict(episode=eid, extra_wakes=false), t['t'])
             if len(matches) == 1:
                 w = matches[0]; matched.append((n, w, t)); measured_ids.add(w['id'])
-                if k.startswith('R') or k.startswith('C') or k == 'M': flagged += included and bool(w.get('owner_requested'))
+                if k.startswith('R') or k.startswith('C') or k == 'M':
+                    owner_matches += included
+                    flagged += included and bool(w.get('owner_requested'))
         # A timed-out M arming can still have created its matching wake; its deliveries belong to the request.
         partial_path = next((r['path'] for r in logs if r['kind'] == 'file_write' and r['mode'] == 'wb'), None)
         for r in logs:
@@ -386,10 +400,13 @@ def score(schedule, rows, verdicts=None):
                 if gates and check and (gates[0]['session']['unanswered_count'] < 2 or check['owner_after']): violation(6,dict(episode=eid,reason='M3_not_at_unanswered_2'), check['t'])
                 if included and not ds: evidence[6] = False
     covered = {e.get('replaces', e['id']) for e in episodes if e['id'] not in void_ids and any(r['kind'] == 'episode_end' and r['episode'] == e['id'] for r in rows)}
-    if len(covered) < len(schedule['episodes']):
+    if len(covered) < len(required_episodes):
         for i in evidence: evidence[i] = False
-    if capture_misses > (0 if schedule.get('mode') == 'smoke' else 1) or evidence[1] and flagged < (1 if schedule.get('mode') == 'smoke' else 20): violations[1].append(dict(capture_misses=capture_misses, owner_requested=flagged))
-    if delivery_checks and sum(delivery_checks)/len(delivery_checks) < .95: violations[3].append(dict(reason='under_95_percent_on_time'))
+    max_misses = 0 if smoke or short_run else 1
+    min_flagged = 1 if smoke else owner_matches if short_run else 20
+    if capture_misses > max_misses or evidence[1] and flagged < min_flagged: violations[1].append(dict(capture_misses=capture_misses, owner_requested=flagged))
+    delivery_threshold = 1 if short_run else .95
+    if delivery_checks and sum(delivery_checks)/len(delivery_checks) < delivery_threshold: violations[3].append(dict(reason='not_all_on_time' if short_run else 'under_95_percent_on_time'))
     windows = []
     for e in episodes:
         logs = logs_by_episode.get(e['id'], [])
@@ -408,7 +425,7 @@ def score(schedule, rows, verdicts=None):
     hard = next((r['reason'] for r in rows if r['kind'] == 'hard_fail' and before_void(logs_by_episode.get(r.get('episode'),[]), r['t'])), None) or hard_failure(rows, deliveries)
     if hard: violations[int(hard[-1])].append(dict(reason='observed_hard_bar'))
     judged_delivery = [verdicts[p['id']] for p in packets if p['id'].startswith('d-') and p['id'] in verdicts]
-    if judged_delivery and sum(v.get('useful') is True and not v.get('narration') for v in judged_delivery)/len(judged_delivery) < .95: violations[8].append(dict(reason='under_95_percent_useful'))
+    if judged_delivery and sum(v.get('useful') is True and not v.get('narration') for v in judged_delivery)/len(judged_delivery) < delivery_threshold: violations[8].append(dict(reason='not_all_useful' if short_run else 'under_95_percent_useful'))
     bars = {f'B3-{i}': 'FAIL' if violations[i] else 'INCOMPLETE' if not evidence[i] else 'PENDING' if pending.get(i) else 'PASS' for i in evidence}
     if schedule.get('mode') == 'smoke':
         exercised = {e['kind'] for e in episodes if any(r['kind'] == 'episode_start' and r['episode'] == e['id'] for r in rows)}
@@ -431,7 +448,7 @@ def score(schedule, rows, verdicts=None):
     metrics['wake_cost_by_wake'] = {wid: {key: sum(o.get(key, 0) for o in costs if o['wake_id'] == wid) for key in metrics['wake_cost']} for wid in measured_ids}
     useful = sum(v.get('useful') is True for v in judged_delivery)
     metrics['wake_cost_per_useful_delivery_microusd'] = metrics['wake_cost']['cost_microusd']/useful if useful and not pending[8] else None
-    status = 'FAIL' if bars['B3-5'] == 'FAIL' or bars['B3-6'] == 'FAIL' else 'ABORTED' if any(r['kind'] == 'abort' and r.get('reason') in ('frozen_state_changed', 'frozen_state_unreadable', 'cleanup_failed') for r in rows) else 'FAIL' if 'FAIL' in bars.values() else 'INCOMPLETE' if 'INCOMPLETE' in bars.values() or len(covered) < len(schedule['episodes']) else 'PENDING' if 'PENDING' in bars.values() else 'PASS'
+    status = 'FAIL' if bars['B3-5'] == 'FAIL' or bars['B3-6'] == 'FAIL' else 'ABORTED' if any(r['kind'] == 'abort' and r.get('reason') in ('frozen_state_changed', 'frozen_state_unreadable', 'cleanup_failed') for r in rows) else 'FAIL' if 'FAIL' in bars.values() else 'INCOMPLETE' if 'INCOMPLETE' in bars.values() or len(covered) < len(required_episodes) else 'PENDING' if 'PENDING' in bars.values() else 'PASS'
     return dict(status=status, bars=bars, violations={f'B3-{i}': v for i, v in violations.items()}, voids=voids, unresolved=unresolved, metrics=metrics, packets=packets)
 
 
