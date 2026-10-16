@@ -3,14 +3,17 @@ import ipaddress
 import socket
 
 
-def install(setattr_fn=setattr):
+def install(setattr_fn=setattr, allow_hosts=()):
     connect, connect_ex = socket.socket.connect, socket.socket.connect_ex
     sendto, getaddrinfo = socket.socket.sendto, socket.getaddrinfo
+    allowed_hosts, resolved = frozenset(allow_hosts), set()
 
     def check(address, family=None):
         if family == socket.AF_UNIX:
             return
         host = address[0] if isinstance(address, tuple) else address
+        if host in allowed_hosts or host in resolved:
+            return
         if host == "localhost":
             return
         try:
@@ -34,7 +37,10 @@ def install(setattr_fn=setattr):
 
     def guarded_getaddrinfo(host, *args, **kwargs):
         check(host)
-        return getaddrinfo(host, *args, **kwargs)
+        answers = getaddrinfo(host, *args, **kwargs)
+        if host in allowed_hosts:
+            resolved.update(answer[4][0] for answer in answers)
+        return answers
 
     for name, fn in (("connect", guarded_connect), ("connect_ex", guarded_connect_ex),
                      ("sendto", guarded_sendto)):

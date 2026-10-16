@@ -189,3 +189,56 @@ Round-4 packets keep their exact shape. The packets CLI defaults to round 4; rou
 **Bars, arms and venue.** As in Round 4: B2-8 requires 17 of 18 cells; B2-5 allows 10,650 tokens per useful message and 3.0 calls per wake on base, and 280,150 tokens per useful message on the 120k arm, with the cache split reported. GLM 5.3 on the subscription lane only, outside 08:00–22:00 JST; blind Codex `gpt-6.1-sol` at low effort, with the same release-owner spot-check and overturn rule.
 
 **Amendments.** None yet. Tightening only, and only before the first real round-5 run.
+
+## Round 6 — pre-registration draft (maintainer finalises)
+
+**Claim class:** isolated-rig live-model journey smoke: pinned Hermes, loopback Bot API, one model, pulse-only toolset, compression off, default plugin settings, n=3 per cell, no rate claim.
+
+Each repetition has one throwaway rig and one DM. Plugin settings contain only
+`timezone` (Asia/Tokyo by default); Hermes uses the same timezone. Task terms come
+from `journey.yaml`, selected with `random.Random(seed*100+rep)`. Owner messages
+have no routing tokens. Times are relative to the first actual owner send;
+delivery dates are the Bot API stand-in response dates, in whole seconds.
+Every owner send and bot message, post-owner-turn database snapshot and final
+snapshot is retained. Arming replies are excluded from wake delivery counts.
+
+| Cell | Window | Registered bars |
+| --- | --- | --- |
+| R-rel | 25 min | Owner: “remind me in {N} minutes to {task}”, N in (10,12,15). B3-1: exactly one `at` wake created in that turn, `owner_requested=1`, due within ±90 s of send+N min. B3-3: exactly one delivery between stored due−60 s and due+180 s, containing the task match term (case-insensitive). No second delivery through window end. |
+| R-clock | 30 min | Owner: “remind me at {HH:MM} to {task}”, next 5-minute mark at or after send+15 min in the chosen timezone. Send later than HH:MM−12 min is VOID (`send_slipped`). Capture/delivery bars match R-rel, with the target due equal to that clock time. |
+| C-reply | 30 min | Owner: “check in with me in 20 minutes about {task} unless I reply before then”. B3-1: exactly one `at` wake storing `cancel_on_reply` (from `until.owner_replies`); `owner_silent` is FAIL (`owner_silent_alternative`). At +5 min send exactly “all good, no need”. B3-4: after that turn wake is cancelled or done with `status_reason=owner_replied`; zero wake deliveries until due+5 min. |
+| W | 45 min | Create an absolute `jobs/{job}.log` containing `started\n`; owner: “tell me when {abs path} says DONE”. B3-1: exactly one file watcher on that path, a pattern matching DONE, stored `check_every` ≤25 min (larger: `check_every_too_long`). Wait for `probe_state_json.offset` baseline; at +10 min or later append exactly `DONE\n`, never rewrite. B3-3: one delivery from flip to flip+stored interval+180 s, containing DONE or the job name. |
+| M | 75 min | After each prior turn ends, request reminders at 20,40,60 min for three tasks; send nothing else. B3-1: three `at` wakes with `owner_requested=1`. At the third gate, stored session `unanswered_count` must be ≥2; otherwise B3-6 is NOT_EXERCISED. B3-6: third delivery within due−60 s to due+180 s while unanswered ≥2. A third wake lacking the flag and dropped as unanswered is B3-1 FAIL, not B3-6 FAIL. Expect all three reminders. |
+| S-stop — stop before first tick | 80 min | Owner: “check on me every hour until the {project} deploy is finished”. B3-1: one `every`/`cron` wake first due ≥send+55 min. No arm: NOT_EXERCISED (`declined`); cancel-on-reply set: FAIL (`cancel_on_reply_on_S`). Immediately after arming send exactly “stop checking in on me”. B3-5: cancelled/paused with reason other than `owner_replied`, or session `enabled=0`; `owner_replied` is NOT_EXERCISED. Observe through first due+10 min: no occurrence claimed after stop and zero deliveries. |
+
+**B3-2:** neither the C-reply reply turn nor the S-stop stop turn may create a
+new wake. A new wake is FAIL even if another bar is NOT_EXERCISED.
+
+**Judging:** packets for every arming reply carry the tool results and receipt
+for B3-7 (truthful receipt). Packets for every delivery carry the task, text,
+stored due and tool results for B3-8 (useful, without narration). The tool
+contract is the measured pulse description, verbatim, with the Round-4/5
+`tool_results`, `pulse_description`, tools digest and measured clock fields;
+Round-5 system prompt and parameters are retained. The release owner spot-checks
+judge FAILs against the transcript and may overturn them where it shows support.
+
+**Aggregation:** per repetition/bar: PASS, FAIL, VOID, NOT_RUN, NOT_EXERCISED,
+each with a reason. Overall cell PASS requires every scheduled repetition to
+PASS. Worst state wins: FAIL > VOID/NOT_RUN > NOT_EXERCISED > PASS.
+Missing scheduled results are NOT_RUN, never removed from the denominator.
+
+**Stop and deadline rules:** any 429 or the shared locked call cap stops the
+whole run immediately; no 429 retry or sleep. 5xx/unreachable gets one retry,
+then the cell is VOID and may be queued once more at the end. Before starting
+any cell or rerun, its full window plus 10-minute margin must fit `--until`;
+otherwise record NOT_RUN (`deadline`). Quota stops active cells and leaves the
+rest NOT_RUN (`quota`). A real upstream requires a future, timezone-aware
+`--until`. Round 6 is amended to run at operator-set hours, only inside that
+window, and never at the same time as another B2 round.
+
+**Not proven:** shared/installed profiles, real Telegram transport, other Hermes
+pins, other models, broader toolsets, compression, groups, CLI/TUI/Desktop/API/
+cron arming, customer-session continuity, production readiness, performance or
+reliability rates. Fake upstream runs prove plumbing only. Mechanical scores
+do not substitute for B3-7/B3-8 judgments. Results need their evidence card before
+any number is cited; this draft registers no live result.

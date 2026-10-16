@@ -13,6 +13,9 @@ class LiveDirector(WakeDirector):
         self.forward = {token for token in forward if not isinstance(forward, dict) or forward[token]}
         self.scripted_wakes = False
 
+    def forward_owner(self, current):
+        return any(f'[in:{token}]' in current for token in self.forward)
+
     def __call__(self, record):
         body = record['body']
         messages = body.get('messages', [])
@@ -30,7 +33,7 @@ class LiveDirector(WakeDirector):
             if identity not in self.wake_starts:
                 self.wake_starts.append(identity)
             self._active = identity
-        if active or any(f'[in:{token}]' in current for token in self.forward):
+        if active or self.forward_owner(current):
             self.upstream.wake = bool(active)
             if 'capture' in self.forward or '-ctx' in getattr(self.upstream, 'path', ''):
                 body = body | {'messages': [m | {'content': re.sub(r' \[in:[^]]+\]', '', m['content'])}
@@ -42,3 +45,9 @@ class LiveDirector(WakeDirector):
                 self._active = None
             return Raw(json.dumps(response), status, 'application/json')
         return super().__call__(record)
+
+
+class ForwardAllDirector(LiveDirector):
+    """Forward every main turn; inherited auxiliary requests remain scripted."""
+    def forward_owner(self, current):
+        return True

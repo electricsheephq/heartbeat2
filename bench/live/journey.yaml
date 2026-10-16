@@ -1,0 +1,12 @@
+round: 6
+minutes: [10, 12, 15]
+tasks:
+  - {task: water the basil, match: basil}
+  - {task: stretch my shoulders, match: shoulders}
+  - {task: pack the camera, match: camera}
+  - {task: review the invoice, match: invoice}
+  - {task: call the dentist, match: dentist}
+  - {task: charge the headphones, match: headphones}
+jobs: [atlas, birch, cobalt, delta, ember, fern]
+projects: [aurora, beacon, cedar, drift, elm, frost]
+cells: {R-rel: 25, R-clock: 30, C-reply: 30, W: 45, M: 75, S-stop: 80}

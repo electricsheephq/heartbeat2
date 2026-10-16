@@ -14,6 +14,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from rig_settings import replace_plugin_settings
+
 from tests.e2e.core.history._helpers import Script
 from tests.e2e.core.platforms._drv_telegram import TelegramDriver
 from tests.e2e.core.platforms._helpers import Director, GatewayUnderTest, _deep_merge
@@ -111,7 +113,7 @@ class WakeDirector(Director):
 
 class PulseRig:
     def __init__(self, name, pin, *, busy="queue", loud=False, barrier=False, config=None,
-                 heartbeat2=True, director=None, poke=False):
+                 heartbeat2=True, director=None, poke=False, replace_settings=None):
         self.name, self.pin, self.busy = name, pin, busy
         self.heartbeat2 = heartbeat2
         self.root = Path(tempfile.mkdtemp(prefix="hb-e2e-"))
@@ -140,6 +142,7 @@ class PulseRig:
             "agent": {"api_max_retries": 1, "max_turns": 12},
         })
         cfg = _deep_merge(cfg, config or {})
+        replace_plugin_settings(cfg, replace_settings)
         if not heartbeat2:
             cfg["plugins"] = {"enabled": [], "entries": {}}
         env = {**self.driver.gateway_env(), "PYTHONDONTWRITEBYTECODE": "1",
