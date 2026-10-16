@@ -173,7 +173,7 @@ def test_s_timeout_and_cleanup_order(tmp_path):
     store.close()
 
 
-@pytest.mark.parametrize('reason', ['foreign_owner_message', 'gateway_restart', 'client_error', 'client_outage_5m'])
+@pytest.mark.parametrize('reason', ['foreign_owner_message', 'gateway_restart', 'client_outage_5m'])
 def test_voids(tmp_path, reason):
     r, c, store, e = rig(tmp_path, 'R-rel')
     original = c.tick
@@ -182,7 +182,7 @@ def test_voids(tmp_path, reason):
         if r.clock.now() < epoch(e['sends'][0]['at'])+30: return
         if reason == 'foreign_owner_message' and not any(m['text'] == 'foreign' for m in c.messages): c.message('foreign', True)
         elif reason == 'gateway_restart': (r.home/'gateway-starts.log').write_text('1\n2\n')
-        elif reason in ('client_error', 'client_outage_5m'): c.failed = 'read'
+        elif reason == 'client_outage_5m': c.failed = 'read'
     r.clock.callback = tick
     assert r.run() == 0  # Amendment 17: live cleanup proof survives missing command replies.
     assert not r.has('setup_failed', None) and r.has('episode_end', e['id'])

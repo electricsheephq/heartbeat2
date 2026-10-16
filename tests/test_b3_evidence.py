@@ -20,7 +20,7 @@ def test_client_argv_json_and_failures(monkeypatch):
     assert client.read(5, 100) == [message]
     assert calls[0][0] == ['fake', '--json', 'send', 'bot', 'hello']
     assert calls[1][0] == ['fake', '--json', 'read', 'bot', '--limit', '100', '--after-id', '5']
-    assert calls[0][1]['timeout'] == 60
+    assert calls[0][1]['timeout'] == 300
     for output, code in [('no JSON', 0), ('{}', 0), (json.dumps(message), 1)]:
         monkeypatch.setattr(subprocess, 'run', lambda *a, **kw: subprocess.CompletedProcess(a, code, output))
         with pytest.raises(ClientError): client.send('hello')

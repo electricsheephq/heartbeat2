@@ -146,9 +146,10 @@ def hermes_revision(source, version_file):
     version = (stamp.get('baseVersion') or None if isinstance(stamp, dict) else
                match[1] if match else text if '\n' not in text else None)
     try:
-        result = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=source, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=source, capture_output=True, text=True, timeout=30)
         commit = result.stdout.strip() if result.returncode == 0 else None
-    except (OSError, subprocess.SubprocessError): commit = None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise subprocess.SubprocessError(type(exc).__name__) from exc
     commit = commit if commit and re.fullmatch('[0-9a-fA-F]{40,64}', commit) else None
     installed = stamp.get('commit') if isinstance(stamp, dict) else None
     installed = installed if isinstance(installed, str) and re.fullmatch('[0-9a-fA-F]{40,64}', installed) else commit

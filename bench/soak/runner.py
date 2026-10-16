@@ -131,8 +131,8 @@ class Runner:
         self.emit('send_intent', eid, key=key, text=text, purpose=purpose)
         before = self.snapshot(); before['hermes_session_id'] = self.transcript.current_session(self.chat_key)
         try: message = self.client.send(text)
-        except ClientError:
-            self.emit('client_error', eid, operation='send', key=key)
+        except ClientError as exc:
+            self.emit('client_error', eid, operation='send', key=key, exit_code=exc.exit_code, detail=exc.detail)
             if not (purpose == 'setup' and eid != 'setup'): self.void('client_error')
             return
         self.sent_ids.add(message['id'])
@@ -166,21 +166,22 @@ class Runner:
                     if eid == 'setup': self.emit('setup_failed',reason='command_reply_or_state_mismatch',key=key)
                     elif not self.has('cleanup_unconfirmed', eid, key): self.emit('cleanup_unconfirmed', eid, key=key)
                 continue
+            if sid:
+                claimed = {r['owner']['id'] for r in self.analysis_rows if r['kind'] == 'turn' and r.get('owner') and 'id' in r['owner']}
+                owner = self.transcript.owner(sid,message['text'],epoch(message['date']),claimed)
+                if owner and self.transcript.turn_done(sid,owner['timestamp']):
+                    rows = self.transcript.turn(sid,owner['timestamp'])
+                    texts = [r['content'] for r in rows if r['role'] == 'assistant' and r.get('content')]
+                    if texts:
+                        self.emit('turn',eid,key=key,message_id=message['id'],sent_at=epoch(message['date']),session_id=sid,owner=owner,
+                                  rows=rows,pulse_results=self.transcript.pulse_results(sid,owner['timestamp']),
+                                  final_text=texts[-1],snapshot=self.snapshot(),before=before,purpose=purpose)
+                        self.pending.remove(item)
+                        continue
             if self.clock.now() >= epoch(message['date'])+300 and not (episode and episode['kind'] == 'M' and key.startswith('request:')):
                 active = self.active; self.active = episode; self.void('turn_unresolved'); self.active = active
                 self.emit('turn_unresolved', eid, key=key, message_id=message['id'])
-                self.pending.remove(item); continue
-            if not sid: continue
-            claimed = {r['owner']['id'] for r in self.analysis_rows if r['kind'] == 'turn' and r.get('owner') and 'id' in r['owner']}
-            owner = self.transcript.owner(sid,message['text'],epoch(message['date']),claimed)
-            if not owner or not self.transcript.turn_done(sid,owner['timestamp']): continue
-            rows = self.transcript.turn(sid,owner['timestamp'])
-            texts = [r['content'] for r in rows if r['role'] == 'assistant' and r.get('content')]
-            if not texts: continue
-            self.emit('turn',eid,key=key,message_id=message['id'],sent_at=epoch(message['date']),session_id=sid,owner=owner,
-                      rows=rows,pulse_results=self.transcript.pulse_results(sid,owner['timestamp']),
-                      final_text=texts[-1],snapshot=self.snapshot(),before=before,purpose=purpose)
-            self.pending.remove(item)
+                self.pending.remove(item)
 
     def poll(self):
         if self.clock.now() - self.last_poll < 30: return
@@ -188,9 +189,8 @@ class Runner:
         try:
             messages = self.client.read(self.last_seen or None,100)
             if self.last_seen: messages += self.client.read(None,100)  # bounded chat-history overlap catches streaming edits
-        except ClientError:
-            self.emit('client_error', self.active['id'] if self.active else None, operation='read')
-            self.void('client_error')
+        except ClientError as exc:
+            self.emit('client_error', self.active['id'] if self.active else None, operation='read', exit_code=exc.exit_code, detail=exc.detail)
             if self.outage is None: self.outage = self.clock.now()
             if self.clock.now() - self.outage >= 300: self.void('client_outage_5m')
             return
@@ -537,7 +537,7 @@ class Runner:
             if self.frozen is None:
                 self.emit('setup_failed', reason='frozen_state_unreadable'); return 1
             try:
-                commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=5).stdout.strip() or None
+                commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=30).stdout.strip() or None
             except (OSError, subprocess.SubprocessError): commit = None
             source_hash = hashlib.sha256(Path(__file__).with_name('schedule.py').read_bytes()).hexdigest()
             self.emit('declaration', rubric_sha256=hashlib.sha256(Path(__file__).with_name('RUBRIC.md').read_bytes()).hexdigest(), generator_commit=commit, generator_source_sha256=source_hash, start=self.schedule['start'], tz=self.schedule['tz'], schedule_sha256=self.schedule['sha256'], seed=self.schedule['seed'], frozen=self.frozen,mode=self.schedule.get('mode'),smoke_at=self.schedule.get('smoke_at'))
