@@ -39,23 +39,28 @@ def marker_tag(secret, occurrence_id, attempt):
 
 
 def marker(text, *, secret=None, require_tag=False):
-    # Only line start or the first bounded gateway prefix can carry authority.
+    # Only line start or a verified gateway-prefix candidate within 1024 can
+    # carry authority; names may contain delimiters, so try each bounded candidate.
     first=text.split('\n',1)[0] if isinstance(text,str) else ''
     prefixed=first.startswith('[')
     if prefixed:
-        end=first.find('] ⟦pulse ')
-        if end<0 or end>1024: return None
-        first=first[end+2:]
-    match=MARKER.match(first)
-    if not match: return None
-    try:
-        wid,key=match[1].split('/',1)
-        attempt=int(match[2])
-        tag=match[3]
-        if (prefixed or require_tag) and not tag: return None
-        if tag and (not secret or not hmac.compare_digest(tag,marker_tag(secret,match[1],attempt))): return None
-        return wid,key,attempt
-    except ValueError: return None
+        delimiter='] ⟦pulse '
+        candidates=(first[m.start()+2:] for m in re.finditer(
+            re.escape(delimiter),first[:1024+len(delimiter)]))
+    else:
+        candidates=(first,)
+    for candidate in candidates:
+        match=MARKER.match(candidate)
+        if not match: continue
+        try:
+            wid,key=match[1].split('/',1)
+            attempt=int(match[2])
+            tag=match[3]
+            if (prefixed or require_tag) and not tag: continue
+            if tag and (not secret or not hmac.compare_digest(tag,marker_tag(secret,match[1],attempt))): continue
+            return wid,key,attempt
+        except ValueError: continue
+    return None
 
 
 def fail_open(fn):
