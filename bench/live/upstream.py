@@ -20,11 +20,14 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class Upstream:
-    def __init__(self, url, model, key_env, record_path, fail_plan=None):
+    def __init__(self, url, model, key_env, record_path, fail_plan=None, *,
+                 stop_on_429=False, call_budget=None):
         self.url, self.model, self.key_env = url.rstrip('/'), model, key_env
         self.record_path, self.fail_plan = Path(record_path), fail_plan
         self.scenario, self.rep, self.path, self.wake = '', 0, 'P1', False
         self.quota = False
+        self.stop_on_429, self.call_budget = stop_on_429, call_budget
+        self.unavailable, self.reason = False, ''
         self.rows = []
         self.lock = threading.Lock()
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
@@ -44,7 +47,11 @@ class Upstream:
             started = time.monotonic()
             started_at = time.time()
             retry_after = None
-            if injected:
+            capped = self.call_budget is not None and not self.call_budget.take()
+            if capped:
+                response, status = {'error': {'message': 'QUOTA: call budget stopped'}}, 429
+                self.reason = self.call_budget.reason or 'call_cap'
+            elif injected:
                 response, status = {'error': {'message': 'scripted primary outage'}}, 503
             else:
                 req = Request(self.url + '/chat/completions', json.dumps(request).encode(),
@@ -63,19 +70,31 @@ class Upstream:
                 except (URLError, TimeoutError) as exc:
                     status, response = 502, {'error': {'message': f'upstream unreachable: {type(exc).__name__}'}}
             rate_limited += status == 429
+            stopped = capped or self.stop_on_429 and status == 429
+            if stopped:
+                self.quota = True
+                self.reason = self.reason or 'quota'
+                if self.call_budget is not None:
+                    self.call_budget.stop(self.reason)
+            if attempt and status >= 500:
+                self.unavailable = True
             with self.lock:
                 row = {'scenario': self.scenario, 'rep': self.rep, 'path': self.path,
                        'request': request, 'response': response, 'status': status,
                        'usage': response.get('usage', {}), 'elapsed': time.monotonic() - started, 'started_at': started_at,
                        'wake': self.wake, 'injected': injected,
-                       'run_status': 'QUOTA' if rate_limited == 2 else 'CALL'}
+                       'run_status': 'QUOTA' if stopped or rate_limited == 2 else 'CALL'}
+                if stopped:
+                    row['reason'] = self.reason
+                if hasattr(self, 'occurrence'):
+                    row['occurrence'] = self.occurrence
                 self.record_path.parent.mkdir(parents=True, exist_ok=True)
                 with self.record_path.open('a') as stream:
                     stream.write(json.dumps(row) + '\n')
                 self.rows.append(row)
             if rate_limited == 2:  # two actual 429s, not a 429 after some other failure
                 self.quota = True
-            if injected or attempt or not (status == 429 or status >= 500):
+            if stopped or injected or attempt or not (status == 429 or status >= 500):
                 return response, status
             delay = 10.0
             if retry_after:
