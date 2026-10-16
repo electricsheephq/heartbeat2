@@ -253,3 +253,36 @@ def test_non_git_source_is_stable_and_generator_waits_thirty_seconds(tmp_path, m
     assert not r.has('state_mismatch', None)
     assert all(kw['timeout'] == 30 for _, kw in calls)
     store.close()
+
+
+def test_outage_starts_at_the_failing_overlap_read(tmp_path, monkeypatch):
+    r, c, store, e = rig(tmp_path, 'R-rel')
+    r.active = e; r.last_seen = 1; start = r.clock.now()
+    calls = []
+    def read(after_id, limit):
+        calls.append(after_id)
+        if after_id is not None:
+            r.clock.wall += 250  # slow but successful cursor read
+            return []
+        fail_client()
+    monkeypatch.setattr(c, 'read', read)
+    r.poll()
+    assert calls == [1, None]
+    assert r.outage == start + 250
+    assert not r.has('void', e['id'])
+    store.close()
+
+
+def test_deadline_uses_final_assistant_row_not_trailing_session_meta(tmp_path, monkeypatch):
+    r, c, store, e = rig(tmp_path, 'N')
+    r.active = e; start = epoch(e['sends'][0]['at']); r.clock.wall = start
+    original_row = c.row
+    def row(role, text, at, *args, **kwargs):
+        original_row(role, text, start + 30 if role == 'assistant' else at, *args, **kwargs)
+        if role == 'assistant' and text:
+            original_row('session_meta', '', start + 350)
+    monkeypatch.setattr(c, 'row', row)
+    r.send(e, 'request:0', e['sends'][0]['text'], 'request')
+    r.clock.wall = start + 400; r.turns()
+    assert r.has('turn', e['id']) and not r.has('turn_unresolved', e['id'])
+    store.close()

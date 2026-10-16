@@ -173,7 +173,7 @@ class Runner:
                     rows = self.transcript.turn(sid,owner['timestamp'])
                     texts = [r['content'] for r in rows if r['role'] == 'assistant' and r.get('content')]
                     if texts:
-                        finished_at = rows[-1]['timestamp']
+                        finished_at = next(r['timestamp'] for r in reversed(rows) if r['role'] == 'assistant')  # not a trailing session_meta row
                         if not (self.clock.now() >= epoch(message['date'])+300 and finished_at > epoch(message['date'])+300):
                             self.emit('turn',eid,key=key,message_id=message['id'],sent_at=epoch(message['date']),session_id=sid,owner=owner,
                                       rows=rows,pulse_results=self.transcript.pulse_results(sid,owner['timestamp']),
@@ -188,10 +188,12 @@ class Runner:
     def poll(self):
         if self.clock.now() - self.last_poll < 30: return
         self.last_poll = self.clock.now()
-        attempt_started = self.clock.now()
+        attempt_started = self.clock.now()  # per call, so a slow successful first read never counts as outage
         try:
             messages = self.client.read(self.last_seen or None,100)
-            if self.last_seen: messages += self.client.read(None,100)  # bounded chat-history overlap catches streaming edits
+            if self.last_seen:
+                attempt_started = self.clock.now()
+                messages += self.client.read(None,100)  # bounded chat-history overlap catches streaming edits
         except ClientError as exc:
             self.emit('client_error', self.active['id'] if self.active else None, operation='read', exit_code=exc.exit_code, detail=exc.detail)
             if self.outage is None: self.outage = attempt_started
