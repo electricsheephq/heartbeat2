@@ -198,12 +198,12 @@ def test_close_locks_voids_for_every_caller(tmp_path, reason):
 
 
 @pytest.mark.parametrize('fault', [OSError('synthetic'), subprocess.TimeoutExpired('git', 5)])
-def test_hermes_git_fault_preserves_valid_stamp(tmp_path, monkeypatch, fault):
+def test_hermes_git_fault_is_unreadable_even_with_valid_stamp(tmp_path, monkeypatch, fault):
     stamp = tmp_path/'stamp.json'; stamp.write_text(json.dumps({'baseVersion':'1.0', 'commit':'b'*40}))
     monkeypatch.setattr(evidence.subprocess, 'run', lambda *a, **k: (_ for _ in ()).throw(fault))
-    assert evidence.hermes_revision(tmp_path, stamp) == dict(hermes_version='1.0', hermes_commit='b'*40, hermes_source_commit=None)
+    with pytest.raises(subprocess.SubprocessError): evidence.hermes_revision(tmp_path, stamp)
     stamp.write_text('1.0\n')
-    assert evidence.hermes_revision(tmp_path, stamp)['hermes_commit'] is None
+    with pytest.raises(subprocess.SubprocessError): evidence.hermes_revision(tmp_path, stamp)
 
 
 def test_install_stamp_and_source_commits_are_distinct(tmp_path, monkeypatch):
