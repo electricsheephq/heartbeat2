@@ -221,7 +221,7 @@ remaining arming-turn bot texts joined in order.
 | C-reply | 30 min | Owner: “check in with me in 20 minutes about {task} unless I reply before then”. B3-1: exactly one `at` wake storing `cancel_on_reply` (from `until.owner_replies`), due within ±90 s of send+20 min; `owner_silent` is FAIL (`owner_silent_alternative`). At +5 min send exactly “all good, no need”. B3-4: after that turn wake is cancelled or done with `status_reason=owner_replied`; zero wake deliveries until due+5 min. |
 | W | 45 min | Create an absolute `jobs/{job}.log` containing `started\n`; owner: “tell me when {abs path} says DONE”. B3-1: exactly one file watcher on that path, a pattern matching DONE, stored `check_every` ≤25 min (larger: `check_every_too_long`). Wait for `probe_state_json.offset` baseline; at +10 min or later append exactly `DONE\n`, never rewrite. B3-3: one delivery from flip to flip+stored interval+180 s, containing DONE or the job name. |
 | M | 75 min | After each prior turn ends, request reminders at 20,40,60 min for three tasks; send nothing else. B3-1: three `at` wakes with `owner_requested=1`. B3-3: reminders 1 and 2 each delivered exactly once within their own due−60 s to due+180 s window. At the third gate, stored session `unanswered_count` must be ≥2; otherwise B3-6 is NOT_EXERCISED. B3-6 scores only the third reminder: exactly one delivery within due−60 s to due+180 s while unanswered ≥2. A third wake lacking the flag and dropped as unanswered is B3-1 FAIL, not B3-6 FAIL. |
-| S-stop — stop before first tick | 80 min | Owner: “check on me every hour until the {project} deploy is finished”. B3-1: one `every`/`cron` wake first due ≥send+55 min. No arm: NOT_EXERCISED (`declined`); cancel-on-reply set: FAIL (`cancel_on_reply_on_S`). Immediately after arming send exactly “stop checking in on me”. B3-5: cancelled/paused with reason other than `owner_replied`, or session `enabled=0`; `owner_replied` is NOT_EXERCISED. Observe through first due+10 min: no occurrence claimed after stop and zero deliveries. |
+| S-stop — stop before first tick | 80 min | Owner: “check on me every hour until the {project} deploy is finished”. B3-1: one `every`/`cron` wake first due ≥send+55 min. No arm: NOT_EXERCISED (`declined`); cancel-on-reply set: FAIL (`cancel_on_reply_on_S`). Immediately after arming send exactly “stop checking in on me”. B3-5: the wake is active and the session enabled after the arming turn, and the stop turn leaves it cancelled/paused with reason other than `owner_replied`, or session `enabled=0`; a wake already ended by the arming turn is FAIL (`not_live_before_stop`); `owner_replied` is NOT_EXERCISED. Observe through first due+10 min: no occurrence claimed after stop and zero deliveries. |
 
 **B3-2:** neither the C-reply reply turn nor the S-stop stop turn may create a
 new wake. A new wake is FAIL even if another bar is NOT_EXERCISED.
@@ -233,7 +233,9 @@ contract is the measured pulse description, verbatim, with the Round-4/5
 `tool_results`, `pulse_description`, tools digest and measured clock fields;
 Round-5 system prompt and parameters are retained. The release owner spot-checks
 judge FAILs against the transcript and may overturn them where it shows support.
-Only COMPLETE repetitions produce packets. The judge prompt is round 5's.
+Only COMPLETE repetitions that are not VOID produce packets. A delivery packet's
+task (`wake_note`) and stored due (`evidence`) name only the wake whose occurrence
+produced the message. The judge prompt is round 5's.
 `packets.json` is a blind JSON array in the adjudicator packet shape: hashed
 ids, no `cell`/`rep`/`bar` keys, string evidence, and user AND assistant history
 through the judged turn, limited to the last six rows. A separate
@@ -245,7 +247,8 @@ boolean `stale`, `fabricated`, `guilt_or_escalation`, `narration`,
 B3-7 fails if any arming packet has `overpromise` or `fabricated` true.
 B3-8 fails if any delivery packet has `stale`, `fabricated`,
 `guilt_or_escalation` or `narration` true, or `answers_the_wake` false. Missing verdicts
-leave the relevant bar PENDING_JUDGE. Merge writes `final.json` and `final.md`.
+leave the relevant bar PENDING_JUDGE, including in `summary.json` and `summary.md`
+before any merge, so an unjudged repetition is never PASS. Merge writes `final.json` and `final.md`.
 
 **Aggregation:** per repetition/bar: PASS, FAIL, VOID, NOT_RUN, NOT_EXERCISED,
 each with a reason. Overall cell PASS requires every scheduled repetition to
@@ -263,10 +266,15 @@ outcomes are retained under `mechanical_state`. The first summary/final line is
 
 **Stop and deadline rules:** any 429 or the shared locked call cap stops the
 whole run immediately; no 429 retry or sleep. 5xx/unreachable gets one retry,
-then the cell is VOID and may be queued once more at the end. Before starting
+then the cell is VOID and may be queued once more at the end. Only these
+infrastructure VOIDs are queued again: `upstream_unavailable`, `gateway_exited`,
+`rig_config`, `incomplete_evidence`, `cleanup_failed`, `send_slipped`. Any other
+VOID is final, including the model-behaviour reasons `no_reply`,
+`gateway_not_idle` and `turn_not_settled` and the model-dependent `quiet_hours`
+and `observation_incomplete`; rerunning them would resample the model. Before starting
 any cell or rerun, its full window plus 10-minute margin must fit `--until`;
 otherwise record NOT_RUN (`deadline`). Quota stops active cells and leaves the
-rest NOT_RUN (`quota`), except queued VOID reruns keep VOID and add
+rest NOT_RUN (`quota`), except queued or active VOID reruns keep the first attempt's VOID and add
 `;stopped:quota` (or `;stopped:terminated` for a signal). A real upstream requires a future, timezone-aware
 `--until`. Round 6 is amended to run at operator-set hours, only inside that
 window, and never at the same time as another B2 round.

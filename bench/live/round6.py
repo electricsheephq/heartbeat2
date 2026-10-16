@@ -30,6 +30,10 @@ CLAIM_CLASS = ('isolated-rig live-model journey smoke: pinned Hermes, loopback B
                'pulse-only toolset, compression off, default plugin settings, n=3 per cell, no rate claim')
 STOP_LABEL = 'stop before first tick'
 FAKE_BANNER = 'FAKE UPSTREAM: plumbing check only; no claim.'
+# Infrastructure VOIDs only. Model-behaviour VOIDs (no_reply, gateway_not_idle, turn_not_settled) and
+# model-dependent observation limits (quiet_hours, observation_incomplete) stay final: rerunning them resamples.
+RERUNNABLE = {'upstream_unavailable', 'gateway_exited', 'rig_config', 'incomplete_evidence', 'cleanup_failed',
+              'send_slipped'}
 
 
 def variants(seed, rep):
@@ -295,20 +299,22 @@ def _score_cell(result):
         stop = next(t for t in turns if t['role'] == 'stop')
         after = next((w for w in stop['snapshot']['wakes'] if w['id'] == wake.get('id')), {})
         engine_cancelled = after.get('status_reason') == 'owner_replied'
-        stopped = (after.get('status') in {'cancelled', 'paused'} or stop['snapshot']['session'].get('enabled') == 0)
+        live_before = wake.get('status') == 'active' and arms[0]['snapshot']['session'].get('enabled') != 0
+        stopped = live_before and (after.get('status') in {'cancelled', 'paused'} or stop['snapshot']['session'].get('enabled') == 0)
         claims = [o for o in final['occurrences'] if o.get('claimed_at') is not None and o['claimed_at'] >= stop['owner']['date']]
         unexercised = declined or engine_cancelled and not deliveries and not claims
         incomplete = not unexercised and stopped and not claims and not deliveries and (
             due is None or final.get('at', 0) < due + 600)
         bar('B3-5', not unexercised and not incomplete and stopped and not claims and not deliveries,
-            'declined' if declined else 'owner_replied' if unexercised else 'observation_incomplete' if incomplete else 'stop_failed',
+            'declined' if declined else 'owner_replied' if unexercised else 'observation_incomplete' if incomplete else
+            'stop_failed' if live_before else 'not_live_before_stop',
             'NOT_EXERCISED' if unexercised else 'VOID' if incomplete else 'FAIL')
     state = aggregate([b['state'] for b in bars.values()])
     return {'state': state, 'reason': next((b['reason'] for b in bars.values() if b['state'] == state), 'ok'), 'bars': bars}
 
 
 def judge_packets(result):
-    if result.get('status') != 'COMPLETE' or score_cell(result)['reason'] == 'incomplete_evidence':
+    if result.get('status') != 'COMPLETE' or score_cell(result)['state'] == 'VOID':
         return
     replies = {i for t in result.get('turns', []) for i in t['bot_ids']}
     for turn in result.get('turns', []):
@@ -321,6 +327,12 @@ def judge_packets(result):
             latest = next((r.get('occurrence') for r in reversed(rows)), None)
             rows = [r for r in rows if r.get('occurrence') == latest]
             yield None, 'B3-8', [message], rows
+
+
+def firing_wake(rows):
+    """Wake id of the occurrence a delivery packet is scoped to (marker o:<wake>/<dedupe>)."""
+    occurrence = next((r.get('occurrence') for r in rows if r.get('occurrence')), None)
+    return occurrence.split('/', 1)[0] if occurrence else None
 
 
 def summarize(declaration, results, fake=False):
@@ -364,6 +376,11 @@ def write_score(out):
             index = next((i for i, t in enumerate(result['turns']) if t is turn), None)
             history_turns = result['turns'][:index + 1] if index is not None else [
                 t for t in result['turns'] if t['owner']['date'] <= messages[0]['date']]
+            firing = None if turn else firing_wake(rows)
+            arming = [t for t in history_turns if t['role'] == 'arming']
+            # A delivery packet names only the wake that fired, so a wrong reminder cannot pass as right.
+            sources = [t for t in arming if any(w['id'] == firing for w in t['created'])]
+            firing, sources = (firing, sources) if sources else (None, arming)
             history = [row for t in history_turns for row in (
                 dict(role='user', content=t['owner']['text']),
                 dict(role='assistant', content='\n'.join(m['text'] for m in result['bot_messages']
@@ -377,12 +394,20 @@ def write_score(out):
             packet_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
             packet_map[packet_id] = identity
             packets.append(dict(id=packet_id, history=history[-6:],
-                wake_note='; '.join(t['owner']['text'] for t in history_turns if t['role'] == 'arming'),
+                wake_note='; '.join(t['owner']['text'] for t in sources),
                 owner_message=turn['owner']['text'] if turn else None,
-                evidence=[json.dumps(dict(due=w.get('next_due_at'), note=w.get('note'))) for t in history_turns for w in t['created']],
+                evidence=[json.dumps(dict(due=w.get('next_due_at'), note=w.get('note'))) for t in sources
+                          for w in t['created'] if firing is None or w['id'] == firing],
                 delivered_text='\n'.join(m['text'] for m in messages), pulse_results=pulse_results,
                 receipts=[r['receipt'] for r in pulse_results if 'receipt' in r],
                 tool_contract=fields['pulse_description'], **fields))
+    for result in results:
+        pending = sorted({v['bar'] for v in packet_map.values() if (v['cell'], v['rep']) == (result['cell'], result['rep'])})
+        if pending:
+            result['bars'].update({bar: dict(state='PENDING_JUDGE', reason='missing_verdict') for bar in pending})
+            state = aggregate([result['state'], 'PENDING_JUDGE'])
+            result.update(mechanical_state=result['state'], mechanical_reason=result['reason'], state=state,
+                          reason=result['reason'] if state == result['state'] else 'missing_verdict')
     summary = summarize(declaration, results, fake)
     (out / 'packets.json').write_text(json.dumps(packets, indent=2))
     (out / 'packets-map.json').write_text(json.dumps(packet_map, indent=2))
@@ -437,7 +462,8 @@ def merge_verdicts(out, verdicts):
                                       'delivery_judgment' if state == 'FAIL' else 'ok')
         state = aggregate([mechanical.get('mechanical_state', mechanical['state']),
                            *[b['state'] for b in result['bars'].values()]])
-        result.update(state=state, reason=next((b['reason'] for b in result['bars'].values() if b['state'] == state), mechanical['reason']))
+        result.update(state=state, reason=next((b['reason'] for b in result['bars'].values() if b['state'] == state),
+                                               mechanical.get('mechanical_reason', mechanical['reason'])))
         results.append(result)
     final = summarize(summary['declaration'], results, summary['fake'])
     final['verdicts'] = verdicts
@@ -680,6 +706,10 @@ def orchestrate(args, argv, selected):
         return json.loads(path.read_text()) if path.exists() else dict(cell=sid, rep=rep)
     def record(sid, rep, reason, rerun=False, stopped=False):
         result = read(sid, rep)
+        archived = args.out / f'{sid}-{rep}-void.json'
+        if rerun and archived.exists():
+            # An active rerun overwrote the result on termination; the first attempt decides.
+            result = json.loads(archived.read_text())
         if rerun and result.get('status') == 'VOID':
             result['reason'] = result.get('reason', 'void') + (';stopped:' if stopped else ';rerun_refused:') + reason
         else:
@@ -699,7 +729,7 @@ def orchestrate(args, argv, selected):
                 proc.wait(timeout=5)
             finally:
                 log.close()
-            record(sid, rep, reason)
+            record(sid, rep, reason, rerun=bool(attempt), stopped=True)
         active.clear()
         for sid, rep, attempt in jobs:
             record(sid, rep, reason, rerun=bool(attempt), stopped=True)
@@ -726,7 +756,7 @@ def orchestrate(args, argv, selected):
                     if result.get('status') != 'VOID':
                         result.update(status='VOID', reason='incomplete_evidence', upstream=upstream_name(args))
                         (args.out / f'{sid}-{rep}.json').write_text(json.dumps(result))
-                    if not attempt:
+                    if not attempt and str(result.get('reason', '')).split(';')[0] in RERUNNABLE:
                         (args.out / f'{sid}-{rep}-void.json').write_text(json.dumps(result))
                         jobs.append((sid, rep, 1))
             if stop_reason:
@@ -818,8 +848,8 @@ def main(argv=None):
     if args.upstream != 'fake' and (urlsplit(args.upstream_url).scheme not in {'http', 'https'} or not urlsplit(args.upstream_url).hostname):
         parser.error('upstream URL must name one http(s) host')
     selected = args.cells.split(',')
-    if set(selected) - WINDOWS.keys() or args.reps < 1 or args.max_calls < 1:
-        parser.error('unknown cells or nonpositive --reps/--max-calls')
+    if set(selected) - WINDOWS.keys() or len(set(selected)) != len(selected) or args.reps < 1 or args.max_calls < 1:
+        parser.error('unknown or duplicate cells, or nonpositive --reps/--max-calls')
     os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
     sys.dont_write_bytecode = True
     args.model = args.model or 'fake-primary'

@@ -228,7 +228,7 @@ def test_score_outputs_include_missing_reps_and_packets(tmp_path):
         result['bot_messages'].append(dict(id='ack', text='set', date=result['sent_at']))
         (tmp_path / f'R-rel-{rep}.json').write_text(json.dumps(result))
     summary = write_score(tmp_path)
-    assert summary['cells']['R-rel'] == 'NOT_RUN'
+    assert summary['cells']['R-rel'] == 'PENDING_JUDGE'
     packets = json.loads((tmp_path / 'packets.json').read_text())
     packet_map = json.loads((tmp_path / 'packets-map.json').read_text())
     assert {p['bar'] for p in packet_map.values()} == {'B3-7', 'B3-8'}
@@ -251,7 +251,8 @@ def test_orchestrator_without_subprocesses(monkeypatch, tmp_path, mode):
                     processes[0].rc = 2
             else:
                 self.rc = (3 if launched.count((sid, rep)) == 1 else 0) if mode == 'void' else (2 if sid == 'R-rel' else None)
-            (tmp_path / f'{sid}-{rep}.json').write_text(json.dumps(dict(cell=sid, rep=int(rep), status='VOID' if self.rc else 'COMPLETE')))
+            (tmp_path / f'{sid}-{rep}.json').write_text(json.dumps(dict(cell=sid, rep=int(rep), status='VOID' if self.rc else 'COMPLETE',
+                                                                        reason='upstream_unavailable' if self.rc else 'ok')))
             processes.append(self)
         def poll(self):
             return self.rc
@@ -272,7 +273,7 @@ def test_orchestrator_without_subprocesses(monkeypatch, tmp_path, mode):
         assert rc == 2
         assert launched == [('R-rel', '1'), ('W', '1'), ('M', '1'), ('W', '1')]
         result = json.loads((tmp_path / 'M-1.json').read_text())
-        assert result['status'] == 'VOID' and result['reason'] == 'void;stopped:quota'
+        assert result['status'] == 'VOID' and result['reason'] == 'upstream_unavailable;stopped:quota'
     elif mode == 'quota':
         assert rc == 2 and launched == [('R-rel', '1'), ('W', '1')]
         assert processes[1].terminated
@@ -515,7 +516,7 @@ def test_fake_summary_is_plumbing(tmp_path, fake_source):
     assert (tmp_path / 'summary.md').read_text().splitlines()[0] == 'FAKE UPSTREAM: plumbing check only; no claim.'
     assert summary['claim_class'] and summary['labels']['S-stop'] == 'stop before first tick'
     assert summary['declaration']['dirty']
-    assert summary['repetitions'][0]['reason'] == 'ok'
+    assert summary['repetitions'][0]['reason'] == 'missing_verdict'
     final = merge_verdicts(tmp_path, [])
     assert final['cells']['M'] == 'PLUMBING'
     for name in ('summary', 'final'):
@@ -695,7 +696,7 @@ def test_cleanup_always_closes_and_writes_after_signal_ignore(monkeypatch, tmp_p
     assert score_cell(json.loads(path.read_text())) == dict(state='NOT_RUN', reason='terminated', bars={})
 
 
-@pytest.mark.parametrize('mode', ['quiet', 'rerun_deadline', 'rerun_quiet', 'void_twice', 'refused', 'sigterm', 'sigint'])
+@pytest.mark.parametrize('mode', ['quiet', 'rerun_deadline', 'rerun_quiet', 'void_twice', 'void_model', 'refused', 'sigterm', 'sigint'])
 def test_orchestrator_final_states(monkeypatch, tmp_path, mode):
     launched, handlers, waits = [], {}, []
     now = [datetime.fromisoformat('2026-10-16T10:00+09:00').timestamp()]
@@ -717,7 +718,7 @@ def test_orchestrator_final_states(monkeypatch, tmp_path, mode):
             self.terminated = False
             self.emitted = False
             (tmp_path / f'{self.sid}-{self.rep}.json').write_text(json.dumps(dict(
-                cell=self.sid, rep=int(self.rep), status='VOID', reason='upstream_unavailable')))
+                cell=self.sid, rep=int(self.rep), status='VOID', reason='no_reply' if mode == 'void_model' else 'upstream_unavailable')))
         def poll(self):
             if not self.emitted and not self.terminated:
                 self.emitted = True
@@ -747,6 +748,10 @@ def test_orchestrator_final_states(monkeypatch, tmp_path, mode):
         assert (tmp_path / 'R-rel-1-void.json').exists()
     elif mode == 'void_twice':
         assert rc == 3 and len(launched) == 6 and all(r['status'] == 'VOID' for r in results)
+    elif mode == 'void_model':
+        # A model-behaviour VOID is final: rerunning it would resample the model.
+        assert rc == 3 and len(launched) == 3 and not list(tmp_path.glob('*-void.json'))
+        assert all(r['status'] == 'VOID' and r['reason'] == 'no_reply' for r in results)
     elif mode == 'refused':
         assert rc == 2 and len(launched) == 2
         assert all(r['status'] == 'NOT_RUN' and r['reason'] == 'refused' for r in results)
@@ -833,3 +838,99 @@ def test_packets_retain_contract_receipts_and_occurrence_scope(tmp_path):
     assert arm['receipts'] == ['arming receipt']
     assert delivery['receipts'] == ['delivery receipt']
     assert 'old receipt' not in json.dumps(delivery)
+
+
+def test_score_marks_unjudged_bars_pending_until_merge(tmp_path):
+    summary = scored_fixture(tmp_path)
+    rep = summary['repetitions'][0]
+    assert summary['cells']['R-rel'] == 'PENDING_JUDGE' and rep['state'] == 'PENDING_JUDGE'
+    assert rep['mechanical_state'] == 'PASS' and rep['reason'] == 'missing_verdict'
+    assert {rep['bars'][b]['state'] for b in ('B3-7', 'B3-8')} == {'PENDING_JUDGE'}
+    assert not re.search(r': PASS \(', (tmp_path / 'summary.md').read_text())
+    packets = json.loads((tmp_path / 'packets.json').read_text())
+    assert merge_verdicts(tmp_path, [verdict(p) for p in packets])['cells']['R-rel'] == 'PASS'
+
+
+def test_void_reps_produce_no_packets(tmp_path):
+    scored_fixture(tmp_path, 'R-clock')
+    path = tmp_path / 'R-clock-1.json'
+    result = json.loads(path.read_text())
+    result['sent_at'] = result['target_due'] - 700
+    path.write_text(json.dumps(result))
+    summary = write_score(tmp_path)
+    assert summary['cells']['R-clock'] == 'VOID' and summary['cell_reasons']['R-clock'] == 'send_slipped'
+    assert json.loads((tmp_path / 'packets.json').read_text()) == []
+
+
+def test_m_delivery_packets_name_only_the_firing_wake(tmp_path):
+    scored_fixture(tmp_path, 'M')
+    path = tmp_path / 'M-1.json'
+    result = json.loads(path.read_text())
+    wakes = [t['created'][0] for t in result['turns']]
+    result['upstream_rows'] = [dict(wake=True, occurrence=f'{w["id"]}/due:1', started_at=w['next_due_at'] - 5,
+                                    request=dict(tools=[], messages=[dict(role='user', content='wake')]))
+                               for w in wakes]
+    path.write_text(json.dumps(result))
+    write_score(tmp_path)
+    packets = json.loads((tmp_path / 'packets.json').read_text())
+    packet_map = json.loads((tmp_path / 'packets-map.json').read_text())
+    deliveries = {packet_map[p['id']]['turn']: p for p in packets if packet_map[p['id']]['bar'] == 'B3-8'}
+    assert sorted(deliveries) == ['0', '1', '2']
+    for index, wake in enumerate(wakes):
+        packet = deliveries[str(index)]
+        assert packet['wake_note'] == f'turn {index}'
+        assert [json.loads(e)['due'] for e in packet['evidence']] == [wake['next_due_at']]
+
+
+@pytest.mark.parametrize('ended', ['wake', 'session'])
+def test_stop_requires_a_live_wake_before_the_stop_turn(ended):
+    result = evidence('S-stop')
+    if ended == 'wake':
+        result['turns'][0]['created'][0].update(status='cancelled', status_reason='agent')
+    else:
+        result['turns'][0]['snapshot']['session']['enabled'] = 0
+    assert score_cell(result)['bars']['B3-5'] == dict(state='FAIL', reason='not_live_before_stop')
+
+
+def test_duplicate_cells_are_refused(tmp_path, capsys):
+    pin = tmp_path / 'pin'
+    helper = pin / 'tests/fakes/fake_llm_provider.py'
+    helper.parent.mkdir(parents=True)
+    helper.write_text('# fixture only\n')
+    with pytest.raises(SystemExit) as exc:
+        main(['--pin', str(pin), '--out', str(tmp_path / 'out'), '--upstream', 'fake', '--cells', 'R-rel,R-rel'])
+    assert exc.value.code == 2 and 'duplicate' in capsys.readouterr().err
+
+
+def test_stopped_active_rerun_keeps_first_void(monkeypatch, tmp_path):
+    handlers, launched = {}, []
+    def signal_handler(sig, action):
+        previous = handlers.get(sig)
+        handlers[sig] = action
+        return previous
+    monkeypatch.setattr('bench.live.round6.signal.signal', signal_handler)
+    monkeypatch.setattr('bench.live.round6.time.sleep', lambda _: None)
+    monkeypatch.setattr('bench.live.round6.time.time', lambda: datetime.fromisoformat('2026-10-16T10:00+09:00').timestamp())
+    class Process:
+        def __init__(self, command, **kwargs):
+            launched.append(self)
+            self.path = tmp_path / 'W-1.json'
+            self.rerun = len(launched) == 2
+            self.rc = None if self.rerun else 3
+            if not self.rerun:
+                self.path.write_text(json.dumps(dict(cell='W', rep=1, status='VOID', reason='upstream_unavailable')))
+        def poll(self):
+            if self.rerun and self.rc is None:
+                handlers[signal.SIGTERM](0, None)
+            return self.rc
+        def terminate(self):
+            # The terminated cell writes its own result, which must not replace the first attempt.
+            self.path.write_text(json.dumps(dict(cell='W', rep=1, status='TERMINATED', reason='terminated')))
+            self.rc = -15
+        def wait(self, timeout=None): return self.rc
+    monkeypatch.setattr('bench.live.round6.subprocess.Popen', Process)
+    args = SimpleNamespace(out=tmp_path, reps=1, workers=1, tz='Asia/Tokyo', upstream='fake', until=None)
+    assert orchestrate(args, [], ['W']) == 2
+    assert len(launched) == 2
+    result = json.loads((tmp_path / 'W-1.json').read_text())
+    assert result['status'] == 'VOID' and result['reason'] == 'upstream_unavailable;stopped:terminated'
