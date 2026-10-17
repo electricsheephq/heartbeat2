@@ -10,8 +10,8 @@ from test_v0113 import owner_turn
 from test_v0114 import create, receipt
 
 
-NOT_SET = ('If a result has armed=false, nothing is set yet: say so first and ask the owner '
-           'to send the /pulse ok command it names; never call it set, done or scheduled. ')
+NOT_SET = ('If a result is proposed (armed=false and its receipt names a /pulse ok command), nothing is set yet: '
+           'say so first and ask the owner to send that command; never call it set, done or scheduled. ')
 
 
 @pytest.mark.parametrize('requested', [False, True])

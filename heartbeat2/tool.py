@@ -35,7 +35,7 @@ DESCRIPTION = ('Use create to arm a wake/watcher (note and trigger.kind required
                'outcome and notify, optionally scratch/next_check. Bounds and clamps are reported. Never type silence markers. '
                'Results include a `cache` line; pick intervals the line marks warm. '
                'Results include a receipt line; tell the owner what it says, not a promise of your own. '
-               'If a result has armed=false, nothing is set yet: say so first and ask the owner to send the /pulse ok command it names; never call it set, done or scheduled. '
+               'If a result is proposed (armed=false and its receipt names a /pulse ok command), nothing is set yet: say so first and ask the owner to send that command; never call it set, done or scheduled. '
                'When a create is refused, tell the owner why and what can be done; never arm a stand-in or relay wake '
                'that re-arms later to get around a limit. '
                'For a one-time "at" wake the owner asks for in their current message, set owner_asked=true: '

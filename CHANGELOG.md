@@ -3,7 +3,7 @@
 ## Unreleased
 
 - A one-time reminder written as `{"kind": "after", "after": "10m"}` is now accepted as `in 10m`, instead of failing and being retried.
-- The pulse tool description tells the model that a result with `armed: false` is not set yet.
+- The pulse tool description tells the model that a proposed result (`armed: false`, with a receipt naming `/pulse ok`) is not set yet, and to ask the owner for that command.
 - Group and topic wakes are recognised behind the gateway's sender prefix using a per-profile keyed tag; in group and topic chats a marker without a valid tag never counts as a wake; DM wake text stays unchanged (#98).
 - A proposed wake (`agent_can_create: ask_first`) now reads as not set. Its tool result carries `armed: false`, and its receipt starts "Not set yet: it is armed only after the owner sends /pulse ok <id>." Every create, update, pause and resume result carries `armed` (#91).
 - The wake text adds one contract line: if the chat shows the note's subject was settled after the wake was armed, the turn ends silently with `outcome="done"` and `notify=false` (#92).
