@@ -143,7 +143,7 @@ def kinds_detail(kind):
 @pytest.mark.parametrize('action', ['create', 'update', 'all'])
 def test_unknown_kind_detail_on_all_tool_paths(engine, action, monkeypatch):
     if action == 'create':
-        result = create(engine, {'kind':'after','after':'10m'})
+        result = create(engine, {'kind':'after','after':'10m','every':'5m'})  # the plain after/at alias is valid
     else:
         w = arm(engine)
         if action == 'all':  # Exercise the aggregate gate path (update/all is refused earlier).
@@ -151,7 +151,7 @@ def test_unknown_kind_detail_on_all_tool_paths(engine, action, monkeypatch):
                 self.creation_gate(session_key=KEY, platform='telegram', chat_type='dm',
                                    allow_gateway_injection=True, kind='after'))
         result = engine.tool.handle({'action':'update' if action == 'update' else 'resume',
-            'id':w.id if action == 'update' else 'all', 'trigger':{'kind':'after','after':'10m'}}, session_id='sid')
+            'id':w.id if action == 'update' else 'all', 'trigger':{'kind':'after','after':'10m','every':'5m'}}, session_id='sid')
         if action == 'all': result = result['results'][0]
     assert result['error'] == 'unknown_kind'
     assert result['detail'] == kinds_detail('after')

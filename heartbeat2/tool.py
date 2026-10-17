@@ -35,6 +35,7 @@ DESCRIPTION = ('Use create to arm a wake/watcher (note and trigger.kind required
                'outcome and notify, optionally scratch/next_check. Bounds and clamps are reported. Never type silence markers. '
                'Results include a `cache` line; pick intervals the line marks warm. '
                'Results include a receipt line; tell the owner what it says, not a promise of your own. '
+               'If a result is proposed (armed=false and its receipt names a /pulse ok command), nothing is set yet: say so first and ask the owner to send that command; never call it set, done or scheduled. '
                'When a create is refused, tell the owner why and what can be done; never arm a stand-in or relay wake '
                'that re-arms later to get around a limit. '
                'For a one-time "at" wake the owner asks for in their current message, set owner_asked=true: '
@@ -102,6 +103,12 @@ class Tool:
             for field in ('trigger','until','pacing'):
                 if field in args and not isinstance(args[field],dict):
                     raise ValueError(f'invalid request: {field} must be an object')
+            trigger = args.get('trigger', {})
+            if (trigger.get('kind') == 'after' and set(trigger) == {'kind', 'after'}
+                    and isinstance(trigger['after'], str) and trigger['after'].strip()):
+                value = trigger['after'].strip()
+                at = value if value.startswith('+') or value.lower().startswith('in ') else 'in ' + value
+                args = {**args, 'trigger': {'kind': 'at', 'at': at}}
             s = self.identity()
             if s is None:
                 return {'error':'missing_session'}
