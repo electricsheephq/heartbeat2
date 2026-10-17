@@ -42,7 +42,7 @@ These same disclosure and exception paragraphs appear in README and the manifest
 - The immutable session key comes from the invoking gateway, never from tool
   parameters. `/pulse` reads and changes only that session's items. Unknown IDs
   in another session do not reveal the note or permit mutation.
-- v0.1 is intended for messaging-gateway DMs. With default `dm_only=true`,
+- HeartBeat 2.0 is intended for messaging-gateway DMs. With default `dm_only=true`,
   groups and unknown chat types are refused. Turning `dm_only=false` permits
   recognized gateway groups; this is an opt-in exception, not tested live here.
   CLI, TUI, Desktop, API server and cron arming are refused.
