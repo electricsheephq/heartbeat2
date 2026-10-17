@@ -33,10 +33,11 @@ Owner wakes, cron and anchored repeats are never snapped; show their cache effec
   the configured owner floor, at most 4 hours / 24 fires. Ends on notify=true
   or three consecutive no_change outcomes. Prefer a watcher when possible.
 
-Only messaging-gateway conversations are supported; use DMs in v0.1. The tool
-chooses this session; never supply a destination or model. If the injection
-consent YAML is missing, show the returned YAML. Respect reported clamps;
-never write plugin settings to widen bounds. Proposed items need `/pulse ok`.
+Only messaging-gateway conversations are supported: DMs by default, plus group
+and topic chats when `dm_only` is off. The tool chooses this session; never
+supply a destination or model. If the injection consent YAML is missing, show
+the returned YAML. Respect reported clamps; never write plugin settings to
+widen bounds. Proposed items need `/pulse ok`.
 After arming, relay the `receipt`: timing, quiet-hour hold, mute and expiry;
 never promise exact timing yourself. A proposed wake is "awaiting your OK",
 never "armed".

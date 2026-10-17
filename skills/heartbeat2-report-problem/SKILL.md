@@ -25,7 +25,7 @@ If your deployment's instructions explicitly route this plugin's problems, or al
 
 ## 3. Diagnose
 
-- `/pulse status` (or `/pulse`), in the affected gateway DM: scheduler state, injection consent, today's counts and next due.
+- `/pulse status` (or `/pulse`), in the affected gateway chat: scheduler state, injection consent, today's counts and next due.
 - `hermes logs --since 1h -n 2000 | grep -i heartbeat`: recent scheduler and plugin log lines; redact private data before sharing.
 
 Safe reproduction for this plugin:

@@ -86,7 +86,7 @@ Every scenario and its hard bars are in [bench/README.md](bench/README.md); the 
 One poller per profile runs inside the messaging gateway and ticks every 5 seconds. A file lock guarantees only one poller even when several Hermes processes share the profile. Every fire is a durable claim with an attempt marker. An accepted turn that never starts is tried three times, and a refused injection backs off and is tried five times, before it is marked dead. A turn that started but never finished (a crash or restart) is recorded as interrupted. Hermes may auto-resume that wake turn, sometimes before heartbeat2's restart recovery has run; heartbeat2 keeps the replay silent either way, never counts it as a fire or delivery, and counts it as a model turn toward the daily cap.
 
 ## Install
-Requires **Hermes ≥ 0.21.6** and Python ≥ 3.11 on macOS or Linux. v0.1 delivers into **messaging-gateway DMs**: Telegram, Discord, Slack, WhatsApp and the other gateway platforms.
+Requires **Hermes ≥ 0.21.6** and Python ≥ 3.11 on macOS or Linux. HeartBeat 2.0 delivers into **messaging-gateway DMs** (and group or topic chats when `dm_only` is off): Telegram, Discord, Slack, WhatsApp and the other gateway platforms.
 
 ```bash
 hermes plugins install electricsheephq/heartbeat2 --enable
@@ -235,12 +235,12 @@ The default command allowlist still permits `gh -R HOST/...` and `git ls-remote 
 
 ## Roadmap
 
-- [v0.2: proven follow-ups, promise → useful message, measured](https://github.com/electricsheephq/heartbeat2/milestone/2)
+- [v0.2: measured follow-ups, promise → useful message in an isolated rig](https://github.com/electricsheephq/heartbeat2/milestone/2)
 - [v0.3: more triggers + learning](https://github.com/electricsheephq/heartbeat2/milestone/3)
 - [Research / blocked](https://github.com/electricsheephq/heartbeat2/milestone/6)
 
 ## Compatibility and known issues
-- **v0.1 delivers only to messaging-gateway DMs.** It refuses to arm wakes from the CLI, TUI, Desktop, the API server or cron: a CLI wake would interrupt your turn, and TUI/Desktop have no silence filter for injected turns yet. Desktop and TUI wakes are planned for v0.3 ([#8](https://github.com/electricsheephq/heartbeat2/issues/8)), once Hermes core supports them.
+- **Delivery is to messaging-gateway chats:** DMs by default, plus group and topic chats when `dm_only` is off. Group and topic delivery is not yet tested live ([#98](https://github.com/electricsheephq/heartbeat2/issues/98)). It refuses to arm wakes from the CLI, TUI, Desktop, the API server or cron: a CLI wake would interrupt your turn, and TUI/Desktop have no silence filter for injected turns yet. Desktop and TUI wakes are planned for v0.3 ([#8](https://github.com/electricsheephq/heartbeat2/issues/8)), once Hermes core supports them.
 - **A wake turn that fails at the provider** (quota, auth, outage) shows Hermes's own failure notice in the chat. The plugin cannot suppress it ([NousResearch/hermes-agent#136749](https://github.com/NousResearch/hermes-agent/issues/136749)). HeartBeat 2.0 settles that wake once Hermes ends the turn (some provider errors leave it open until the agent timeout, [#27](https://github.com/electricsheephq/heartbeat2/issues/27)), then holds every pending wake back (5 min → 15 min → 1 h → 4 h) until a model call on the profile succeeds again. A wake already in flight when the error hits can still show one more notice. A long outage therefore costs about one notice per backoff step, not one per wake.
 - **Silence covers the final reply.** `notify=false` keeps the agent's reply out of the chat. On platforms that show tool progress by default (Discord; WhatsApp and Matrix show new tools), each wake turn still posts a progress bubble. Telegram and Slack hide tool progress by default. To keep wakes fully silent there, set `display.platforms.<platform>.tool_progress: off`. A quiet-injection option is requested upstream ([NousResearch/hermes-agent#136825](https://github.com/NousResearch/hermes-agent/issues/136825)).
 - **Messages sent while the agent is busy.** On Signal/SimpleX, a message that waits in Hermes' queue while a turn is running (a photo, or any message when `busy_input_mode` is `queue`) reaches the agent without a message id, so HeartBeat 2.0 does not count it as your reply. The unanswered mute and the silence check-in treat you as silent until your next message. Text you send mid-turn in the default mode is counted. With the Codex app-server runtime, its native steer (text you send into a running wake turn) is not detected, so a wake that decides to stay silent can leave that steer unanswered.
@@ -248,15 +248,16 @@ The default command allowlist still permits `gh -R HOST/...` and `git ls-remote 
 - **Kanban watchers only see tasks whose worker runs in this profile.** A task assigned to another profile completes in that profile's worker, out of sight.
 - **`codex_app_server` turns drop per-turn context**, so the presence line and governor card don't reach the model on that provider path. Wakes still fire, and silence still works.
 - **File watchers poll.** A truncate-and-regrow or a replacement that happens entirely between two checks can be missed. Reading catches up within 4 MB per check, and lines over 256 KB are skipped.
+- **Proposals (`agent_can_create: ask_first`).** A reminder the agent arms stays a proposal until you send `/pulse ok <id>`, and its receipt says "Not set yet". The reminder keeps the time you asked for: confirming late does not restart the delay. In the live benchmark, the model sometimes describes the delay as starting at confirmation (1 of 6 replies on GLM 5.3). The receipt is the source of truth.
 - **Notes, scratch, summaries and event payloads are stored in plaintext** in `<profile>/plugin-data/heartbeat2/pulse.db`. Don't watch credential files.
-- **Live proof so far:** one profile (Telegram DM, GLM model) covered a delivered follow-up, a silent verdict and survival across a gateway restart. The benchmark suite is a deterministic simulation of the engine, not a measurement of live delivery.
+- **Live proof so far:** one profile (Telegram DM, GLM model) covered a delivered follow-up, a silent verdict and survival across a gateway restart. A live-model journey smoke in an isolated rig ([round 6](https://github.com/electricsheephq/heartbeat2/issues/11#issuecomment-6241146575): GLM 5.3, pinned Hermes, loopback Bot API, 3 tries per journey) armed reminders from the owner's own words and delivered them on time in 3 of 3 tries for relative and clock-time reminders. In that run, no wake was armed on a reply or stop turn, and nothing was delivered after a stop. It measures one model on a stand-in Bot API, not a reliability rate. The deterministic benchmark suite simulates the engine; it does not measure live delivery.
 
 ### Reporting a bug
 
-In the affected messaging-gateway DM, run `/pulse status` (or `/pulse`) for scheduler state, consent, counts and next due.
+In the affected messaging-gateway chat, run `/pulse status` (or `/pulse`) for scheduler state, consent, counts and next due.
 Read recent logs with `hermes logs -n 300 | grep -i heartbeat`; share only short excerpts with secrets, identifiers and private text removed.
 Do not fire a wake, send a DM or change consent just to reproduce a problem.
-From the next release, ask your Hermes agent to report a problem with HeartBeat 2.0; review its draft before approving publication.
+Ask your Hermes agent to report a problem with HeartBeat 2.0; review its draft before approving publication.
 Use the [bug report form](https://github.com/electricsheephq/heartbeat2/issues/new?template=bug_report.yml) for plugin bugs.
 For unauthorized delivery, cross-profile data exposure or exposed credentials, use a [private security advisory](https://github.com/electricsheephq/heartbeat2/security/advisories/new).
 
