@@ -68,7 +68,7 @@ body:
     id: diagnostics
     attributes:
       label: Diagnostics
-      description: Run `/pulse status` (or `/pulse`) in the affected gateway DM for scheduler state, consent, counts and next due. Redact notes, chat and account identifiers, and private message text; do not trigger a wake or change consent.
+      description: Run `/pulse status` (or `/pulse`) in the affected gateway chat for scheduler state, consent, counts and next due. Redact notes, chat and account identifiers, and private message text; do not trigger a wake or change consent.
       render: text
   - type: textarea
     id: logs
