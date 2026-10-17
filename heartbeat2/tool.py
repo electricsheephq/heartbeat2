@@ -105,8 +105,8 @@ class Tool:
                     raise ValueError(f'invalid request: {field} must be an object')
             trigger = args.get('trigger', {})
             if (trigger.get('kind') == 'after' and set(trigger) == {'kind', 'after'}
-                    and isinstance(trigger['after'], str) and trigger['after']):
-                value = trigger['after']
+                    and isinstance(trigger['after'], str) and trigger['after'].strip()):
+                value = trigger['after'].strip()
                 at = value if value.startswith('+') or value.lower().startswith('in ') else 'in ' + value
                 args = {**args, 'trigger': {'kind': 'at', 'at': at}}
             s = self.identity()

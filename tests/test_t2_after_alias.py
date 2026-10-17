@@ -41,6 +41,14 @@ def test_relative_prefix_is_preserved(engine, value):
     assert result['wake']['next_due_at'] == pytest.approx(engine.clock.now()+600)
 
 
+@pytest.mark.parametrize('value,stored', [(' +10m', '+10m'), (' in 10m ', 'in 10m'), (' 10m', 'in 10m')])
+def test_alias_strips_whitespace_before_the_prefix_check(engine, value, stored):
+    result = create(engine, {'kind':'after','after':value})
+    assert result.get('ok') and result['armed'] is True, result
+    assert result['wake']['trigger_json'] == {'kind':'at','at':stored}
+    assert result['wake']['next_due_at'] == pytest.approx(engine.clock.now()+600)
+
+
 def test_after_proposal_matches_literal_at(engine):
     engine.policy = replace(engine.policy, agent_can_create='ask_first')
     for trigger in ({'kind':'after','after':'10m'}, {'kind':'at','at':'in 10m'}):
@@ -56,6 +64,7 @@ def test_after_proposal_matches_literal_at(engine):
 @pytest.mark.parametrize('trigger', [
     {'kind':'after'},
     {'kind':'after','after':''},
+    {'kind':'after','after':'   '},
     {'kind':'after','after':None},
     {'kind':'after','after':600},
     {'kind':'after','after':'10m','every':'5m'},
