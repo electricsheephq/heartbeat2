@@ -118,3 +118,56 @@ def test_description_leads_with_not_set_instruction_once():
     lead = 'Results include a receipt line; tell the owner what it says, not a promise of your own. '
     assert DESCRIPTION.count(NOT_SET) == 1
     assert lead + NOT_SET in DESCRIPTION
+
+
+@pytest.mark.parametrize('requested', [False, True])
+def test_at_with_after_matches_literal_at(engine, requested):
+    # #106: the model's first call in round-6 C-reply rep 1.
+    owner_turn(engine)
+    args = {'action':'create', 'note':'Water the basil.',
+            'trigger':{'kind':'at','after':'20m'}, 'owner_asked':requested}
+    original = deepcopy(args)
+    result = engine.tool.handle(args, session_id='sid')
+    assert args == original
+    assert result.get('ok') and result['armed'] is True, result
+    literal = create(engine, {'kind':'at','at':'in 20m'}, owner_asked=requested)
+    assert literal.get('ok'), literal
+    wake = engine.store.get_wake(result['wake']['id'])
+    assert wake.kind == 'at' and wake.trigger_json == {'kind':'at','at':'in 20m'}
+    assert wake.next_due_at == pytest.approx(engine.clock.now()+1200)
+    assert wake.next_due_at == literal['wake']['next_due_at']
+    assert wake.owner_requested is literal['wake']['owner_requested'] is requested
+
+
+@pytest.mark.parametrize('value,stored', [('20m', 'in 20m'), (' +20m', '+20m'), ('in 20m ', 'in 20m')])
+def test_at_with_after_keeps_relative_prefix(engine, value, stored):
+    result = create(engine, {'kind':'at','after':value})
+    assert result.get('ok') and result['armed'] is True, result
+    assert result['wake']['trigger_json'] == {'kind':'at','at':stored}
+
+
+def test_update_at_with_after_reschedules_like_literal_at(engine):
+    existing = create(engine)
+    assert existing.get('ok'), existing
+    engine.clock.advance(60)
+    result = engine.tool.handle({'action':'update', 'id':existing['wake']['id'],
+                                 'trigger':{'kind':'at','after':'5m'}}, session_id='sid')
+    assert result.get('ok'), result
+    wake = engine.store.get_wake(existing['wake']['id'])
+    assert wake.trigger_json == {'kind':'at','at':'in 5m'}
+    assert wake.next_due_at == pytest.approx(engine.clock.now()+300)
+
+
+@pytest.mark.parametrize('trigger', [{'kind':'at'}, {'kind':'at','after':600}])
+def test_at_without_a_time_names_the_accepted_form(engine, trigger):
+    result = create(engine, trigger)
+    assert result.get('error') == 'invalid_request', result
+    assert '{"kind": "at", "at": "in 20m"}' in result['detail']
+
+
+def test_at_with_both_at_and_after_is_not_rewritten(engine):
+    trigger = {'kind':'at','at':'in 5m','after':'20m'}
+    result = create(engine, trigger)
+    assert result.get('ok'), result
+    assert result['wake']['trigger_json'] == trigger
+    assert result['wake']['next_due_at'] == pytest.approx(engine.clock.now()+300)

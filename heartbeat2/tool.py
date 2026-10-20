@@ -104,7 +104,7 @@ class Tool:
                 if field in args and not isinstance(args[field],dict):
                     raise ValueError(f'invalid request: {field} must be an object')
             trigger = args.get('trigger', {})
-            if (trigger.get('kind') == 'after' and set(trigger) == {'kind', 'after'}
+            if (trigger.get('kind') in ('after', 'at') and set(trigger) == {'kind', 'after'}
                     and isinstance(trigger['after'], str) and trigger['after'].strip()):
                 value = trigger['after'].strip()
                 at = value if value.startswith('+') or value.lower().startswith('in ') else 'in ' + value
@@ -469,7 +469,7 @@ class Tool:
         if reschedule:
             now,tz=e.clock.now(),e.policy.resolved_timezone()
             if kind=='at':
-                if 'at' not in trigger: raise ValueError('at requires a time')
+                if 'at' not in trigger: raise ValueError('at requires a time, for example {"kind": "at", "at": "in 20m"}')
                 due=parse_at(trigger['at'],now=now,timezone=tz)
             elif kind in {'every','self'}:
                 due=next_every(now,w.eff_interval_s,anchor=trigger.get('at') if kind=='every' else None,timezone=tz,**e.timing(w))
