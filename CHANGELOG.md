@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 — 2026-10-20
+
+- A one-time reminder written as `{"kind": "at", "after": "20m"}` is now accepted as `in 20m`, the same alias as #104. Before, it failed with "at requires a time", and the model could fall back to a recurring wake that the 55-minute agent floor delayed (#106).
+- An `at` trigger with no time now gives the accepted form in its error: `{"kind": "at", "at": "in 20m"}` (#106).
+
 ## 0.2.0 — 2026-10-18
 
 - A one-time reminder written as `{"kind": "after", "after": "10m"}` is now accepted as `in 10m`, instead of failing and being retried (#104).
