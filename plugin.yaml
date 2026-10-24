@@ -79,6 +79,11 @@ config_schema:
     default: 15
     label: "Shortest repeat (minutes)"
     description: "Floor for every recurring time wake. Maximum 525600 (one year)."
+  standing_interval_minutes:
+    type: int
+    default: 30
+    label: "Standing wake interval (minutes)"
+    description: "Cadence for newly enabled standing wakes. Must be at least min_interval_minutes; existing standing wakes keep their stored cadence. Maximum 525600 (one year)."
   agent_ungated_floor_minutes:
     type: int
     default: 55

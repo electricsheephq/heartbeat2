@@ -53,6 +53,20 @@ For a one-time reminder use `kind: at`; `at` accepts `HH:MM`, `tomorrow HH:MM`, 
 
 ## Examples
 
+Opt in to one standing wake in the current authorized DM with
+`/pulse standing on`. The cadence comes from `standing_interval_minutes`
+(default 30) in the plugin settings. It must be at least
+`min_interval_minutes`; an infeasible value is refused rather than silently
+clamped. The chosen interval is stored on that wake, so changing the setting
+only affects future standing wakes. The wake has no automatic expiry and
+survives `/new` and Gateway restart. `/pulse standing status` inspects it;
+`/pulse standing off` stops only that wake. It remains a model-turn opportunity,
+not a required message. Quiet hours, daily model/message caps, mute, busy-turn,
+provider/error and governor pause controls still apply. Ordinary no-op backoff
+does not stretch its configured cadence, though repeated no-ops can still pause
+it; resume or cancel that specific wake through `/pulse`. `/pulse off` disables
+all checks in the current chat. This opt-in does not enable other chats.
+
 Follow up in two hours unless the owner replies:
 
 ```json

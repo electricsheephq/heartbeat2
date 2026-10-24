@@ -51,6 +51,62 @@ def test_all_reads_mutations_on_off_are_session_scoped(runtime):
     assert e.store.get_wake(mine.id).status == 'cancelled' and e.store.get_wake(other.id).status == 'active'
 
 
+def test_standing_wake_requires_dm_opt_in_and_stops_locally(runtime):
+    e=runtime.get_engine()
+    assert 'No persistent' in commands.handle('standing status',runtime)
+    original=e.store.get_session(KEY)
+    e.policy=replace(e.policy,dm_only=False)
+    assert e.store.cas_session(KEY,{'chat_type':original.chat_type},chat_type='group')
+    assert 'private DMs' in commands.handle('standing on',runtime)
+    assert not [w for w in e.store.list_wakes(KEY) if w.trigger_json.get('persistent')]
+    assert e.store.cas_session(KEY,{'chat_type':'group'},chat_type='dm')
+    e.policy=replace(e.policy,dm_only=True)
+    first=commands.handle('standing on',runtime)
+    wake=next(w for w in e.store.list_wakes(KEY) if w.trigger_json.get('persistent'))
+    assert wake.status=='active' and wake.kind=='every'
+    assert wake.base_interval_s==wake.eff_interval_s==1800
+    assert wake.next_due_at==e.clock.now()+1800
+    assert wake.expires_at is None and wake.max_fires is None
+    assert wake.armed_session_id=='sid' and wake.chat_type=='dm'
+    assert 'no automatic expiry' in first
+    assert commands.handle('standing on',runtime).count(wake.id)==1
+    assert len([w for w in e.store.list_wakes(KEY) if w.trigger_json.get('persistent')])==1
+    assert 'paused' in commands.handle(f'pause {wake.id}',runtime)
+    assert e.store.get_wake(wake.id).status=='paused'
+    assert 'active' in commands.handle(f'resume {wake.id}',runtime)
+    assert e.store.get_wake(wake.id).status=='active'
+    assert 'stopped' in commands.handle('standing off',runtime)
+    assert e.store.get_wake(wake.id).status=='cancelled'
+    assert 'No persistent' in commands.handle('standing status',runtime)
+    assert 'on for this chat' in commands.handle('on',runtime)
+    commands.handle('standing on',runtime)
+    second=next(w for w in e.store.list_wakes(KEY) if w.trigger_json.get('persistent') and w.status=='active')
+    assert 'off for this chat' in commands.handle('off',runtime)
+    assert e.store.get_wake(second.id).status=='active'
+    assert not e.store.get_session(KEY).enabled
+
+
+def test_standing_interval_setting_controls_new_wake_and_receipts(runtime):
+    e=runtime.get_engine()
+    e.policy=replace(e.policy,standing_interval_minutes=45)
+    result=commands.handle('standing on',runtime)
+    wake=next(w for w in e.store.list_wakes(KEY) if w.trigger_json.get('persistent'))
+    assert wake.base_interval_s==wake.eff_interval_s==2700
+    assert wake.next_due_at==e.clock.now()+2700
+    assert wake.trigger_json['every']=='45m'
+    assert wake.title=='Persistent 45-minute wake'
+    assert '45-minute' in result
+    assert '45-minute' in commands.handle('standing status',runtime)
+
+
+def test_standing_interval_below_minimum_floor_is_refused(runtime):
+    e=runtime.get_engine()
+    e.policy=replace(e.policy,standing_interval_minutes=30,min_interval_minutes=45)
+    result=commands.handle('standing on',runtime)
+    assert 'below min_interval_minutes' in result
+    assert not [w for w in e.store.list_wakes(KEY) if w.trigger_json.get('persistent')]
+
+
 def test_status_injection_yaml_quiet_ledger_why(runtime):
     e = runtime.get_engine()
     w = arm(e,title='build',reason='CI is pending')

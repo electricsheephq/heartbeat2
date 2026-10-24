@@ -422,7 +422,7 @@ class Poller:
                     w=s.get_wake(w.id)
             if w.kind in TIME_KINDS:
                 due=time_due(w,now=now,catch_up_s=self.policy.catch_up_hours*3600,
-                             timezone=self.policy.resolved_timezone(),jitter_unit=self.jitter(),**self.timing(w))
+                             timezone=self.policy.resolved_timezone(),jitter_unit=0 if w.trigger_json.get('persistent') else self.jitter(),**self.timing(w))
                 if due:
                     if not (w.kind in RECURRING_KINDS and due.state=='pending' and s.list_occurrences(w.id,state='pending')):
                         s.add_occurrence(w.id,due.dedupe_key,state=due.state)
@@ -482,7 +482,7 @@ class Poller:
             self.store.set_meta('not_before:'+o.id,'')
         if w.kind=='owner_silent' and o.dedupe_key.startswith('s:') and (s is None or o.dedupe_key!='s:'+(s.episode_id or '')):
             return 'episode_ended',False,None
-        if w.trigger_json.get('builtin'):
+        if w.kind=='owner_silent' and w.trigger_json.get('builtin'):
             if not self.policy.owner_silent_checkin: return 'setting_off',True,None
             after=self.policy.checkin_after_hours*3600*(2 if w.ignored_streak else 1)
             if s and s.last_human_at is not None and now-s.last_human_at<after: return 'checkin_not_due',True,None

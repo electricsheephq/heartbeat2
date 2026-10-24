@@ -81,7 +81,8 @@ def apply(engine,wake,*,next_check=None):
         ceiling=min(p.noop_max_backoff_hours*3600,w.pacing_max_s or float('inf'))
         # Saturate the exponent before computing it; arbitrary stale streaks
         # cannot overflow the scheduling math.
-        backoff=min(ceiling,(w.base_interval_s or floor)*p.noop_backoff_factor**min(k,32))
+        backoff=(max(floor,w.base_interval_s or p.standing_interval_minutes*60) if w.trigger_json.get('persistent') else
+                 min(ceiling,(w.base_interval_s or floor)*p.noop_backoff_factor**min(k,32)))
         backoff=max(floor,backoff)
         ttl=engine.timing(w)['cache_ttl']
         edge=ttl-max(30,.05*ttl) if ttl else None
@@ -90,7 +91,7 @@ def apply(engine,wake,*,next_check=None):
         if w.kind=='self' and next_check is not None:
             eff=max(next_check,backoff) if k else max(next_check,floor)
             eff=min(eff,w.pacing_max_s or float('inf'))
-        elif next_check is not None and w.kind!='cron':
+        elif next_check is not None and w.kind!='cron' and not w.trigger_json.get('persistent'):
             eff=min(max(next_check,backoff),w.pacing_max_s or float('inf'))
         from .cache import interval
         eff=interval(w,eff,ttl,floor)
@@ -113,7 +114,7 @@ def apply(engine,wake,*,next_check=None):
         else:
             updates['next_due_at']=next_every(engine.clock.now(),eff,
                 anchor=w.trigger_json.get('at') if w.kind=='every' else None,
-                timezone=p.resolved_timezone(),jitter_unit=0 if w.trigger_json.get('at') else engine.jitter(),**engine.timing(w))
+                timezone=p.resolved_timezone(),jitter_unit=0 if (w.trigger_json.get('at') or w.trigger_json.get('persistent')) else engine.jitter(),**engine.timing(w))
     if updates:
         s.cas_wake(w.id,w.status,expected_version=w.version,**updates)
         w=s.get_wake(w.id)
@@ -145,7 +146,7 @@ def finish(engine,wake,occurrence):
         history=[o for o in s.list_occurrences(w.id) if o.state=='done']
         babysit_done=w.babysit and (occurrence.notify or
             len(history)>=3 and all(o.outcome=='no_change' for o in history[-3:]))
-        if babysit_done or w.kind=='at' or occurrence.outcome=='done':
+        if babysit_done or w.kind=='at' or occurrence.outcome=='done' and not w.trigger_json.get('persistent'):
             w=s.get_wake(w.id)
             if w.status in {'active','paused'}: s.cas_wake(w.id,w.status,status='done',status_reason='completed')
 

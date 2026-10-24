@@ -26,7 +26,14 @@ def test_defaults_are_frozen_and_settings_untouched(clock):
     defaults = Policy.from_settings({}, clock=clock)
     assert (defaults.max_model_wakes_per_day, defaults.max_messages_per_day,
             defaults.min_interval_minutes, defaults.agent_ungated_floor_minutes,
-            defaults.noop_pause_after, defaults.ledger_days) == (24, 6, 15, 55, 6, 30)
+            defaults.noop_pause_after, defaults.ledger_days,
+            defaults.standing_interval_minutes) == (24, 6, 15, 55, 6, 30, 30)
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, True, "not-a-number", 525601])
+def test_standing_interval_setting_validation(value, clock):
+    with pytest.raises(ValueError, match="standing_interval_minutes"):
+        Policy.from_settings({"standing_interval_minutes": value}, clock=clock)
 
 
 @pytest.mark.parametrize("key", ["agent_can_create", "timezone", "quiet_hours", "probe_commands"])

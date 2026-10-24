@@ -9,6 +9,7 @@ import pytest
 
 from test_engine import admit, fold, engine, arm, start, end, session, KEY, GatewayCtx
 from heartbeat2 import governor
+from heartbeat2 import commands
 from heartbeat2.model import Session
 from heartbeat2.poller import Poller
 from heartbeat2.registration import Runtime, register
@@ -451,6 +452,81 @@ def test_R2_G12_scratch_clamp_visible(engine):
     assert result['clamped']['scratch']
     e.intake.on_session_end(session_id='sid',turn_id='turn',completed=True)
     assert len(e.store.get_wake(w.id).scratch)==4000
+
+
+def test_persistent_wake_survives_new_restart_and_fences_old_queued_turn(engine,monkeypatch):
+    e=engine
+    monkeypatch.setattr(commands,'session_env',lambda name: KEY if name=='HERMES_SESSION_KEY' else '')
+    runtime=NS(get_engine=lambda:e)
+    assert 'no automatic expiry' in commands.handle('standing on',runtime)
+    wake=next(w for w in e.store.list_wakes(KEY) if w.trigger_json.get('persistent'))
+    e.jitter=lambda:.9
+    e.clock.advance(1800)
+    e.tick()
+    assert len(e.ctx.calls)==1
+    queued=e.ctx.calls[-1][0]
+    e.intake.on_session_reset(old_session_id='sid',new_session_id='sid-new')
+    assert e.store.get_wake(wake.id).armed_session_id=='sid-new'
+
+    # A queued old-session injection must not overwrite the new binding or act.
+    e.intake.pre_llm_call(session_id='sid',turn_id='stale',user_message=queued,platform='telegram')
+    assert e.intake.transform_llm_output('stale answer',session_id='sid')=='[SILENT]'
+    assert e.store.get_session(KEY).current_session_id=='sid-new'
+    assert e.tool.handle({'action':'create','note':'must not be created','trigger':{'kind':'at','at':'in 1h'}},session_id='sid')['error']=='not_in_flight'
+    e.intake.on_session_end(session_id='sid',turn_id='stale',completed=True)
+    assert e.store.get_session(KEY).current_session_id=='sid-new'
+
+    # More than one interval of downtime still produces one coalesced admission.
+    e.clock.advance(7200)
+    e.close()
+    restarted=Poller(e.ctx,e.store,e.policy,e.clock,session_key_fn=lambda:KEY,
+                     paused=lambda:False,jitter=lambda:.9,compression_tip=lambda sid:sid)
+    restarted.tick()
+    resumed=restarted.store.get_wake(wake.id)
+    assert resumed.status=='active' and resumed.armed_session_id=='sid-new'
+    assert resumed.expires_at is None and resumed.max_fires is None
+    assert resumed.next_due_at==e.clock.now()+1800
+    assert len(e.ctx.calls)==2
+    assert restarted.store.get_wake(wake.id).eff_interval_s==1800
+
+    # The first, attempt-1 delivery is still queued but retired. Even after
+    # restart recovery increments the current attempt, it must remain silent.
+    restarted.intake.pre_llm_call(session_id='sid',turn_id='late-stale',user_message=queued,platform='telegram')
+    assert restarted.intake.transform_llm_output('stale after restart',session_id='sid')=='[SILENT]'
+    assert e.store.get_session(KEY).current_session_id=='sid-new'
+    restarted.intake.on_session_end(session_id='sid',turn_id='late-stale',completed=True)
+    assert len(e.ctx.calls)==2
+
+    message=e.ctx.calls[-1][0]
+    restarted.intake.pre_llm_call(session_id='sid-new',turn_id='repeat',user_message=message,platform='telegram')
+    result=restarted.tool.handle({'action':'respond','outcome':'no_change','notify':False,'summary':'nothing new'},session_id='sid-new')
+    assert result['ok']
+    restarted.intake.on_session_end(session_id='sid-new',turn_id='repeat',completed=True)
+    steady=restarted.store.get_wake(wake.id)
+    assert steady.status=='active' and steady.eff_interval_s==1800
+    assert steady.next_due_at==e.clock.now()+1800
+    restarted.close()
+
+
+@pytest.mark.parametrize('reason,policy_changes',[
+    ('quiet_hours',{'quiet_hours':'00:00-23:59'}),
+    ('daily_message_cap',{'max_model_wakes_per_day':24,'max_messages_per_day':0}),
+    ('busy',{}),
+])
+def test_persistent_wake_keeps_quiet_message_cap_and_busy_gates(engine,monkeypatch,reason,policy_changes):
+    e=engine
+    monkeypatch.setattr(commands,'session_env',lambda name: KEY if name=='HERMES_SESSION_KEY' else '')
+    assert 'no automatic expiry' in commands.handle('standing on',NS(get_engine=lambda:e))
+    wake=next(w for w in e.store.list_wakes(KEY) if w.trigger_json.get('persistent'))
+    e.policy=replace(e.policy,**policy_changes)
+    e.clock.advance(1800)
+    if reason=='busy':
+        current=e.store.get_session(KEY)
+        e.store.cas_session(KEY,{'busy_since':current.busy_since},busy_since=e.clock.now(),busy_epoch=e.epoch)
+    e.tick()
+    assert e.ctx.calls==[]
+    occurrence=e.store.list_occurrences(wake.id)[-1]
+    assert occurrence.error==reason
 
 
 def test_R2_G7_bad_probe_result_isolated(engine):

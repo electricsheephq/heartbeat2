@@ -116,6 +116,8 @@ class Tool:
             with e.store.atomic():
                 s = e.store.get_session(s.session_key)
                 flight = e.intake.flight_for(session_id, s.session_key)
+                if flight and flight.invalid:
+                    return dict(NOT_IN_FLIGHT)
                 evidence = self.owner_turn_evidence(session_id, flight)
                 created_in = 'wake_turn' if flight else 'human_turn'
                 if action == 'respond':
@@ -329,6 +331,7 @@ class Tool:
             'Due now; it fires on the next check.' if w.next_due_at<=e.clock.now() else f'Fires once at {local(w.next_due_at)}.']
         elif w.kind in RECURRING_KINDS:
             parts=[f'Next at {local(w.next_due_at)}'+(' (cron).' if w.kind=='cron' else f', then every {duration(w.eff_interval_s)}.')]
+            if w.trigger_json.get('persistent'): parts.append('Owner-enabled for this chat; no automatic expiry.')
         else:
             first=('Checks now' if w.next_due_at is None or w.next_due_at<=e.clock.now() else f'First check {local(w.next_due_at)}')
             lead=(f'{first}, then every {duration(w.trigger_json["check_every"])}' if w.kind in PROBE_KINDS else
