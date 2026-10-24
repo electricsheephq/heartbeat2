@@ -11,7 +11,7 @@ from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible
 
 DURATIONS = _DURATION.pattern+r'(?:\s*(?:,\s*)?(?:and\s*)?'+_DURATION.pattern+r')*'  # one way to split whitespace: linear
-HELP = ('/pulse status | list | ledger [7d] | why <id> | add in 2h <note> | '
+HELP = ('/pulse status | list | ledger [7d] | why <id> | standing on|off|status | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
         'pause|resume|cancel <id|all> [for 3d] | off|on | '
         'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
@@ -143,6 +143,44 @@ def _add(engine, session, text):
     return _item(engine, created)+_clamps(result.clamped)+'\n'+engine.tool.cache_result(created)+'\n'+engine.tool.receipt(created,session)
 
 
+def _standing(engine, session, action):
+    """Owner-opted, chat-scoped persistent cadence; generic delivery gates remain authoritative."""
+    wakes=[w for w in engine.store.list_wakes(session.session_key)
+           if w.trigger_json.get('persistent')]
+    live=[w for w in wakes if w.status in {'active','paused','proposed'}]
+    if action=='status':
+        return _item(engine,live[-1]) if live else 'No persistent wake is enabled in this chat.'
+    if action=='off':
+        for wake in live:
+            if engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,
+                                     status='cancelled',status_reason='command'):
+                engine.cancel_occurrences(wake.id,'cancelled')
+        return f'{live[-1].title or "Persistent wake"} stopped for this chat.' if live else 'No persistent wake is enabled in this chat.'
+    if action!='on': raise ValueError('standing expects on, off, or status')
+    if session.chat_type!='dm': raise ValueError('persistent wakes are restricted to private DMs, even when dm_only is disabled')
+    if live: return _item(engine,live[-1])+'\nAlready enabled; use /pulse resume <id> if paused or /pulse standing off to stop it.'
+    interval_minutes=engine.policy.standing_interval_minutes
+    if interval_minutes<engine.policy.min_interval_minutes:
+        raise ValueError(f'standing_interval_minutes ({interval_minutes}) is below min_interval_minutes ({engine.policy.min_interval_minutes}); increase the standing interval or lower the floor')
+    interval_seconds=interval_minutes*60
+    wake=Wake(session.session_key,
+        'Check whether there is something genuinely useful to offer in this private conversation. Silence is fine.',
+        'every',creator='user',created_in='command',platform=session.platform,
+        chat_type=session.chat_type,chat_id=session.chat_id,
+        armed_session_id=session.current_session_id,title=f'Persistent {interval_minutes}-minute wake',
+        reason='Explicit owner opt-in for this private conversation.',
+        trigger_json={'every':f'{interval_minutes}m','builtin':True,'persistent':True},
+        base_interval_s=interval_seconds,eff_interval_s=interval_seconds,
+        next_due_at=engine.clock.now()+interval_seconds)
+    _activation(engine,session,wake)
+    bounded=engine.policy.clamp(wake).wake
+    if bounded.base_interval_s!=interval_seconds or bounded.eff_interval_s!=interval_seconds:
+        raise ValueError('the configured standing interval is infeasible under the current interval and cache floors')
+    wake=engine.store.create_wake(bounded)
+    engine.signal()
+    return _item(engine,wake)+'\nOwner opt-in is limited to this DM. It has no automatic expiry; quiet hours, daily caps, mute, busy-turn, error and no-op pause controls still apply.'
+
+
 def _clamps(clamped):
     return ''.join(f'\nClamped {key}: {value}' for key,value in clamped.items())
 
@@ -209,6 +247,7 @@ def handle(raw_args, runtime):
                 if not 1 <= days <= engine.policy.ledger_days: raise ValueError('ledger range exceeds retained days')
                 return _ledger(engine,key,days)
             if action == 'add': return _add(engine,session,rest)
+            if action == 'standing': return _standing(engine,session,rest or 'status')
             if action in {'off','on'} and not rest:
                 if not engine.store.cas_session(key, {'enabled':session.enabled}, enabled=action=='on'):
                     raise ValueError('concurrent session change')

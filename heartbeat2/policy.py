@@ -72,6 +72,7 @@ class Policy:
     max_messages_per_day: int = 6
     max_unanswered: int = 2
     min_interval_minutes: int = 15
+    standing_interval_minutes: int = 30
     agent_ungated_floor_minutes: int = 55
     wake_spacing_minutes: int = 10
     probe_floor_seconds: int = 60
@@ -126,7 +127,10 @@ class Policy:
             elif isinstance(default, int):
                 if isinstance(value, bool):
                     raise ValueError(f"invalid integer setting: {f.name}")
-                number = float(value)
+                try:
+                    number = float(value)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(f"invalid integer setting: {f.name}") from exc
                 if not math.isfinite(number) or not number.is_integer() or number < 0:
                     raise ValueError(f"invalid nonnegative integer setting: {f.name}")
                 value = int(number)
@@ -142,7 +146,7 @@ class Policy:
                      profile_timezone=profile_timezone)
         if result.agent_can_create not in {"yes", "ask_first", "no"}:
             raise ValueError("agent_can_create must be yes, ask_first, or no")
-        for name in ("min_interval_minutes", "agent_ungated_floor_minutes", "probe_floor_seconds",
+        for name in ("min_interval_minutes", "standing_interval_minutes", "agent_ungated_floor_minutes", "probe_floor_seconds",
                      "max_lifetime_days", "max_reminder_days", "checkin_after_hours", "noop_backoff_factor",
                      "noop_max_backoff_hours", "ledger_days"):
             if getattr(result, name) < 1:
@@ -152,6 +156,7 @@ class Policy:
         for name, maximum in {
             "ledger_days": 36500,
             "min_interval_minutes": 525600,
+            "standing_interval_minutes": 525600,
             "agent_ungated_floor_minutes": 525600,
             "noop_backoff_factor": 100,
             "noop_max_backoff_hours": 8760,

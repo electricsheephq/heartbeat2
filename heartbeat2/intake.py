@@ -470,6 +470,17 @@ class Intake:
                     elif row.get('platform_message_id'):
                         owner_seen=True
                         self.count(key,row['platform_message_id'],platform)
+        if parsed:
+            wid,dedupe,attempt=parsed
+            w=s.get_wake(wid)
+            if (w and w.session_key==key and w.trigger_json.get('builtin') and
+                    w.armed_session_id and w.armed_session_id!=session_id and
+                    e.compression_tip(w.armed_session_id)!=session_id):
+                # A queued turn from the retired session is not evidence that the
+                # chat moved back. Fence it before updating Session.current_session_id.
+                self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,
+                                                invalid=True,replay=True)
+                return None
         if owner_seen: self.owner_turns[session_id]=turn_id
         previous=self.flights.get(session_id)
         if previous and turn_id and previous.turn_id and previous.turn_id!=turn_id:
@@ -847,7 +858,7 @@ class Intake:
         if not key: return None
         with s.atomic():
             session=s.get_session(key)
-            if session:
+            if session and session.current_session_id==session_id:
                 s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             self.flights.pop(session_id,None)
             if f is None or f.invalid: return None

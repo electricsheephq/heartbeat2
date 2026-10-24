@@ -64,6 +64,33 @@ def test_bad_live_setting_keeps_policy_and_fires(runtime, key, value):
     assert 'settings_error' not in e.tool.handle({'action': 'list'})
 
 
+def test_standing_interval_update_does_not_rewrite_existing_wake(runtime):
+    runtime.ctx.settings['standing_interval_minutes'] = 45
+    e = bind(runtime)
+    assert e.policy.standing_interval_minutes == 45
+    assert '45-minute' in commands.handle('standing on', runtime)
+    wake, = [w for w in e.store.list_wakes(KEY) if w.trigger_json.get('persistent')]
+    assert wake.base_interval_s == wake.eff_interval_s == 2700
+
+    runtime.ctx.settings['standing_interval_minutes'] = 60
+    e.refresh()
+    unchanged = e.store.get_wake(wake.id)
+    assert e.policy.standing_interval_minutes == 60
+    assert unchanged.base_interval_s == unchanged.eff_interval_s == 2700
+    assert unchanged.next_due_at == wake.next_due_at
+
+    e.clock.advance(2700)
+    e.tick()
+    assert len(e.ctx.calls) == 1
+    start(e)
+    end(e, outcome='no_change')
+    rescheduled = e.store.get_wake(wake.id)
+    assert rescheduled.status == 'active'
+    assert rescheduled.base_interval_s == rescheduled.eff_interval_s == 2700
+    assert rescheduled.next_due_at == e.clock.now() + 2700
+    assert 'settings_error' not in e.tool.handle({'action': 'list'})
+
+
 @pytest.mark.parametrize('key,value', BAD_SETTINGS)
 def test_bad_startup_setting_builds_engine_and_hooks(runtime, key, value):
     runtime.ctx.settings[key] = value
@@ -299,6 +326,9 @@ def test_settings_descriptions_and_draft_version():
     assert top.split()[1] == manifest['version'], (top, manifest['version'])
     for key, field in manifest['config_schema'].items():
         assert field['description'].rstrip('.') != field['label'], key
+    standing = manifest['config_schema']['standing_interval_minutes']
+    assert standing['type'] == 'int'
+    assert standing['default'] == Policy().standing_interval_minutes == 30
 
 
 def test_command_watcher_docs_do_not_offer_proxy_config_workaround():
