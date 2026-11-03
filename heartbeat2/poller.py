@@ -105,8 +105,9 @@ class Poller:
             return False
         self._lock_file=f
         try:
-            # Another process held the lock since this poller last did: recover as a takeover.
-            if self.store.get_meta('epoch') not in (None,'',self.epoch): self.process_start=True
+            # Another process held the lock since this one last did: recover as a takeover.
+            # (An in-process replacement shares the pid and keeps its live turns.)
+            if self.store.get_meta('poller_pid') not in (None,'',str(os.getpid())): self.process_start=True
             self.reconcile()
         except BaseException:
             self.release()

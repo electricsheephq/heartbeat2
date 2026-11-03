@@ -258,6 +258,7 @@ def test_reacquire_after_another_holder_recovers_its_turns(engine):
     other = Poller(e.ctx, other_store, e.policy, e.clock, paused=lambda: False)
     try:
         assert other.acquire()  # the profile's own gateway took over, then crashed mid-turn
+        other_store.set_meta('poller_pid', '1')  # it ran in another process
         assert other_store.claim(w.id, o.dedupe_key, epoch=other.epoch, pid=1)
         session(e, busy_since=e.clock.now(), busy_epoch=other.epoch)
     finally:
