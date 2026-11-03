@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 — 2026-11-03
+
+- Only the gateway that serves a profile now opens that profile's schedule, holds its poller lock or delivers its wakes. A Hermes gateway can load every profile's plugins when it starts, and it gives its message injector to all of them. Before, a gateway that did not serve a profile could tick that profile's schedule and send a due wake through itself; Hermes accepted the wake and then dropped it, so it was retried and could be given up after three tries. HeartBeat now asks the gateway with Hermes's own routing rule; a multiplex host must also have admitted the profile (#113).
+- A gateway that stops serving a profile mid-run releases the lock; that profile's due wakes wait for its own gateway, and a wake claimed just before is given back unsent. A wake turn already running there still finishes its bookkeeping. When the gateway serves the profile again, it recovers turns left by a process that held the lock in between (#113).
+- `/pulse status` names the reason when the gateway does not serve the profile, or when HeartBeat cannot tell (#113).
+
 ## 0.2.1 — 2026-10-20
 
 - A one-time reminder written as `{"kind": "at", "after": "20m"}` is now accepted as `in 20m`, the same alias as #104. Before, it failed with "at requires a time", and the model could fall back to a recurring wake that the 55-minute agent floor delayed (#106).

@@ -847,7 +847,9 @@ class Intake:
         if not key: return None
         with s.atomic():
             session=s.get_session(key)
-            if session:
+            # Clear only this engine's busy mark: a late end in a gateway that lost the profile
+            # must not free a turn its successor is running.
+            if session and session.busy_epoch in (None,'',e.epoch):
                 s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             self.flights.pop(session_id,None)
             if f is None or f.invalid: return None

@@ -26,6 +26,7 @@ FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_message_ca
 # Every claim records its poller's epoch; an epoch outside this set was minted
 # by another (for a startup replay: the crashed) process.
 LOCAL_EPOCHS = set()
+CREATED_EPOCHS = set()  # Every poller epoch this process made; never discarded.
 
 
 def check_paused():
@@ -53,6 +54,7 @@ class Poller:
         self.probe_runner=probe_runner or self._probe
         self.epoch=uuid.uuid4().hex
         LOCAL_EPOCHS.add(self.epoch)
+        CREATED_EPOCHS.add(self.epoch)
         self.log=LOG
         self.closed=False
         self.process_start=True
@@ -91,8 +93,8 @@ class Poller:
             return False
 
     def eligible(self):
-        manager=getattr(self.ctx,'_manager',None)
-        return manager is not None and getattr(manager,'_cli_ref',None) is None and bool(getattr(manager,'has_gateway_message_injector',False))
+        from .serving import state,SERVED
+        return state(getattr(self.ctx,'_manager',None))==SERVED
 
     def acquire(self):
         if self.closed or not self.eligible(): return False
@@ -105,6 +107,9 @@ class Poller:
             return False
         self._lock_file=f
         try:
+            # Another process held the lock since this one last did: recover as a takeover.
+            # (An in-process replacement keeps its live turns.)
+            if self.store.get_meta('epoch') not in (None,'',*CREATED_EPOCHS): self.process_start=True
             self.reconcile()
         except BaseException:
             self.release()
@@ -256,6 +261,7 @@ class Poller:
                 s.set_meta('probing_until','')
                 s.set_meta('last_tick_at',str(self.clock.now()))
                 s.set_meta('last_tick_monotonic',str(self.clock.monotonic()))
+            if not self.eligible(): return  # Probes can block; the home may be unserved by now.
             with s.atomic():
                 for w in s.list_wakes(): self.terminal_one_shot(w)
                 self.times()
@@ -264,6 +270,7 @@ class Poller:
                     s.gc(ledger_days=self.policy.ledger_days,timezone=self.policy.resolved_timezone())
                 s.set_meta('last_error','')
             for o in s.list_occurrences(state='pending'):
+                if not self.eligible(): break
                 w=s.get_wake(o.wake_id)
                 cache_line=self.cache_line(w)  # Pricing may fetch metadata; never hold the write lock.
                 self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
@@ -529,6 +536,8 @@ class Poller:
         return '',False,None
 
     def dispatch(self,o,*,cache_line=None):
+        # The served set can shrink mid-tick; an unserved home's wake stays untouched for its own gateway.
+        if not self.eligible(): return
         s=self.store
         w=s.get_wake(o.wake_id)
         session=s.get_session(w.session_key)
@@ -589,6 +598,12 @@ class Poller:
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-1,
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
              after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,cache_line=cache_line,marker_tag=tag)
+        if not self.eligible():
+            # Lost the home after claiming: give the claim back unsent, as it was.
+            if health:
+                health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
+            s.refund(w.id,o.dedupe_key,attempt=o.attempt,error=held_by)
+            return
         try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
         except Exception: accepted=False
         if accepted:
@@ -692,7 +707,9 @@ class Poller:
             return {'state':'alive','reason':s.get_meta('last_error') or ''}
         runtime=getattr(self,'runtime_status',None)
         local=runtime() if runtime else None
-        reason=s.get_meta('last_error') or (local or {}).get('reason') or ('no gateway in this process' if not self.eligible() else 'injection disabled' if not self.injection_allowed() else '')
+        from .serving import state,REASONS
+        here=state(getattr(self.ctx,'_manager',None))
+        reason=s.get_meta('last_error') or (local or {}).get('reason') or REASONS.get(here) or ('injection disabled' if not self.injection_allowed() else '')
         stamp=last or started
         if not last and started and now-float(started)<=15: return {'state':'alive','reason':'starting'}
         return {'state':'stalled' if stamp else 'not running','since':float(stamp) if stamp else None,'reason':reason}
