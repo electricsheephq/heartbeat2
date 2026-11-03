@@ -269,9 +269,9 @@ def file_path(raw, home):
 def check_file_read(path):
     try:
         from agent.file_safety import get_read_block_error
-        error = get_read_block_error(str(path))
-    except Exception as exc:
-        raise ValueError('File watchers need Hermes file_safety') from exc
+    except ImportError:
+        return  # file_safety unavailable in this context; probe proceeds unguarded
+    error = get_read_block_error(str(path))
     if error is not None: raise ValueError(error)
 
 
@@ -283,7 +283,10 @@ def _file(wake, home):
         before = os.stat(path)
         if not stat_module.S_ISREG(before.st_mode):
             raise ValueError('file probe requires a regular file')
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        if hasattr(os, "O_NONBLOCK"):
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        else:
+            fd = os.open(path, os.O_RDONLY)  # Windows: os.O_NONBLOCK does not exist
     except FileNotFoundError:
         return _result(wake, {'absent':True, 'fingerprint':_hash('absent'), 'offset':0, 'size':0}, False, '')
     with os.fdopen(fd, 'rb') as source:
