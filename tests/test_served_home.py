@@ -294,3 +294,20 @@ def test_turn_in_flight_when_the_home_is_lost_still_settles(tmp_path, clock):
         assert len(e.ctx.calls) == 1
     finally:
         rt.close()
+
+
+def test_late_end_after_unserve_keeps_the_successors_turn_busy(tmp_path, clock):
+    rt = Runtime(GatewayCtx(tmp_path, settings=SETTINGS), clock=clock)
+    try:
+        e = bind(rt)
+        arm(e)
+        e.tick()
+        rt.hook('pre_llm_call', session_id='sid', turn_id='turn', user_message=e.ctx.calls[-1][0], platform='telegram')
+        e.ctx.runner.served = False
+        # The profile's own gateway (another process) now runs a turn in the same chat.
+        session(e, busy_since=e.clock.now(), busy_epoch='successor-engine')
+        rt.hook('on_session_end', session_id='sid', turn_id='turn', completed=True, failed=False, interrupted=False)
+        s = e.store.get_session(KEY)
+        assert (s.busy_since, s.busy_epoch) == (e.clock.now(), 'successor-engine')
+    finally:
+        rt.close()
