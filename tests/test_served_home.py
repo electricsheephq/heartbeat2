@@ -285,7 +285,8 @@ def test_turn_in_flight_when_the_home_is_lost_still_settles(tmp_path, clock):
         rt.hook('pre_llm_call', session_id='sid', turn_id='turn', user_message=text, platform='telegram')
         rt.hook('post_api_request', session_id='sid', turn_id='turn', usage={})
         assert json.loads(rt.tool(dict(action='respond', outcome='no_change', notify=False, summary='same'), session_id='sid'))['ok']
-        rt.hook('transform_llm_output', response_text='Chatty output', session_id='sid', turn_id='turn')
+        # A silent verdict stays silent: the raw text never reaches the chat.
+        assert rt.hook('transform_llm_output', response_text='Chatty output', session_id='sid', turn_id='turn') == '[SILENT]'
         rt.hook('on_session_end', session_id='sid', turn_id='turn', completed=True, failed=False, interrupted=False)
         o, = e.store.list_occurrences()
         assert o.state == 'done'
