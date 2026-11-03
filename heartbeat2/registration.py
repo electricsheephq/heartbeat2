@@ -57,6 +57,7 @@ class Runtime:
         self._thread=None
         self._threads=[]
         self._reconciled=False
+        self._served_once=False
         self._runner=None
         self._last_tick_monotonic=None
         self._last_bootstrap_error=''
@@ -120,8 +121,9 @@ class Runtime:
         """Why this runtime must not act here, or ''. A gateway that never served this home touches
         nothing for it; one that served it earlier still settles that profile's own turns. Its
         poller stays off either way."""
-        if self._engine is not None: return ''
+        if self._served_once: return ''
         here=serving.state(self.ctx._manager)
+        if here==serving.SERVED: self._served_once=True
         return serving.REASONS[here] if here in (serving.FOREIGN,serving.UNKNOWN) else ''
 
     def hook(self,name,**kwargs):
@@ -202,6 +204,7 @@ class Runtime:
                         if runner: runner.release()
                         stop.wait(self.bootstrap_interval)
                         continue
+                    self._served_once=True
                     if runner is None:
                         from .poller import Poller
                         e=self.get_engine()

@@ -278,6 +278,7 @@ def test_turn_in_flight_when_the_home_is_lost_still_settles(tmp_path, clock):
     rt = Runtime(GatewayCtx(tmp_path, settings=SETTINGS), clock=clock)
     try:
         e = bind(rt)
+        assert rt.inactive() == ''  # this gateway serves the home
         arm(e)
         e.tick()
         text = e.ctx.calls[-1][0]
@@ -300,6 +301,7 @@ def test_late_end_after_unserve_keeps_the_successors_turn_busy(tmp_path, clock):
     rt = Runtime(GatewayCtx(tmp_path, settings=SETTINGS), clock=clock)
     try:
         e = bind(rt)
+        assert rt.inactive() == ''
         arm(e)
         e.tick()
         rt.hook('pre_llm_call', session_id='sid', turn_id='turn', user_message=e.ctx.calls[-1][0], platform='telegram')
@@ -309,5 +311,20 @@ def test_late_end_after_unserve_keeps_the_successors_turn_busy(tmp_path, clock):
         rt.hook('on_session_end', session_id='sid', turn_id='turn', completed=True, failed=False, interrupted=False)
         s = e.store.get_session(KEY)
         assert (s.busy_since, s.busy_epoch) == (e.clock.now(), 'successor-engine')
+    finally:
+        rt.close()
+
+
+def test_engine_opened_before_the_injector_does_not_count_as_served(tmp_path, clock):
+    ctx = GatewayCtx(tmp_path, settings=SETTINGS)
+    ctx._manager.has_gateway_message_injector = False  # gateway still starting
+    rt = Runtime(ctx, clock=clock)
+    try:
+        rt.hook('kanban_task_completed', task_id='t1', board='main')  # records, as before
+        assert rt._engine is not None
+        ctx._manager.has_gateway_message_injector = True
+        ctx.runner.served = False
+        assert rt.hook('kanban_task_completed', task_id='t2', board='main') is None
+        assert len(rt.get_engine().store.pending_events()) == 1
     finally:
         rt.close()
