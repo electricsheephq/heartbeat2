@@ -91,8 +91,8 @@ class Poller:
             return False
 
     def eligible(self):
-        manager=getattr(self.ctx,'_manager',None)
-        return manager is not None and getattr(manager,'_cli_ref',None) is None and bool(getattr(manager,'has_gateway_message_injector',False))
+        from .serving import state,SERVED
+        return state(getattr(self.ctx,'_manager',None))==SERVED
 
     def acquire(self):
         if self.closed or not self.eligible(): return False
@@ -571,6 +571,8 @@ class Poller:
         if cache_line is None:
             cache_line='' if s.connection.in_transaction else self.cache_line(w)
         held_by=o.error  # Claim clears the stored deferral; retain it for this prompt.
+        # The served set can shrink mid-tick; an unserved home's wake stays due for its own gateway.
+        if not self.eligible(): return
         if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
         o=s.get_occurrence(w.id,o.dedupe_key)
         health=json.loads(s.get_meta('provider_health') or '{}')
@@ -692,7 +694,9 @@ class Poller:
             return {'state':'alive','reason':s.get_meta('last_error') or ''}
         runtime=getattr(self,'runtime_status',None)
         local=runtime() if runtime else None
-        reason=s.get_meta('last_error') or (local or {}).get('reason') or ('no gateway in this process' if not self.eligible() else 'injection disabled' if not self.injection_allowed() else '')
+        from .serving import state,REASONS
+        here=state(getattr(self.ctx,'_manager',None))
+        reason=s.get_meta('last_error') or (local or {}).get('reason') or REASONS.get(here) or ('injection disabled' if not self.injection_allowed() else '')
         stamp=last or started
         if not last and started and now-float(started)<=15: return {'state':'alive','reason':'starting'}
         return {'state':'stalled' if stamp else 'not running','since':float(stamp) if stamp else None,'reason':reason}

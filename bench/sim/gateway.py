@@ -26,7 +26,9 @@ from .metrics import TokenModel
 
 class Context:
     def __init__(self, gateway, profile, home):
-        self._manager=SimpleNamespace(home_path=home,scope_key=str(home),_cli_ref=None,has_gateway_message_injector=True)
+        runner=SimpleNamespace(_served_profile_for_home=lambda served: profile)
+        self._manager=SimpleNamespace(home_path=home,scope_key=str(home),_cli_ref=None,has_gateway_message_injector=True,
+                                      _gateway_message_injector=(runner,None))
         self.gateway, self.profile = gateway, profile
     def _gateway_injection_allowed(self): return True
     def inject_message(self, text, *, session_key):

@@ -18,12 +18,22 @@ from heartbeat2.tool import SCHEMA
 KEY = 'agent:telegram:dm:unit'
 
 
+class Runner:
+    """The gateway runner that owns the injector; serves its home unless told otherwise."""
+    def __init__(self):
+        self.served = True
+    def _served_profile_for_home(self, home):
+        return 'unit' if self.served else None
+
+
 class GatewayCtx(FakeCtx):
     def __init__(self, home, *, cli=False, settings=None):
         super().__init__()
+        self.runner = Runner()
         self._manager = SimpleNamespace(home_path=Path(home), scope_key=str(home),
                                         _cli_ref=object() if cli else None,
-                                        has_gateway_message_injector=True)
+                                        has_gateway_message_injector=True,
+                                        _gateway_message_injector=(self.runner, None))
         self.settings = settings or {}
         self.allowed = True
         self.calls = []

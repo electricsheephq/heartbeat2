@@ -2,12 +2,15 @@
 
 One daemon per immutable manager scope, plus a cross-process flock. Hooks in
 non-gateway processes may still write inbox events; they never run the poller.
+A gateway that does not serve the profile (Hermes loads every profile's plugins
+at boot) opens nothing, holds no lock and delivers nothing for it.
 """
 from contextlib import contextmanager
 from pathlib import Path
 import logging
 import json
 import threading
+from . import serving
 
 LOG=logging.getLogger('heartbeat2')
 _RUNTIMES={}
@@ -115,6 +118,7 @@ class Runtime:
 
     def hook(self,name,**kwargs):
         try:
+            if serving.foreign(self.ctx._manager): return None
             with home_scope(self.home):
                 if name=='pre_llm_call':
                     from .intake import delegated_child
@@ -130,12 +134,14 @@ class Runtime:
 
     def tool(self,args,**kwargs):
         try:
+            if serving.foreign(self.ctx._manager): return json.dumps({'error':'engine_unavailable','reason':serving.REASONS[serving.FOREIGN]})
             with home_scope(self.home): return json.dumps(self.get_engine().tool.handle(args,**kwargs),ensure_ascii=False)
         except Exception:
             LOG.warning('heartbeat2 tool adapter failed',exc_info=True)
             return json.dumps({'error':'engine_unavailable'})
 
     def command(self,raw_args):
+        if serving.foreign(self.ctx._manager): return f'HeartBeat 2.0 is inactive here: {serving.REASONS[serving.FOREIGN]}.'
         with home_scope(self.home):
             from .commands import handle
             return handle(raw_args,self)
@@ -159,6 +165,8 @@ class Runtime:
     def status(self):
         if self._last_bootstrap_error: return {'state':'not running','reason':self._last_bootstrap_error}
         if self._thread is None or not self._thread.is_alive(): return {'state':'not running','reason':'bootstrap thread stopped'}
+        here=serving.state(self.ctx._manager)
+        if here in (serving.FOREIGN,serving.UNKNOWN): return {'state':'not running','reason':serving.REASONS[here]}
         if self._runner is None or self._runner._lock_file is None:
             return {'state':'not running','reason':'lock held elsewhere' if self._runner else 'bootstrap starting'}
         return None
@@ -179,8 +187,9 @@ class Runtime:
         try:
             with home_scope(self.home):
                 while not stop.is_set():
-                    manager=self.ctx._manager
-                    if getattr(manager,'_cli_ref',None) is not None or not getattr(manager,'has_gateway_message_injector',False):
+                    # Hermes stamps its injector on managers it does not serve; ask every step.
+                    if serving.state(self.ctx._manager)!=serving.SERVED:
+                        if runner: runner.release()
                         stop.wait(self.bootstrap_interval)
                         continue
                     if runner is None:
