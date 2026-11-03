@@ -26,6 +26,7 @@ FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_message_ca
 # Every claim records its poller's epoch; an epoch outside this set was minted
 # by another (for a startup replay: the crashed) process.
 LOCAL_EPOCHS = set()
+CREATED_EPOCHS = set()  # Every poller epoch this process made; never discarded.
 
 
 def check_paused():
@@ -53,6 +54,7 @@ class Poller:
         self.probe_runner=probe_runner or self._probe
         self.epoch=uuid.uuid4().hex
         LOCAL_EPOCHS.add(self.epoch)
+        CREATED_EPOCHS.add(self.epoch)
         self.log=LOG
         self.closed=False
         self.process_start=True
@@ -106,8 +108,8 @@ class Poller:
         self._lock_file=f
         try:
             # Another process held the lock since this one last did: recover as a takeover.
-            # (An in-process replacement shares the pid and keeps its live turns.)
-            if self.store.get_meta('poller_pid') not in (None,'',str(os.getpid())): self.process_start=True
+            # (An in-process replacement keeps its live turns.)
+            if self.store.get_meta('epoch') not in (None,'',*CREATED_EPOCHS): self.process_start=True
             self.reconcile()
         except BaseException:
             self.release()

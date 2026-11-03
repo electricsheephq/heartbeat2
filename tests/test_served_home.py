@@ -15,10 +15,11 @@ import pytest
 
 from heartbeat2 import serving
 from heartbeat2.model import Session
-from heartbeat2.registration import register
+from heartbeat2.registration import Runtime, register
 from heartbeat2.store import Store
 from heartbeat2.poller import Poller
 from test_engine import GatewayCtx, KEY, arm, engine, pending, session  # noqa: F401 (fixture)
+from test_v014a import bind
 
 SETTINGS = {'quiet_hours': '', 'timezone': 'UTC'}
 
@@ -100,6 +101,8 @@ def test_unserved_mid_run_releases_lock_and_holds_due_wakes(tmp_path, clock):
         ctx.runner.served = True
         clock.advance(10)
         assert ctx.injected.wait(timeout=2)
+        clock.advance(10)
+        time.sleep(.2)
         assert len(ctx.calls) == 1
     finally:
         unload(ctx)
@@ -115,6 +118,7 @@ def test_unknown_served_check_fails_closed_and_warns_once(tmp_path, clock, caplo
             time.sleep(.2)
             assert rt.hook('pre_llm_call', session_id='sid', turn_id='turn', platform='telegram') is None
             assert rt.status()['reason'] == serving.REASONS[serving.UNKNOWN]
+            assert serving.REASONS[serving.UNKNOWN] in rt.command('status')
             assert not (tmp_path/'plugin-data').exists()
         finally:
             unload(ctx)
@@ -258,7 +262,7 @@ def test_reacquire_after_another_holder_recovers_its_turns(engine):
     other = Poller(e.ctx, other_store, e.policy, e.clock, paused=lambda: False)
     try:
         assert other.acquire()  # the profile's own gateway took over, then crashed mid-turn
-        other_store.set_meta('poller_pid', '1')  # it ran in another process
+        other_store.set_meta('epoch', 'epoch-of-another-process')
         assert other_store.claim(w.id, o.dedupe_key, epoch=other.epoch, pid=1)
         session(e, busy_since=e.clock.now(), busy_epoch=other.epoch)
     finally:
@@ -267,3 +271,25 @@ def test_reacquire_after_another_holder_recovers_its_turns(engine):
     after = e.store.get_occurrence(w.id, o.dedupe_key)
     assert after.state == 'pending' and after.error == 'restart_refund'
     assert e.store.get_session(KEY).busy_since is None
+
+
+def test_turn_in_flight_when_the_home_is_lost_still_settles(tmp_path, clock):
+    # The gateway served the home and sent the wake; the profile's own turn must still settle here.
+    rt = Runtime(GatewayCtx(tmp_path, settings=SETTINGS), clock=clock)
+    try:
+        e = bind(rt)
+        arm(e)
+        e.tick()
+        text = e.ctx.calls[-1][0]
+        e.ctx.runner.served = False
+        rt.hook('pre_llm_call', session_id='sid', turn_id='turn', user_message=text, platform='telegram')
+        rt.hook('post_api_request', session_id='sid', turn_id='turn', usage={})
+        assert json.loads(rt.tool(dict(action='respond', outcome='no_change', notify=False, summary='same'), session_id='sid'))['ok']
+        rt.hook('transform_llm_output', response_text='Chatty output', session_id='sid', turn_id='turn')
+        rt.hook('on_session_end', session_id='sid', turn_id='turn', completed=True, failed=False, interrupted=False)
+        o, = e.store.list_occurrences()
+        assert o.state == 'done'
+        assert e.store.get_session(KEY).busy_since is None
+        assert len(e.ctx.calls) == 1
+    finally:
+        rt.close()

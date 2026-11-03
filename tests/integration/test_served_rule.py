@@ -17,12 +17,16 @@ def _injection_mixin():
         pytest.skip('Hermes is not importable in this venv')
 
 
-def test_served_state_follows_hermes_routing_rule(tmp_path):
+def test_served_state_follows_hermes_routing_rule(tmp_path, monkeypatch):
     Mixin = _injection_mixin()
-    from hermes_constants import get_routing_process_hermes_home
-    home = Path(get_routing_process_hermes_home())
+    import hermes_constants
+    home = tmp_path/'home'
+    home.mkdir()
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    monkeypatch.setattr(hermes_constants, '_PINNED_PROCESS_HERMES_HOME', None)
+    assert Path(hermes_constants.get_routing_process_hermes_home()).resolve() == home.resolve()
     other = home/'profiles'/'hb2served'
-    other.mkdir(parents=True, exist_ok=True)
+    other.mkdir(parents=True)
     (other/'config.yaml').write_text('model: test\n')
     (tmp_path/'alias').symlink_to(home)
 

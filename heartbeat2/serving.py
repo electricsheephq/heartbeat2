@@ -32,7 +32,7 @@ def state(manager):
             if homes is None: return FOREIGN
             from hermes_constants import hermes_home_key
             key=hermes_home_key(manager.home_path)
-            if not any(hermes_home_key(home)==key for home in homes.values()): return FOREIGN
+            if not any(hermes_home_key(home)==key for home in tuple(homes.values())): return FOREIGN
         return SERVED
     except Exception:
         key=str(getattr(manager,'scope_key',''))

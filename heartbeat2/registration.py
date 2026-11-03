@@ -116,9 +116,17 @@ class Runtime:
                 self._engine.runtime_status=self.status
             return self._engine
 
+    def inactive(self):
+        """Why this runtime must not act here, or ''. A gateway that never served this home touches
+        nothing for it; one that served it earlier still settles that profile's own turns. Its
+        poller stays off either way."""
+        if self._engine is not None: return ''
+        here=serving.state(self.ctx._manager)
+        return serving.REASONS[here] if here in (serving.FOREIGN,serving.UNKNOWN) else ''
+
     def hook(self,name,**kwargs):
         try:
-            if serving.foreign(self.ctx._manager): return None
+            if self.inactive(): return None
             with home_scope(self.home):
                 if name=='pre_llm_call':
                     from .intake import delegated_child
@@ -134,14 +142,16 @@ class Runtime:
 
     def tool(self,args,**kwargs):
         try:
-            if serving.foreign(self.ctx._manager): return json.dumps({'error':'engine_unavailable','reason':serving.REASONS[serving.FOREIGN]})
+            reason=self.inactive()
+            if reason: return json.dumps({'error':'engine_unavailable','reason':reason})
             with home_scope(self.home): return json.dumps(self.get_engine().tool.handle(args,**kwargs),ensure_ascii=False)
         except Exception:
             LOG.warning('heartbeat2 tool adapter failed',exc_info=True)
             return json.dumps({'error':'engine_unavailable'})
 
     def command(self,raw_args):
-        if serving.foreign(self.ctx._manager): return f'HeartBeat 2.0 is inactive here: {serving.REASONS[serving.FOREIGN]}.'
+        reason=self.inactive()
+        if reason: return f'HeartBeat 2.0 is inactive here: {reason}.'
         with home_scope(self.home):
             from .commands import handle
             return handle(raw_args,self)
