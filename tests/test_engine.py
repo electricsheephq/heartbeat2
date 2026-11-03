@@ -19,17 +19,19 @@ KEY = 'agent:telegram:dm:unit'
 
 
 class Runner:
-    """The gateway runner that owns the injector; serves its home unless told otherwise."""
-    def __init__(self):
+    """The gateway runner that owns the injector: a standalone gateway serving its launch home."""
+    def __init__(self, home):
+        self.home = Path(home)
         self.served = True
+        self.config = SimpleNamespace(multiplex_profiles=False)
     def _served_profile_for_home(self, home):
-        return 'unit' if self.served else None
+        return 'unit' if self.served and Path(home) == self.home else None
 
 
 class GatewayCtx(FakeCtx):
     def __init__(self, home, *, cli=False, settings=None):
         super().__init__()
-        self.runner = Runner()
+        self.runner = Runner(home)
         self._manager = SimpleNamespace(home_path=Path(home), scope_key=str(home),
                                         _cli_ref=object() if cli else None,
                                         has_gateway_message_injector=True,

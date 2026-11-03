@@ -71,7 +71,7 @@ def test_real_loader_worker_registration_and_same_session_silence(tmp_path, monk
         def inject(**kwargs):
             calls.append(kwargs)
             return True
-        runner = NS(_served_profile_for_home=lambda served: 'default')
+        runner = NS(_served_profile_for_home=lambda served: 'default' if Path(served) == Path(manager.home_path) else None)
         manager.set_gateway_message_injector(runner,inject)
         engine = runtime.get_engine()
         engine.paused = lambda: False
