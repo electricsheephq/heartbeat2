@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3 — 2026-11-09
+
+- `/pulse status`, `/pulse list` and the ledger now shorten a long note at a whole word and mark the cut with "…". Before, they cut mid-word (for example "…helpful to offer. Sile"). Titles that `/pulse add` stores from a long note are shortened the same way.
+
 ## 0.2.2 — 2026-11-03
 
 - Only the gateway that serves a profile now opens that profile's schedule, holds its poller lock or delivers its wakes. A Hermes gateway can load every profile's plugins when it starts, and it gives its message injector to all of them. Before, a gateway that did not serve a profile could tick that profile's schedule and send a due wake through itself; Hermes accepted the wake and then dropped it, so it was retried and could be given up after three tries. HeartBeat now asks the gateway with Hermes's own routing rule; a multiplex host must also have admitted the profile (#113).
