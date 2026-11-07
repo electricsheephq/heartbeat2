@@ -67,13 +67,21 @@ def resume_timed(engine):
             engine.store.set_meta('resume_after:'+wake.id, '')
 
 
+def _clip(text, limit):
+    """Shorten text to whole words within limit, marking the cut."""
+    if len(text) <= limit: return text
+    head = text[:limit-1]
+    cut = head.rsplit(' ', 1)[0] if ' ' in head else head
+    return cut.rstrip(' .,;:·') + '…'
+
+
 def _time(engine, epoch):
     return datetime.fromtimestamp(epoch, engine.policy.resolved_timezone()).strftime('%Y-%m-%d %H:%M %Z') if epoch is not None else 'none'
 
 
 def _item(engine, wake):
     due='paused · resumes on keep/resume' if wake.status=='paused' else 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
-    return f'{wake.id} {wake.status} · {wake.title or wake.note[:60]} · {wake.kind} · {due}' + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+    return f'{wake.id} {wake.status} · {wake.title or _clip(wake.note,60)} · {wake.kind} · {due}' + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _occurrences(engine, wake):
@@ -97,7 +105,7 @@ def _ledger(engine, key, days):
         fires, skips = counts.get('fires',0), counts.get('gated_skips',0)
         valuable, turns = counts.get('valuable',0), counts.get('model_turns',0)
         verdict = 'useful' if valuable else 'no value yet' if turns else 'waiting'
-        lines.append(f'{wake.id} {wake.title or wake.note[:40]}: {fires} · {counts.get("checks",0)} · {turns} · '
+        lines.append(f'{wake.id} {wake.title or _clip(wake.note,40)}: {fires} · {counts.get("checks",0)} · {turns} · '
                      f'{counts.get("delivered",0)} · {counts.get("engaged",0)} · '
                      f'{cache.display(counts)} · {counts.get("provider_deferrals",0)} · {counts.get("no_verdict",0)} · {verdict}')
     return '\n'.join(lines)
@@ -136,7 +144,7 @@ def _add(engine, session, text):
             trigger, note = {'kind':'owner_silent','after':match['duration']}, match['note']
     wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command',
         platform=session.platform, chat_type=session.chat_type, chat_id=session.chat_id,
-        armed_session_id=session.current_session_id, title=note[:80])
+        armed_session_id=session.current_session_id, title=_clip(note,80))
     _activation(engine,session,wake)
     result = engine.tool.prepare(wake, {'trigger':trigger})
     created = engine.store.create_wake(result.wake)

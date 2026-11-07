@@ -122,3 +122,17 @@ def test_pause_resume_does_not_reuse_superseded_occurrence(runtime):
     e.clock.advance(5)
     e.tick()
     assert len(e.ctx.calls)==1
+
+
+def test_long_notes_shorten_at_a_word_not_mid_word(runtime):
+    e = runtime.get_engine()
+    checkin = 'Check in gently if there is something helpful to offer. Silence is fine.'
+    e.store.create_wake(Wake(KEY, checkin, 'at', platform='telegram', chat_type='dm', chat_id='unit',
+                             armed_session_id='sid', next_due_at=e.clock.now(), expires_at=e.clock.now() + 86400))
+    out = commands.handle('list', runtime)
+    assert 'Check in gently if there is something helpful to offer…' in out and 'Sile' not in out
+    added = commands.handle('add in 2h ' + 'Send the quarterly numbers to finance and copy the board. ' * 2, runtime)
+    title = e.store.get_wake(re.search(r'w_[a-z2-7]{8}', added)[0]).title
+    assert len(title) <= 80 and title.endswith('…') and title[:-1] == title[:-1].rstrip(' .')
+    assert commands._clip('Short note', 60) == 'Short note'
+    assert commands._clip('x' * 100, 10) == 'x' * 9 + '…'
