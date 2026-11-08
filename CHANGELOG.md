@@ -3,7 +3,7 @@
 ## 0.2.3 — 2026-11-09
 
 - `/pulse status`, `/pulse list` and the ledger now shorten a long note at the last space or line break that fits, and mark the cut with "…". Before, they cut mid-word (for example "…helpful to offer. Sile"). Titles that `/pulse add` stores from a long note are shortened the same way. A single word longer than the limit is still cut inside the word.
-- The README has a "See it work" section: three screenshots from one real Telegram run, in which the agent watches a test log, writes first when two tests fail, then fixes the code and sets a reminder.
+- The README has a "See it work" section: three screenshots from one real Telegram run, in which the agent watches a test log, writes first when two tests fail, then restores the old code and reruns the suite.
 
 ## 0.2.2 — 2026-11-03
 
