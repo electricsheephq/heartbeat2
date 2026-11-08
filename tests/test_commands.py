@@ -139,3 +139,60 @@ def test_long_notes_shorten_at_a_word_not_mid_word(runtime):
     assert commands._clip('Pay\nsupercalifragilisticexpialidocious-invoice', 20) == 'Pay…'
     assert commands._clip('hello world and more', 13) == 'hello world…'
     assert commands._clip('x' * 100, 10) == 'x' * 9 + '…'
+
+
+def test_list_default_hides_only_older_finished_items(runtime):
+    e = runtime.get_engine()
+    assert commands.handle('list', runtime) == 'No wakes or watchers in this chat.'
+    a = arm(e, title='old finished')
+    commands.handle(f'cancel {a.id}', runtime)
+    e.clock.advance(30*86400)
+    hint = '1 older finished item hidden; /pulse list all'
+    assert commands.handle('list', runtime) == hint
+    b = arm(e, title='active')
+    c = arm(e, title='recent finished')
+    commands.handle(f'cancel {c.id}', runtime)
+    out = commands.handle('list', runtime)
+    assert b.id in out and c.id in out and a.id not in out
+    assert out.splitlines()[-1] == hint
+    out = commands.handle('list all', runtime)
+    assert all(w.id in out for w in (a, b, c)) and 'hidden' not in out
+
+
+def test_list_and_ledger_rows_collapse_note_and_title_whitespace(runtime):
+    e = runtime.get_engine()
+    note = 'first line\n\nsecond   line'
+    w = e.store.create_wake(Wake(KEY, note, 'at', title=''))
+    titled = arm(e, title='first title\n\nsecond   title')
+    out = commands.handle('list', runtime)
+    assert len(out.splitlines()) == 2
+    assert 'first line second line' in out and 'first title second title' in out
+    ledger = commands.handle('ledger', runtime).splitlines()
+    assert len(ledger) == 3 and ledger[0].startswith('Ledger 7d:')
+    assert any(row.startswith(w.id+' first line second line:') for row in ledger[1:])
+    assert any(row.startswith(titled.id+' first title second title:') for row in ledger[1:])
+    assert f'\nNote: {note}\n' in commands.handle(f'why {w.id}', runtime)
+    assert e.store.get_wake(w.id).note == note
+    assert e.store.get_wake(titled.id).title == titled.title
+
+
+def test_cancelled_rows_show_ended_time_in_confirmation_and_list(runtime):
+    e = runtime.get_engine()
+    added = commands.handle('add in 2h check the deploy', runtime)
+    w = e.store.get_wake(re.search(r'w_[a-z2-7]{8}', added)[0])
+    assert ' · next ' in added
+    cancelled = commands.handle(f'cancel {w.id}', runtime)
+    ended = 'ended '+commands._time(e, e.store.get_wake(w.id).updated_at)
+    for out in (cancelled, commands.handle('list', runtime)):
+        assert ended in out and ' · next ' not in out
+
+
+def test_bulk_commands_skip_finished_items(runtime):
+    e = runtime.get_engine()
+    a = arm(e)
+    commands.handle(f'cancel {a.id}', runtime)
+    b = arm(e)
+    out = commands.handle('cancel all', runtime)
+    assert a.id not in out and 'item is terminal' not in out
+    assert b.id in out and e.store.get_wake(b.id).status == 'cancelled'
+    assert commands.handle('pause all', runtime) == 'No matching items in this chat.'

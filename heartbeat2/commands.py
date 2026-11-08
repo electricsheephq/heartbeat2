@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import json
 import re
 
-from .model import Wake, Session
+from .model import Wake, Session, FINISHED_WAKE_STATUSES
 from . import governor
 from . import cache
 from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested
@@ -11,7 +11,9 @@ from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible
 
 DURATIONS = _DURATION.pattern+r'(?:\s*(?:,\s*)?(?:and\s*)?'+_DURATION.pattern+r')*'  # one way to split whitespace: linear
-HELP = ('/pulse status | list | ledger [7d] | why <id> | add in 2h <note> | '
+RECENT_S = 7*86400
+FINISHED_STATUSES = FINISHED_WAKE_STATUSES
+HELP = ('/pulse status | list [all] | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
         'pause|resume|cancel <id|all> [for 3d] | off|on | '
         'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
@@ -67,6 +69,10 @@ def resume_timed(engine):
             engine.store.set_meta('resume_after:'+wake.id, '')
 
 
+def _oneline(text):
+    return ' '.join(text.split())
+
+
 def _clip(text, limit):
     """Shorten text at the last word break (any whitespace) within limit and mark the cut with "…".
     A single word longer than the limit is cut inside the word."""
@@ -83,7 +89,8 @@ def _time(engine, epoch):
 
 def _item(engine, wake):
     due='paused · resumes on keep/resume' if wake.status=='paused' else 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
-    return f'{wake.id} {wake.status} · {wake.title or _clip(wake.note,60)} · {wake.kind} · {due}' + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+    if wake.status in FINISHED_STATUSES: due='ended '+_time(engine,wake.updated_at)
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · {wake.kind} · {due}' + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _occurrences(engine, wake):
@@ -107,7 +114,7 @@ def _ledger(engine, key, days):
         fires, skips = counts.get('fires',0), counts.get('gated_skips',0)
         valuable, turns = counts.get('valuable',0), counts.get('model_turns',0)
         verdict = 'useful' if valuable else 'no value yet' if turns else 'waiting'
-        lines.append(f'{wake.id} {wake.title or _clip(wake.note,40)}: {fires} · {counts.get("checks",0)} · {turns} · '
+        lines.append(f'{wake.id} {_oneline(wake.title) or _clip(_oneline(wake.note),40)}: {fires} · {counts.get("checks",0)} · {turns} · '
                      f'{counts.get("delivered",0)} · {counts.get("engaged",0)} · '
                      f'{cache.display(counts)} · {counts.get("provider_deferrals",0)} · {counts.get("no_verdict",0)} · {verdict}')
     return '\n'.join(lines)
@@ -211,8 +218,14 @@ def handle(raw_args, runtime):
                 lines.extend(_item(engine,w) for w in active)
                 lines.extend(f'{w.id}: keep / slow / stop / watch' for w in active if w.status_reason.startswith('governor:'))
                 return '\n'.join(lines)
-            if action == 'list' and not rest:
-                return '\n'.join(_item(engine,w) for w in engine.store.list_wakes(key)) or 'No wakes or watchers in this chat.'
+            if action == 'list' and rest in {'','all'}:
+                wakes = engine.store.list_wakes(key)
+                visible = wakes if rest=='all' else [w for w in wakes if w.status not in FINISHED_STATUSES
+                    or engine.clock.now()-w.updated_at <= RECENT_S]
+                lines = [_item(engine,w) for w in visible]
+                hidden = len(wakes)-len(visible)
+                if hidden: lines.append(f'{hidden} older finished item{"s" if hidden!=1 else ""} hidden; /pulse list all')
+                return '\n'.join(lines) or 'No wakes or watchers in this chat.'
             if action == 'ledger':
                 if not re.fullmatch(r'\d+d',rest or '7d'): raise ValueError('ledger expects 7d')
                 days = int((rest or '7d')[:-1])
@@ -250,7 +263,7 @@ def handle(raw_args, runtime):
             if duration and action != 'pause': raise ValueError('for is supported only with pause')
             seconds = parse_duration(duration) if duration else None
             if wid == 'all' and action in {'pause','resume','cancel'}:
-                wakes = engine.store.list_wakes(key)
+                wakes = [w for w in engine.store.list_wakes(key) if w.status not in FINISHED_STATUSES]
             else:
                 wake = engine.store.get_wake(wid)
                 if wake is None or wake.session_key != key: return 'Error: unknown item in this chat.'
@@ -275,7 +288,7 @@ def handle(raw_args, runtime):
 
 
 def _transition(engine,session,wake,action,seconds):
-    if wake.status in {'done','cancelled','expired','failed','orphaned'}:
+    if wake.status in FINISHED_STATUSES:
         raise ValueError('item is terminal')
     if action in {'keep','slow'}:
         if wake.status!='paused' or not wake.status_reason.startswith('governor:'):

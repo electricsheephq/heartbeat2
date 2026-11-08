@@ -12,6 +12,7 @@ EVENT_KINDS = frozenset({"kanban_completed", "kanban_blocked", "kanban_worker_ex
 KINDS = TIME_KINDS | PROBE_KINDS | EVENT_KINDS | {"owner_silent"}
 WAKE_STATUSES = frozenset({"active", "paused", "proposed", "done", "cancelled",
                            "expired", "failed", "orphaned"})
+FINISHED_WAKE_STATUSES = frozenset({"done", "cancelled", "expired", "failed", "orphaned"})
 TERMINAL_OCCURRENCE_STATES = frozenset({"done", "skipped", "missed", "dead",
                                       "interrupted", "orphaned", "superseded"})
 
