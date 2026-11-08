@@ -18,12 +18,17 @@ def cost_line(store, key, timezone, policy):
     return text
 
 
+def _plain(text: str) -> str:
+    """Free text for a desk row, with backticks made apostrophes so it can't open or close a code span."""
+    return text.replace('`', "'")
+
+
 def _rhythm(wake) -> str:
     """The role's rhythm as the owner set it: every 2m, every 1d at 09:00, cron …, or self-paced."""
     trigger = wake.trigger_json if isinstance(wake.trigger_json, dict) else {}
     if wake.kind == 'every' and trigger.get('every') is not None:
-        anchor = f" at {_clip(_oneline(str(trigger['at'])), 8)}" if trigger.get('at') else ''
-        return f"every {_clip(_oneline(str(trigger['every'])), 16)}{anchor}"
+        anchor = f" at {_plain(_clip(_oneline(str(trigger['at'])), 8))}" if trigger.get('at') else ''
+        return f"every {_plain(_clip(_oneline(str(trigger['every'])), 16))}{anchor}"
     if wake.kind == 'cron' and trigger.get('cron'):
         # Inline code: chat markdown (Telegram) would otherwise eat a cron expression's `* *` as bold markers.
         return 'cron `' + _clip(_oneline(str(trigger['cron'])).replace('`', ''), 40) + '`'
@@ -45,12 +50,14 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
     for w in roles:
         history = [o for o in store.list_occurrences(w.id) if o.started_at is not None and o.ended_at is not None]
         last = max(history, key=lambda o: o.ended_at) if history else None
-        summary = _clip(_oneline(last.summary or last.outcome or last.state), 80) if last else 'none'
+        # Free text loses its backticks: Hermes pairs inline-code backticks across lines, so a stray one anywhere
+        # before a cron rhythm (this row's title, or an earlier row's summary or reason) would swallow its code span.
+        summary = _plain(_clip(_oneline(last.summary or last.outcome or last.state), 80)) if last else 'none'
         today, budget = store.dispatches_today(w.id, zone(timezone)), policy.role_budget(w)
-        due = ('paused · ' + _oneline(w.status_reason or 'paused') if w.status == 'paused'
+        due = ('paused · ' + _plain(_oneline(w.status_reason or 'paused')) if w.status == 'paused'
                else 'resting until tomorrow' if today >= budget
                else 'next ' + _time(view, w.next_due_at, compact=True))
-        title = _clip(_oneline(w.title or w.note), 80).replace('`', "'")  # a stray backtick would pair with the cron code span
+        title = _plain(_clip(_oneline(w.title or w.note), 80))
         rows.append(f'- role {w.id} {title} · {_rhythm(w)} · last: {summary} · '
                     f'{due} · today {today}/{budget}')
     other = [w for w in wakes if not w.role and w.status == 'active']
