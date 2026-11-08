@@ -152,3 +152,31 @@ def test_g7_useful_own_time_never_faster_than_base(engine):
         e.store.cas_wake(ordinary.id, 'active', noop_streak=streak)
         governor.apply(e, e.store.get_wake(ordinary.id))
         assert e.store.get_wake(ordinary.id).eff_interval_s == expected
+
+
+@pytest.mark.parametrize('switch', ['reset', 'session'])
+def test_g6_rebind_supersedes_a_started_turn(engine, switch):
+    e = engine
+    # A role turn already running when the owner starts a new conversation.
+    e.policy = replace(e.policy, wake_spacing_minutes=1)
+    w = arm(e, 'self', role=True, next_due_at=e.clock.now()+3600)
+    e.dispatch(pending(e, w))
+    start(e)
+    assert e.store.get_occurrence(w.id, 't:test').state == 'started'
+    if switch == 'reset':
+        e.intake.on_session_reset(old_session_id='sid', new_session_id='new')
+    else:
+        e.intake._session_switch(e.store.get_wake(w.id), 'new')
+        session(e, current_session_id='new')
+    o = e.store.get_occurrence(w.id, 't:test')
+    assert (o.state, o.force_silent) == ('superseded', True)
+    # The old turn can't respond or deliver, and it no longer holds the chat.
+    assert e.tool.handle({'action': 'respond', 'outcome': 'progress', 'notify': True,
+                          'summary': 'late update'}, session_id='sid').get('error')
+    assert e.intake.transform_llm_output(response_text='late update', session_id='sid') == '[SILENT]'
+    e.intake.on_session_end(session_id='sid', completed=True)
+    assert not e.store.get_occurrence(w.id, 't:test').delivered
+    e.clock.advance(e.policy.wake_spacing_minutes*60)
+    other = arm(e, armed_session_id='new')
+    e.tick()
+    assert e.store.list_occurrences(other.id)[0].state == 'claimed'

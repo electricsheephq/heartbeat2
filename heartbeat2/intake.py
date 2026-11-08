@@ -365,9 +365,11 @@ class Intake:
     def _rebind_recurring(self,w,session_id,reason):
         s=self.engine.store
         if s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id):
-            for o in s.list_occurrences(w.id,state='claimed'):
-                s.cas_occurrence(w.id,o.dedupe_key,'claimed','superseded',
-                                 attempt=o.attempt,force_silent=True,error=reason)
+            # A turn claimed or running in the old conversation ends there, as an orphaned wake's does.
+            for o in s.list_occurrences(w.id):
+                if o.state in {'claimed','started'}:
+                    s.cas_occurrence(w.id,o.dedupe_key,o.state,'superseded',
+                                     attempt=o.attempt,force_silent=True,error=reason)
 
     def _session_switch(self,w,session_id):
         """A known non-lineage switch has the same ownership boundary as /new."""
