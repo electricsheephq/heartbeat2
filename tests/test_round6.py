@@ -181,6 +181,21 @@ def test_429_no_retry(monkeypatch, tmp_path):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize('response', [None, [], {'choices': None}, {'choices': [None, {'message': None}]}],
+                         ids=['null', 'list', 'null-choices', 'malformed-choices'])
+def test_forwarder_tolerates_malformed_responses(monkeypatch, tmp_path, response):
+    monkeypatch.setenv('UNIT_FAKE_KEY', 'synthetic')
+    upstream = JourneyUpstream('https://example.invalid/v1', 'unit-model', 'UNIT_FAKE_KEY', tmp_path / 'calls.jsonl')
+    def open_response(*args, **kwargs):
+        stream = io.BytesIO(json.dumps(response).encode())
+        stream.status = 200
+        return stream
+    monkeypatch.setattr(upstream.opener, 'open', open_response)
+    body = dict(messages=[dict(role='user', content='⟦pulse o:w_unit a:1⟧')], model='unit-model')
+    assert upstream.forward(body) == (response, 200)
+    assert upstream.occurrence is None and upstream.rows[0]['usage'] == {}
+
+
 def test_seeded_variants():
     assert variants(20261017, 1) == variants(20261017, 1)
     assert variants(20261017, 1) != variants(20261017, 2)
@@ -858,7 +873,7 @@ def test_watcher_packet_includes_wake_payload(tmp_path):
     delivery = next(p for p in packets if packet_map[p['id']]['bar'] == 'B3-8')
     assert payload in delivery['evidence']
     assert json.dumps(dict(due=wake['next_due_at'], note=wake['note'])) in delivery['evidence']
-    assert all(payload not in p['evidence'] for p in packets if packet_map[p['id']]['bar'] == 'B3-7')
+    assert all(payload not in item for p in packets if packet_map[p['id']]['bar'] == 'B3-7' for item in p['evidence'])
 
 
 def test_score_marks_unjudged_bars_pending_until_merge(tmp_path):

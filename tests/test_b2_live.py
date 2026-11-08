@@ -86,6 +86,7 @@ def test_forwarder_and_fault_fallback(server, monkeypatch, tmp_path):
 @pytest.mark.parametrize('response,usage', [
     ({'usage': None}, {}),
     ({'usage': {'prompt_tokens_details': None}}, {'prompt_tokens_details': None}),
+    ({'usage': [1]}, {}),
     (None, {}),
     ([], {}),
 ])

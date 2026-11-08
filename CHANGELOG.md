@@ -7,7 +7,7 @@
 - A finished item no longer shows a "next" time, so a cancelled reminder no longer looks as if it will still fire.
 - `/pulse pause all`, `resume all` and `cancel all`, and the `pulse` tool with `id: all`, skip items that have already finished instead of listing each one as "skipped (item is terminal)". Which items change is the same as before.
 - The README's "See it work" screenshots are markdown images, so the plugin's page in the Hermes catalog shows them too.
-- Benchmarks: live runs no longer fail on a provider that returns `usage: null` (#45), and round-6 judge packets include the wake payload a wake reply answered (#107).
+- Benchmarks: live runs no longer fail on a provider that returns `usage: null`, null token counts or a malformed response body (#45), and round-6 judge packets include the wake payload a wake reply answered (#107).
 
 ## 0.2.3 — 2026-11-08
 

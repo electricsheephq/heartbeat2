@@ -6,7 +6,8 @@ README = Path(__file__).resolve().parents[1] / 'README.md'
 
 
 def test_see_it_work_screenshots_are_markdown_images():
-    text = re.sub(r'```.*?```', '', README.read_text(), flags=re.S)
+    # Fenced code renders as text, so an image reference inside a ``` or ~~~ block does not count.
+    text = re.sub(r'^(```|~~~).*?^\1', '', README.read_text(), flags=re.S | re.M)
     for name in ('see-it-work-1-armed.png', 'see-it-work-2-followup.png', 'see-it-work-3-fix.png'):
         assert re.search(r'!\[[^\]]+\]\(docs/media/' + re.escape(name) + r'\)', text), name
         assert not re.search(r'<img[^>]+' + re.escape(name), text), name

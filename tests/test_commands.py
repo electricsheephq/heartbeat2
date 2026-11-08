@@ -6,7 +6,7 @@ import re
 import pytest
 
 from heartbeat2 import commands
-from heartbeat2.model import Session, Wake
+from heartbeat2.model import FINISHED_WAKE_STATUSES, Session, Wake
 from heartbeat2.policy import INJECTION_CONFIG
 from test_engine import engine, arm, KEY
 
@@ -195,24 +195,28 @@ def test_finished_rows_show_no_next_time(runtime):
         assert 'cancelled' in out and ' · next ' not in out
 
 
-def test_bulk_commands_skip_finished_items(runtime):
+@pytest.mark.parametrize('status', sorted(FINISHED_WAKE_STATUSES))
+def test_bulk_commands_skip_finished_items(runtime, status):
     e = runtime.get_engine()
-    a = arm(e)
-    commands.handle(f'cancel {a.id}', runtime)
+    a = arm(e, status=status)
     b = arm(e)
     out = commands.handle('cancel all', runtime)
     assert a.id not in out and 'item is terminal' not in out
     assert b.id in out and e.store.get_wake(b.id).status == 'cancelled'
     assert commands.handle('pause all', runtime) == 'No matching items in this chat.'
+    assert e.store.get_wake(a.id).status == status
 
 
-def test_tool_id_all_skips_finished_items(runtime):
+@pytest.mark.parametrize('action,start,end', [('pause', 'active', 'paused'), ('resume', 'paused', 'active'),
+                                              ('cancel', 'active', 'cancelled')])
+@pytest.mark.parametrize('status', sorted(FINISHED_WAKE_STATUSES))
+def test_tool_id_all_skips_finished_items(runtime, status, action, start, end):
     e = runtime.get_engine()
-    done = arm(e)
-    commands.handle(f'cancel {done.id}', runtime)
-    live = arm(e)
-    result = e.tool.handle({'action': 'pause', 'id': 'all'}, session_id='sid')
+    done = arm(e, status=status)
+    live = arm(e, status=start)
+    result = e.tool.handle({'action': action, 'id': 'all'}, session_id='sid')
     assert result.get('ok'), result
     ids = [item.get('id') or item.get('wake', {}).get('id') for item in result['results']]
     assert ids == [live.id]
-    assert e.store.get_wake(live.id).status == 'paused'
+    assert e.store.get_wake(live.id).status == end
+    assert e.store.get_wake(done.id).status == status

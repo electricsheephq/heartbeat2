@@ -190,7 +190,9 @@ class JourneyUpstream(Upstream):
         if match:
             self.occurrence = match[1] + ':' + match[2]
         response, status = super().forward(body)
-        if status < 400 and not any(c.get('message', {}).get('tool_calls') for c in response.get('choices', [])):
+        choices = response.get('choices') if isinstance(response, dict) else None
+        if status < 400 and not any(isinstance(c, dict) and isinstance(c.get('message'), dict) and c['message'].get('tool_calls')
+                                    for c in (choices if isinstance(choices, list) else [])):
             self.occurrence = None
         return response, status
 
