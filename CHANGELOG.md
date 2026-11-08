@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 — 2026-11-08
+
+HeartBeat 2.0 now gives your agent time of its own between your messages, not just follow-ups. See `specs/v0.3-AGENCY.md`.
+
+- **Roles.** `role: true` on a recurring create (or `/pulse role every 1d at 09:00 <charter>` / `/pulse role self <charter>`) makes a standing responsibility the agent owns. It has no expiry, survives `/new`, keeps its notebook between turns, can arm up to 3 follow-ups per turn, and has its own turns-per-day budget (default 6, at most 12; `/pulse budget <id> <n>/day`). The agent can lower its budget, never raise it.
+- **Own time.** New setting `own_time_hours` (default 0, off) gives the agent a regular turn of its own to work on its roles, follow things up, reflect or rest.
+- **The desk.** Role and own-time turns open with a short view of the agent's roles, what's due, when you last wrote, and the budget left. `/pulse desk` shows you the same view.
+- **Quiet work counts.** A silent turn that ends `progress` with a summary is real work: it no longer slows a wake down or pauses it. Only `no_change` and `blocked` fires count as idle.
+- **Your absence holds messages, not work.** For the agent's own recurring work, roles and own time, quiet hours, the unanswered mute and the daily message cap now hold back messages while the turn still runs silently. The daily wake-turn cap still stops turns, and so does the new optional daily cost limit (`daily_cost_limit_usd`) for turns the agent started. Your own reminders behave as before.
+- **A new wake contract.** The wake prompt tells the agent the turn is its own to act on, explains each outcome, and drops "avoid writing files when staying silent". The usage skill, the tool and plugin descriptions, the README and SECURITY.md are rewritten around roles, own time and budgets.
+
+Upgrade: reinstall and restart the gateway. The two new wake columns are added in place to the existing plugin-data database.
+
 ## 0.2.4 — 2026-11-08
 
 - `/pulse list` shows every active, proposed and paused item plus the 10 most recently created finished ones, and says how many older finished items it hid. `/pulse list all` shows everything, as before. A chat used for a few weeks no longer buries its live items under old ones.
