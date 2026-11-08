@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3 — 2026-11-09
+
+- **Cron rhythms keep their asterisks on the desk.** A cron role's rhythm is now shown as inline code, for example cron `0 10 * * 1,4`, so chat markdown such as Telegram's no longer reads `* *` as bold markers and drops them.
+
 ## 0.3.2 — 2026-11-09
 
 - **`/pulse status` agrees with the desk about a resting role.** A role that has used its turns for the day now reads `resting until tomorrow` in `/pulse status` too, instead of a next time it won't take, and it no longer sets the status header's `next due`.
