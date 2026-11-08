@@ -141,22 +141,30 @@ def test_long_notes_shorten_at_a_word_not_mid_word(runtime):
     assert commands._clip('x' * 100, 10) == 'x' * 9 + '…'
 
 
-def test_list_default_hides_only_older_finished_items(runtime):
+def test_list_default_shows_live_items_and_newest_finished(runtime):
     e = runtime.get_engine()
     assert commands.handle('list', runtime) == 'No wakes or watchers in this chat.'
-    a = arm(e, title='old finished')
-    commands.handle(f'cancel {a.id}', runtime)
-    e.clock.advance(30*86400)
-    hint = '1 older finished item hidden; /pulse list all'
-    assert commands.handle('list', runtime) == hint
-    b = arm(e, title='active')
-    c = arm(e, title='recent finished')
-    commands.handle(f'cancel {c.id}', runtime)
+    finished = []
+    for n in range(11):
+        w = arm(e, title=f'finished {n}')
+        commands.handle(f'cancel {w.id}', runtime)
+        finished.append(w)
+        e.clock.advance(60)
     out = commands.handle('list', runtime)
-    assert b.id in out and c.id in out and a.id not in out
-    assert out.splitlines()[-1] == hint
+    assert finished[0].id not in out and all(w.id in out for w in finished[1:])
+    assert out.splitlines()[-1] == '1 older finished item hidden; /pulse list all'
+    # Bookkeeping that rewrites an old finished wake (here a session rebind) must not bring it back.
+    assert e.store.cas_wake(finished[0].id, 'cancelled', armed_session_id='sid2')
+    assert finished[0].id not in commands.handle('list', runtime)
+    live = arm(e, title='live', next_due_at=e.clock.now()+86400)
+    last = arm(e, title='finished last')
+    commands.handle(f'cancel {last.id}', runtime)
+    out = commands.handle('list', runtime)
+    assert live.id in out and last.id in out
+    assert finished[0].id not in out and finished[1].id not in out
+    assert out.splitlines()[-1] == '2 older finished items hidden; /pulse list all'
     out = commands.handle('list all', runtime)
-    assert all(w.id in out for w in (a, b, c)) and 'hidden' not in out
+    assert all(w.id in out for w in finished+[live, last]) and 'hidden' not in out
 
 
 def test_list_and_ledger_rows_collapse_note_and_title_whitespace(runtime):
@@ -176,15 +184,15 @@ def test_list_and_ledger_rows_collapse_note_and_title_whitespace(runtime):
     assert e.store.get_wake(titled.id).title == titled.title
 
 
-def test_cancelled_rows_show_ended_time_in_confirmation_and_list(runtime):
+def test_finished_rows_show_no_next_time(runtime):
     e = runtime.get_engine()
     added = commands.handle('add in 2h check the deploy', runtime)
     w = e.store.get_wake(re.search(r'w_[a-z2-7]{8}', added)[0])
     assert ' · next ' in added
     cancelled = commands.handle(f'cancel {w.id}', runtime)
-    ended = 'ended '+commands._time(e, e.store.get_wake(w.id).updated_at)
-    for out in (cancelled, commands.handle('list', runtime)):
-        assert ended in out and ' · next ' not in out
+    row = next(line for line in commands.handle('list', runtime).splitlines() if line.startswith(w.id))
+    for out in (cancelled, row):
+        assert 'cancelled' in out and ' · next ' not in out
 
 
 def test_bulk_commands_skip_finished_items(runtime):
@@ -196,3 +204,15 @@ def test_bulk_commands_skip_finished_items(runtime):
     assert a.id not in out and 'item is terminal' not in out
     assert b.id in out and e.store.get_wake(b.id).status == 'cancelled'
     assert commands.handle('pause all', runtime) == 'No matching items in this chat.'
+
+
+def test_tool_id_all_skips_finished_items(runtime):
+    e = runtime.get_engine()
+    done = arm(e)
+    commands.handle(f'cancel {done.id}', runtime)
+    live = arm(e)
+    result = e.tool.handle({'action': 'pause', 'id': 'all'}, session_id='sid')
+    assert result.get('ok'), result
+    ids = [item.get('id') or item.get('wake', {}).get('id') for item in result['results']]
+    assert ids == [live.id]
+    assert e.store.get_wake(live.id).status == 'paused'

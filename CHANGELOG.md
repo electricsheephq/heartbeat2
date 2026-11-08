@@ -2,9 +2,9 @@
 
 ## 0.2.4 — 2026-11-08
 
-- `/pulse list` shows active and paused items plus those that finished in the last 7 days, and says how many older finished items it hid. `/pulse list all` shows everything, as before. A chat used for a few weeks no longer buries its live items under old ones.
+- `/pulse list` shows every active, proposed and paused item plus the 10 most recently created finished ones, and says how many older finished items it hid. `/pulse list all` shows everything, as before. A chat used for a few weeks no longer buries its live items under old ones.
 - `/pulse list`, `/pulse status` and the ledger keep each item on one line: a note or title with line breaks is shown with them collapsed to spaces.
-- A finished item shows when it ended ("ended 2026-11-08 15:20 JST") instead of a "next" time, so a cancelled reminder no longer looks as if it will still fire.
+- A finished item no longer shows a "next" time, so a cancelled reminder no longer looks as if it will still fire.
 - `/pulse pause all`, `resume all` and `cancel all`, and the `pulse` tool with `id: all`, skip items that have already finished instead of listing each one as "skipped (item is terminal)". Which items change is the same as before.
 - The README's "See it work" screenshots are markdown images, so the plugin's page in the Hermes catalog shows them too.
 - Benchmarks: live runs no longer fail on a provider that returns `usage: null` (#45), and round-6 judge packets include the wake payload a wake reply answered (#107).

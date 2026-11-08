@@ -11,7 +11,7 @@ from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible
 
 DURATIONS = _DURATION.pattern+r'(?:\s*(?:,\s*)?(?:and\s*)?'+_DURATION.pattern+r')*'  # one way to split whitespace: linear
-RECENT_S = 7*86400
+LIST_RECENT_FINISHED = 10
 FINISHED_STATUSES = FINISHED_WAKE_STATUSES
 HELP = ('/pulse status | list [all] | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
@@ -88,9 +88,10 @@ def _time(engine, epoch):
 
 
 def _item(engine, wake):
-    due='paused · resumes on keep/resume' if wake.status=='paused' else 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
-    if wake.status in FINISHED_STATUSES: due='ended '+_time(engine,wake.updated_at)
-    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · {wake.kind} · {due}' + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+    if wake.status in FINISHED_STATUSES: due = ''
+    elif wake.status == 'paused': due = 'paused · resumes on keep/resume'
+    else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · {wake.kind}' + (f' · {due}' if due else '') + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _occurrences(engine, wake):
@@ -220,8 +221,9 @@ def handle(raw_args, runtime):
                 return '\n'.join(lines)
             if action == 'list' and rest in {'','all'}:
                 wakes = engine.store.list_wakes(key)
-                visible = wakes if rest=='all' else [w for w in wakes if w.status not in FINISHED_STATUSES
-                    or engine.clock.now()-w.updated_at <= RECENT_S]
+                # list_wakes is ordered by created_at, so the default keeps the newest finished items; creation time never changes.
+                recent = {w.id for w in [w for w in wakes if w.status in FINISHED_STATUSES][-LIST_RECENT_FINISHED:]}
+                visible = wakes if rest=='all' else [w for w in wakes if w.status not in FINISHED_STATUSES or w.id in recent]
                 lines = [_item(engine,w) for w in visible]
                 hidden = len(wakes)-len(visible)
                 if hidden: lines.append(f'{hidden} older finished item{"s" if hidden!=1 else ""} hidden; /pulse list all')
