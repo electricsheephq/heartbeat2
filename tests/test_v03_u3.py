@@ -17,7 +17,7 @@ from test_engine import KEY, arm, end, engine, pending, session, start
 NOTE = ('This is your own time. Look at your desk: work on what you own, follow up on something '
         'you noticed, think something through, tidy your notes or memory, or rest. '
         "Message the owner only if it's worth their attention.")
-OWN_ID = 'owntime_' + hashlib.sha1(KEY.encode()).hexdigest()[:16]
+OWN_ID = 'owntime_' + hashlib.sha256(KEY.encode()).hexdigest()[:16]
 
 
 def own(e, hours=6):
@@ -43,6 +43,14 @@ def priced(e, w, cost, unpriced=0, key='priced', when=None):
     assert e.store.cas_occurrence(w.id, key, 'started', 'done', attempt=o.attempt,
                                   cost_microusd=cost, unpriced_calls=unpriced,
                                   summary='  Wrote\n release notes  ', outcome='progress')
+    # Durable accounting records usage arrival; these fixtures synthesize that event.
+    wall = e.clock.wall
+    try:
+        if when is not None: e.clock.wall = when
+        with e.store.atomic():
+            e.store.add_agent_spend(w, o.id, e.policy.resolved_timezone(), cost, unpriced)
+    finally:
+        e.clock.wall = wall
 
 
 def test_settings_and_manifest():
@@ -73,7 +81,7 @@ def test_own_time_arming_settings_and_reactivation(engine):
     assert w.id == OWN_ID and w.kind == 'self' and w.creator == 'user'
     assert w.created_in == 'human_turn' and not is_owner(w)
     assert w.note == NOTE and w.title == 'Own time' and w.reason == 'Own time.'
-    assert w.trigger_json == {'builtin': True, 'own_time': True} and w.expires_at is None
+    assert w.trigger_json == {'builtin': True, 'own_time': True, 'hours': 6} and w.expires_at is None
     assert w.base_interval_s == w.eff_interval_s == 21600
     assert w.pacing_min_s == max(e.policy.min_interval_minutes, e.policy.agent_ungated_floor_minutes) * 60
     assert w.pacing_max_s == 43200 and w.next_due_at == e.clock.now() + 21600

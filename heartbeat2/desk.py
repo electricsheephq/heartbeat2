@@ -18,7 +18,7 @@ def cost_line(store, key, timezone, policy):
     return text
 
 
-def render_desk(engine_or_store, session, *, clock, timezone, policy) -> str:
+def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=len) -> str:
     store = getattr(engine_or_store, 'store', engine_or_store)
     now, key = clock.now(), session.session_key
     # The existing command formatters/override resolver need only these read seams.
@@ -56,9 +56,10 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy) -> str:
     omitted = 0
     while True:
         text = '\n'.join(['Your desk:', *rows, *tail, *([f'… {omitted} more'] if omitted else [])])
-        if len(text) <= 1800: return text
+        if measure(text) <= 1800: return text
         if rows:
             rows.pop()  # Keep the most recently touched roles, and preserve the budget lines.
             omitted += 1
         else:
-            return text[:1800]
+            while measure(text) > 1800: text = text[:-1]
+            return text

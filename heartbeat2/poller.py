@@ -15,7 +15,7 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import MESSAGING_PLATFORMS, owner_class, is_owner, is_watcher, one_shot
+from .policy import MESSAGING_PLATFORMS, owner_class, is_owner, is_watcher, one_shot, holds_messages
 from .schedule import time_due, local_day, parse_duration, next_every
 from . import governor
 
@@ -445,15 +445,16 @@ class Poller:
         s,now=self.store,self.clock.now()
         hours=self.policy.own_time_hours
         for w in s.list_wakes():
-            if w.trigger_json.get('own_time') and not hours and w.status in {'active','paused','done','orphaned'}:
+            if w.trigger_json.get('own_time') and not hours and (w.status != 'cancelled' or w.status_reason != 'settings'):
                 if s.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='settings'):
                     self.cancel_occurrences(w.id,'settings',preserve_started=True)
         if not hours: return
-        interval=hours*3600
         floor=max(self.policy.min_interval_minutes,self.policy.agent_ungated_floor_minutes)*60
+        interval=max(hours*3600,floor)
+        maximum=max(2*hours*3600,floor)
         for session in s.list_sessions():
             if session.last_human_at is None or not session.episode_id: continue
-            wid='owntime_'+hashlib.sha1(session.session_key.encode()).hexdigest()[:16]
+            wid='owntime_'+hashlib.sha256(session.session_key.encode()).hexdigest()[:16]
             w=s.get_wake(wid)
             if w is None:
                 s.create_wake(Wake(session.session_key,
@@ -461,15 +462,17 @@ class Poller:
                     'think something through, tidy your notes or memory, or rest. Message the owner only if it\'s worth their attention.',
                     'self',id=wid,platform=session.platform,chat_type=session.chat_type,chat_id=session.chat_id,
                     armed_session_id=session.current_session_id,creator='user',title='Own time',reason='Own time.',
-                    trigger_json={'builtin':True,'own_time':True},base_interval_s=interval,eff_interval_s=interval,
-                    pacing_min_s=floor,pacing_max_s=2*interval,next_due_at=now+interval))
+                    trigger_json={'builtin':True,'own_time':True,'hours':hours},base_interval_s=interval,eff_interval_s=interval,
+                    pacing_min_s=floor,pacing_max_s=maximum,next_due_at=now+interval))
                 continue
             updates={}
-            if w.base_interval_s!=interval or w.pacing_min_s!=floor or w.pacing_max_s!=2*interval:
+            reactivate=w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason=='settings'
+            if w.trigger_json.get('hours')!=hours or reactivate:
                 updates.update(base_interval_s=interval,eff_interval_s=interval,pacing_min_s=floor,
-                               pacing_max_s=2*interval,next_due_at=now+interval)
-            if w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason=='settings':
-                updates.update(status='active',status_reason='',armed_session_id=session.current_session_id,next_due_at=now+interval)
+                               pacing_max_s=maximum,next_due_at=now+interval,
+                               trigger_json={**w.trigger_json,'hours':hours})
+            if reactivate:
+                updates.update(status='active',status_reason='',armed_session_id=session.current_session_id)
             if updates: s.cas_wake(w.id,w.status,expected_version=w.version,**updates)
 
     def silence(self):
@@ -507,7 +510,7 @@ class Poller:
 
     def message_hold_reason(self,w,s):
         """Agent recurring work may continue while its messages are held."""
-        if s is None or is_owner(w) or w.kind not in RECURRING_KINDS or is_watcher(w):
+        if s is None or not holds_messages(w):
             return ''
         from .commands import quiet_until
         if quiet_until(self,s.session_key,urgent=w.urgent) is not None:
@@ -630,13 +633,15 @@ class Poller:
                                        held_reason='message_held:'+message_held): return
         elif not message_held and o.force_silent and o.held_reason.startswith('message_held:'):
             if not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=False,held_reason=''): return
-        if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
+        with s.atomic():
+            if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
+            s.set_meta('spend:'+o.id, 'owner' if owner_class(w) else 'agent')
         o=s.get_occurrence(w.id,o.dedupe_key)
         health=json.loads(s.get_meta('provider_health') or '{}')
         if health:
             health['trial']=o.id
             s.set_meta('provider_health',json.dumps(health))
-        from .wake_text import render_wake
+        from .wake_text import render_wake, escape_text
         from .desk import render_desk
         from .intake import marker_tag
         tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
@@ -650,7 +655,8 @@ class Poller:
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
              after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
              cache_line=cache_line,marker_tag=tag,
-             desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy)
+             desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
+                              measure=lambda text: len(escape_text(text)))
                   if w.role or w.trigger_json.get('own_time') else '')
         if not self.eligible():
             # Lost the home after claiming: give the claim back unsent, as it was.

@@ -6,7 +6,7 @@ import json
 import re
 
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
-from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS, owner_class
+from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS, owner_class, holds_messages
 from .schedule import parse_at, parse_duration, next_every, next_cron
 
 
@@ -133,6 +133,8 @@ class Tool:
                 if action == 'create':
                     if not s.enabled:
                         return {'error':'session_off'}
+                    if args.get('role') and args.get('babysit'):
+                        return {'error':'role_not_babysit'}
                     parent = e.store.get_wake(flight.wake_id) if flight else None
                     child_key = e.child_key(flight) if flight else ''
                     if args.get('role') and (args.get('trigger') or {}).get('kind') not in RECURRING_KINDS:
@@ -156,7 +158,15 @@ class Tool:
                              armed_session_id=session_id or s.current_session_id, created_in=created_in,
                              depth=depth, parent_wake_id=parent.id if parent else None,
                              status=gate.status, owner_requested=requested, role=args.get('role',False))
-                    result = self.prepare(w,args)
+                    request, budget_clamps = args, {}
+                    if w.role and flight:
+                        cap = e.policy.role_budget(parent) if parent and parent.role else e.policy.role_turns_per_day_default
+                        budget = args.get('budget',{}).get('turns_per_day',e.policy.role_turns_per_day_default)
+                        if isinstance(budget,int) and not isinstance(budget,bool) and budget > cap:
+                            request = {**args, 'budget':{'turns_per_day':cap}}
+                            budget_clamps['budget.turns_per_day'] = f'{budget} → {cap} (wake_turn cannot raise budget)'
+                    result = self.prepare(w,request)
+                    result.clamped.update(budget_clamps)
                     w = e.store.create_wake(result.wake)
                     if child_key:
                         e.store.set_meta(child_key,str(children+1))
@@ -321,9 +331,9 @@ class Tool:
         latest=(w.created_at or e.clock.now())+due_bound
         reminder=p.lifetime_setting(w)=='max_reminder_days' and not w.babysit
         # A long owner reminder's own due may equal its bound; quiet hours and spacing may then hold it into the grace.
-        if nominal>latest if reminder else point>=latest:
+        if not w.role and (nominal>latest if reminder else point>=latest):
             raise Infeasible(f'{label} after the maximum lifetime of {due_bound/86400:g} days ({p.lifetime_setting(w)} setting)')
-        if point>=hard_end:
+        if not w.role and point>=hard_end:
             raise Infeasible(f'{label} held past the maximum lifetime of {max_life/86400:g} days by quiet hours or wake spacing')
         if point<w.expires_at: return w
         if explicit_expiry or e.store.get_wake(w.id) is not None:
@@ -365,16 +375,16 @@ class Tool:
                      w.deadline_at if w.deadline_at is not None else w.next_due_at if w.kind in PROBE_KINDS and w.next_due_at is not None else e.clock.now())
                 due=max(due,e.clock.now())
                 skip=w.kind in RECURRING_KINDS  # Poller.gate drops a recurring tick in quiet hours before spacing
-                release=quiet_until(e,w.session_key,urgent=w.urgent,now=due) if skip and not w.role else None
+                release=quiet_until(e,w.session_key,urgent=w.urgent,now=due) if skip and not holds_messages(w) else None
                 if release and release>due: parts.append(f'Quiet hours skip its ticks until {local(release)}.'); due=release
                 if p.wake_spacing_minutes>0 and s.last_wake_turn_at is not None and not (release and skip and due==release):
                     spacing=s.last_wake_turn_at+p.wake_spacing_minutes*60
                     if spacing>due: parts.append(f'Wake spacing holds it until {local(spacing)}.')
                     due=max(due,spacing)
                 release=quiet_until(e,w.session_key,urgent=w.urgent,now=due)
-                if release and release>due: parts.append(f'Quiet hours {"hold its messages" if w.role else "skip its ticks" if skip else "hold it"} until {local(release)}.')
+                if release and release>due: parts.append(f'Quiet hours {"hold its messages" if holds_messages(w) else "skip its ticks" if skip else "hold it"} until {local(release)}.')
             if not owner_class(w) and s.unanswered_count>=p.max_unanswered:
-                parts.append('Muted: messages are held; work still runs.' if w.role else
+                parts.append('Muted: messages are held; work still runs.' if holds_messages(w) else
                              'Muted: it waits for your reply.' if watcher else 'Muted: it is dropped unless you reply first.')
             if p.wake_spacing_minutes>0 and (w.kind in TIME_KINDS or watcher or w.kind=='owner_silent'):
                 parts.append(f'Wakes are at least {p.wake_spacing_minutes:g} min apart, so it can land a few minutes late.')

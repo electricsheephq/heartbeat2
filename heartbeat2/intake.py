@@ -589,7 +589,8 @@ class Intake:
             for w in s.list_wakes(key):
                 card=s.get_meta('card:'+w.id)
                 if card:
-                    lines.append(f'{w.title or "A wake"} ({w.id}) paused ({card}): keep / slow / stop via /pulse; convert with /pulse watch {w.id}.')
+                    ending = '.' if w.role or w.trigger_json.get('own_time') else f'; convert with /pulse watch {w.id}.'
+                    lines.append(f'{w.title or "A wake"} ({w.id}) paused ({card}): keep / slow / stop via /pulse{ending}')
                     s.set_meta('card:'+w.id,'')
             limits={f.name:getattr(e.policy,f.name) for f in fields(e.policy) if f.name not in {'clock','profile_timezone'}}
             fingerprint=hashlib.sha256(json.dumps(limits,sort_keys=True).encode()).hexdigest()
@@ -792,20 +793,24 @@ class Intake:
                 if w and s.cas_wake(w.id,w.status,expected_version=w.version,
                     **{k:getattr(w,k)+v for k,v in counts.items()}):
                     e.ledger(w,**counts)
+                    s.add_agent_spend(w, f.wake_id+'/'+f.dedupe_key, e.policy.resolved_timezone(),
+                                      counts['cost_microusd'], counts['unpriced_calls'])
             return None
         o=s.get_occurrence(f.wake_id,f.dedupe_key)
         if o and o.attempt==f.attempt: s.set_meta('provider_error:'+o.id,'')
         with s.atomic():
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
             if o and o.state=='started':
-                s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=f.attempt,
+                if s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=f.attempt,
                     api_calls=o.api_calls+1,
                     cache_read_tokens=o.cache_read_tokens+read,cache_write_tokens=o.cache_write_tokens+written,
                     warm_wakes=o.warm_wakes+int(priced and not o.api_calls and prompt>0 and read/prompt>=.5),
                     cold_wakes=o.cold_wakes+int(priced and not o.api_calls and (not prompt or read/prompt<.5)),
                     cost_microusd=o.cost_microusd+(round(price*1e6) if price is not None else 0),unpriced_calls=o.unpriced_calls+int(price is None),
                     tokens_in=o.tokens_in+count('prompt_tokens','input_tokens'),
-                    tokens_out=o.tokens_out+count('completion_tokens','output_tokens'))
+                    tokens_out=o.tokens_out+count('completion_tokens','output_tokens')):
+                    s.add_agent_spend(s.get_wake(o.wake_id), o.id, e.policy.resolved_timezone(),
+                                      round(price*1e6) if price is not None else 0, int(price is None))
         return None
 
     @fail_open

@@ -29,6 +29,10 @@ def is_watcher(wake):
     return wake.kind in PROBE_KINDS | EVENT_KINDS
 
 
+def holds_messages(wake):
+    return not is_owner(wake) and wake.kind in RECURRING_KINDS and not is_watcher(wake)
+
+
 def one_shot(wake):
     return wake.kind == 'at'
 
@@ -259,6 +263,10 @@ class Policy:
                       babysit: bool | None = None, untrusted_payload: bool = False) -> Gate:
         if wake.session_key != session_key:
             return Gate(False, "wrong_session")
+        if wake.trigger_json.get('own_time') and action in {'pause','cancel','off'}:
+            return Gate(False, 'builtin_settings_owned', 'Own time is set in Settings (own_time_hours).')
+        if wake.role and babysit:
+            return Gate(False, 'role_not_babysit')
         if wake.creator == "user" and not wake.role and created_in != "human_turn":
             return Gate(False, "owner_item")
         if action not in {"update", "resume", "pause", "cancel", "off"}:
@@ -360,7 +368,7 @@ class Policy:
                 # Cron retains its expression; this interval is the earliest
                 # permitted next scheduled time rather than a rewritten cron.
                 if value is None and wake.kind in {"cron", "self"}:
-                    value = floor
+                    value = max(floor, 86400 // self.role_budget(wake)) if wake.role and wake.kind == 'self' else floor
                 if value is not None:
                     value = parse_duration(value)
                     bounded = max(value, floor, minimum)
@@ -383,11 +391,11 @@ class Policy:
             # reminder outlives it, via the hard end and Tool.feasible's due-based grace.
             base_life = min(self.max_lifetime_days * 86400, 4 * 3600) if wake.babysit else self.max_lifetime_days * 86400
             default_life = min(base_life, 7 * 86400) if wake.creator == "agent" and wake.kind in RECURRING_KINDS else min(base_life, max_life)
-            hard_end = (wake.created_at or now) + max_life
+            hard_end = now + self.max_reminder_days * 86400 if wake.role else (wake.created_at or now) + max_life
             expires = min(now + default_life, hard_end) if wake.expires_at is None else min(wake.expires_at, hard_end)
             if not math.isfinite(expires) or expires <= now:
                 raise ValueError("expiry must be in the future")
-            rule = "max_lifetime" if wake.expires_at is None and now + default_life < hard_end else self.lifetime_setting(wake).removesuffix('_days')
+            rule = 'max_reminder' if wake.role else ("max_lifetime" if wake.expires_at is None and now + default_life < hard_end else self.lifetime_setting(wake).removesuffix('_days'))
             change("expires_at", expires, "expires", "babysit_lifetime" if wake.babysit else rule)
         if wake.max_fires is not None and (isinstance(wake.max_fires, bool) or not isinstance(wake.max_fires, int) or wake.max_fires < 1):
             raise ValueError("max_fires must be positive")

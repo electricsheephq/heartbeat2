@@ -355,16 +355,21 @@ class Store:
         return totals
 
     def agent_cost_today(self, key, timezone):
-        """Include in-flight usage; owner reminders never spend this budget."""
-        from .policy import owner_class
+        """Read durable usage-arrival totals, independent of retained history."""
         day = local_day(self.clock.now(), timezone)
-        wakes = {w.id: w for w in self.list_wakes(key)}
-        totals = {'cost_microusd': 0, 'unpriced_calls': 0}
-        for o in self.list_occurrences(session_key=key):
-            if (o.started_at is None or local_day(o.started_at, timezone) != day
-                    or owner_class(wakes[o.wake_id])): continue
-            for k in totals: totals[k] += getattr(o, k)
-        return totals
+        return json.loads(self.get_meta(f'agent_spend:{key}:{day}') or
+                          '{"cost_microusd":0,"unpriced_calls":0}')
+
+    def add_agent_spend(self, wake, occurrence_id, timezone, cost_microusd, unpriced_calls):
+        """Called inside the usage transaction; retain the dispatch spend class."""
+        from .policy import owner_class
+        spend = self.get_meta('spend:' + occurrence_id)
+        if spend == 'owner' or spend is None and owner_class(wake): return
+        day = local_day(self.clock.now(), timezone)
+        totals = self.agent_cost_today(wake.session_key, timezone)
+        totals['cost_microusd'] += cost_microusd
+        totals['unpriced_calls'] += unpriced_calls
+        self.set_meta(f'agent_spend:{wake.session_key}:{day}', _json(totals))
 
     def cas_occurrence(self, wake_id: str, dedupe_key: str, expected_state: str,
                        new_state: str, *, attempt: int | None = None, **updates) -> bool:
@@ -544,4 +549,7 @@ class Store:
                 terminal * 3 + [keep_occurrences])
             self.connection.execute("DELETE FROM events WHERE consumed_at IS NOT NULL AND consumed_at<?", (now - 7 * 86400,))
             self.connection.execute("DELETE FROM ledger WHERE day<?", (ledger_cutoff,))
+            self.connection.execute("DELETE FROM meta WHERE key LIKE 'agent_spend:%' AND substr(key,-10)<?", (ledger_cutoff,))
+            self.connection.execute("""DELETE FROM meta WHERE key LIKE 'spend:%' AND NOT EXISTS
+                (SELECT 1 FROM occurrences WHERE 'spend:' || wake_id || '/' || dedupe_key = meta.key)""")
             self.set_meta("last_gc_at", str(now))

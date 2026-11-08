@@ -111,11 +111,12 @@ def test_role_lifetime_and_explicit_expiry(engine):
     assert len(e.ctx.calls) == 1
     start(e)
     end(e, 'progress', False)
-    result = create(e, until={'expires': '+1h'})
+    # A self role's default rhythm spreads its 6 turns over the day (4h), so the expiry must outlast one.
+    result = create(e, until={'expires': '+5h'})
     assert result.get('ok'), result
     limited = e.store.get_wake(result['wake']['id'])
-    assert limited.expires_at == e.clock.now() + 3600
-    e.clock.advance(3601)
+    assert limited.expires_at == e.clock.now() + 5 * 3600
+    e.clock.advance(5 * 3600 + 1)
     e.times()
     assert e.store.get_wake(limited.id).status == 'expired'
 
