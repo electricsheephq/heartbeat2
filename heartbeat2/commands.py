@@ -13,7 +13,7 @@ from .tool import session_env, Infeasible
 DURATIONS = _DURATION.pattern+r'(?:\s*(?:,\s*)?(?:and\s*)?'+_DURATION.pattern+r')*'  # one way to split whitespace: linear
 LIST_RECENT_FINISHED = 10
 FINISHED_STATUSES = FINISHED_WAKE_STATUSES
-HELP = ('/pulse status | list [all] | ledger [7d] | why <id> | add in 2h <note> | '
+HELP = ('/pulse status | desk | list [all] | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
         'role every 1d [at 09:00] <charter> | role self <charter> | budget <id> <n>/day | '
         'pause|resume|cancel <id|all> [for 3d] | off|on | '
@@ -84,8 +84,11 @@ def _clip(text, limit):
     return cut.rstrip(' \t\r\n.,;:·') + '…'
 
 
-def _time(engine, epoch):
-    return datetime.fromtimestamp(epoch, engine.policy.resolved_timezone()).strftime('%Y-%m-%d %H:%M %Z') if epoch is not None else 'none'
+def _time(engine, epoch, *, compact=False):
+    if epoch is None: return 'none'
+    tz = engine.policy.resolved_timezone()
+    fmt = ('%H:%M' if local_day(epoch,tz)==local_day(engine.clock.now(),tz) else '%a %H:%M') if compact else '%Y-%m-%d %H:%M %Z'
+    return datetime.fromtimestamp(epoch,tz).strftime(fmt)
 
 
 def _paused(engine, wake):
@@ -198,6 +201,9 @@ def handle(raw_args, runtime):
             if session is None or session.platform not in MESSAGING_PLATFORMS:
                 return 'Error: /pulse needs a known messaging-gateway session.'
             if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
+            if action == 'desk' and not rest:
+                from .desk import render_desk
+                return render_desk(engine,session,clock=engine.clock,timezone=engine.policy.resolved_timezone(),policy=engine.policy)
             if action == 'status' and not rest:
                 status = engine.status()
                 q = quiet_until(engine,key)
@@ -221,6 +227,9 @@ def handle(raw_args, runtime):
                          f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {daily["delivered"]}/{engine.policy.max_messages_per_day} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
                          f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
                 held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
+                if engine.policy.daily_cost_limit_usd:
+                    from .desk import cost_line
+                    lines.append(cost_line(engine.store,key,engine.policy.resolved_timezone(),engine.policy))
                 if held: lines.append(f'Held items: {held}')
                 if engine.settings_notice(): lines.append(engine.settings_notice())
                 if cache.ttl_for_session(engine.store,session)==(300,'hermes'):

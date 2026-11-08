@@ -69,6 +69,8 @@ class Policy:
     quiet_hours: str = "22:00-08:00"
     quiet_hours_urgent: bool = False
     max_model_wakes_per_day: int = 24
+    daily_cost_limit_usd: float = 0.0
+    own_time_hours: int = 0
     role_turns_per_day_default: int = 6
     role_turns_per_day_max: int = 12
     max_children_per_wake_turn: int = 3
@@ -133,6 +135,12 @@ class Policy:
                 if not math.isfinite(number) or not number.is_integer() or number < 0:
                     raise ValueError(f"invalid nonnegative integer setting: {f.name}")
                 value = int(number)
+            elif isinstance(default, float):
+                if isinstance(value, bool):
+                    raise ValueError(f'invalid number setting: {f.name}')
+                value = float(value)
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError(f'invalid nonnegative number setting: {f.name}')
             else:
                 # YAML 1.1 turns yes/no/on/off into bools before we see them.
                 if isinstance(value, bool):
@@ -166,6 +174,7 @@ class Policy:
             "max_lifetime_days": 3650,
             "max_reminder_days": 3650,
             "checkin_after_hours": 8760,
+            "own_time_hours": 168,
         }.items():
             if getattr(result, name) > maximum:
                 raise ValueError(f"{name} exceeds maximum {maximum:g}")

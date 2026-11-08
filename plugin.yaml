@@ -69,6 +69,19 @@ config_schema:
     default: 6
     label: "Wake messages per day"
     description: "Per chat, local day."
+  own_time_hours:
+    type: int
+    default: 0
+    min: 0
+    max: 168
+    label: "Own time (hours between turns)"
+    description: "0 = off. The agent gets a turn of its own this often to work on its roles, follow things up, reflect or rest. Each is a full model turn; quiet hours hold its messages, not its work."
+  daily_cost_limit_usd:
+    type: number
+    default: 0
+    min: 0
+    label: "Daily cost limit for the agent's own turns (USD)"
+    description: "0 = none. Once today's priced cost of turns the agent started reaches this, its own turns stop until tomorrow. Your own reminders still fire. Unpriced routes are not counted; /pulse status shows them."
   role_turns_per_day_default:
     type: int
     default: 6

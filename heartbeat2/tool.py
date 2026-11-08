@@ -136,12 +136,13 @@ class Tool:
                     child_key = e.child_key(flight) if flight else ''
                     if args.get('role') and (args.get('trigger') or {}).get('kind') not in RECURRING_KINDS:
                         return {'error':'role_needs_recurring'}
-                    depth = (1 if parent.role else parent.depth+1) if parent else 0
+                    parent_role = bool(parent and (parent.role or parent.trigger_json.get('own_time')))
+                    depth = (1 if parent_role else parent.depth+1) if parent else 0
                     children = int(e.store.get_meta(child_key) or 0) if child_key else 0
                     gate = e.policy.creation_gate(session_key=s.session_key, platform=s.platform,
                         chat_type=s.chat_type, allow_gateway_injection=e.injection_allowed(),
                         kind=(args.get('trigger') or {}).get('kind',''), created_in=created_in,
-                        depth=depth, parent_role=bool(parent and parent.role), children_created=children,
+                        depth=depth, parent_role=parent_role, children_created=children,
                         untrusted_payload=bool(flight and flight.untrusted),
                         active_count=sum(w.status in {'active','proposed'} for w in e.store.list_wakes(s.session_key)),
                         global_active_count=sum(w.status in {'active','proposed'} for w in e.store.list_wakes()))

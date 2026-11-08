@@ -342,6 +342,30 @@ class Store:
                 'SELECT count(*) FROM occurrences WHERE wake_id=? AND claimed_at>=? AND claimed_at<?',
                 (wake_id, day.timestamp(), (day + timedelta(days=1)).timestamp())).fetchone()[0]
 
+    def daily_counts(self, key, timezone):
+        totals = {'model_turns': 0, 'delivered': 0}
+        day = local_day(self.clock.now(), timezone)
+        for w in self.list_wakes(key):
+            row = self.get_ledger(day, w.id) or {}
+            for k in totals: totals[k] += row.get(k, 0)
+        for o in self.list_occurrences(session_key=key):
+            if o.state in {'claimed', 'started'}:
+                if o.state == 'claimed': totals['model_turns'] += 1
+                totals['delivered'] += 1
+        return totals
+
+    def agent_cost_today(self, key, timezone):
+        """Include in-flight usage; owner reminders never spend this budget."""
+        from .policy import owner_class
+        day = local_day(self.clock.now(), timezone)
+        wakes = {w.id: w for w in self.list_wakes(key)}
+        totals = {'cost_microusd': 0, 'unpriced_calls': 0}
+        for o in self.list_occurrences(session_key=key):
+            if (o.started_at is None or local_day(o.started_at, timezone) != day
+                    or owner_class(wakes[o.wake_id])): continue
+            for k in totals: totals[k] += getattr(o, k)
+        return totals
+
     def cas_occurrence(self, wake_id: str, dedupe_key: str, expected_state: str,
                        new_state: str, *, attempt: int | None = None, **updates) -> bool:
         if new_state not in _TRANSITIONS.get(expected_state, set()):
