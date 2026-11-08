@@ -1,5 +1,5 @@
 name: heartbeat2
-version: "0.3.0"
+version: "0.3.1"
 description: >-
   HeartBeat 2.0: your agent's own time between your messages. Roles it owns, follow-ups,
   own-time turns and free deterministic watchers, all in the conversation that armed them and

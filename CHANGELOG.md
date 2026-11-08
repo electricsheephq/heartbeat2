@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 — 2026-11-08
+
+- **The desk shows each role's rhythm.** A role row now reads `every 2m`, `every 1d at 09:00`, `cron …` or `self-paced` instead of just its kind, and a role that has used its turns for the day says `resting until tomorrow` instead of a next time it won't take.
+- **A refused command watcher says what would work.** The refusal lists the allowed command prefixes, and when the agent used `git -C <repo>`, it suggests setting the watcher's `cwd` to the repository instead (the allowlist matches the command's first words). The usage skill says the same.
+
 ## 0.3.0 — 2026-11-08
 
 HeartBeat 2.0 now gives your agent time of its own between your messages, not just follow-ups. See `specs/v0.3-AGENCY.md`.

@@ -467,8 +467,15 @@ class Tool:
             if mode not in ('change','success','failure','json'):
                 raise ValueError(f"invalid fire_on '{mode}': use failure (alert when the command exits nonzero), success, change, or json")
             argv=trigger.get('command')
+            if not e.policy.source_command:
+                raise ValueError('command watchers are turned off in this profile\'s settings')
             if not isinstance(argv,list) or not all(isinstance(x,str) for x in argv) or not e.policy.command_allowed(argv):
-                raise ValueError('command probe is not allowlisted')
+                # Tell the agent what would work: cwd instead of `git -C <repo>`, and the allowed commands. Only each
+                # entry's program and first word are shown, so an argument configured later in an entry never reaches the model.
+                hint=('; drop git -C and set the cwd field to the repository'
+                      if isinstance(argv,list) and argv and argv[0]=='git' and '-C' in argv else '')
+                allowed=', '.join(dict.fromkeys(' '.join(entry.split()[:2]) for entry in e.policy.probe_commands.split(',') if entry.strip()))
+                raise ValueError('command probe is not allowlisted'+hint+(f' (allowed: {allowed[:300]})' if allowed else ''))
             raw=trigger.get('cwd')
             if raw is not None and not isinstance(raw,str): raise ValueError('command cwd must be a directory')
             home=e.ctx._manager.home_path

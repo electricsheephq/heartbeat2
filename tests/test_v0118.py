@@ -173,9 +173,9 @@ def test_worst_case_receipt_keeps_exemption(engine):
 
 def test_release_metadata():
     root = Path(__file__).resolve().parents[1]
-    assert 'version: "0.3.0"' in (root/'plugin.yaml').read_text()
+    assert 'version: "0.3.1"' in (root/'plugin.yaml').read_text()
     changelog = (root/'CHANGELOG.md').read_text()
-    assert '## 0.2.4 — 2026-11-08' in changelog and '## 0.3.0 — 2026-11-08' in changelog
+    assert '## 0.2.4 — 2026-11-08' in changelog and '## 0.3.0 — 2026-11-08' in changelog and '## 0.3.1 — 2026-11-08' in changelog
     assert '## 0.2.3 — 2026-11-08' in changelog
     assert '## 0.2.2 — 2026-11-03' in changelog
     assert '## 0.2.1 — 2026-10-20' in changelog
