@@ -150,6 +150,11 @@ def test_director_routes_without_importing_hermes(monkeypatch):
     assert director(request('arm', old=True)) == 'SCRIPTED'
     director(request('stop checking in [in:stop]'))
     assert len(calls) == 3 and director.auxiliary({}) == 'AUX'
+    for malformed in (None, [], {'choices': None}, {'choices': [None, {'message': None}]}):
+        response = malformed
+        director._active = ('new', 1)
+        raw = director(request('⟦pulse o:new a:2⟧'))
+        assert json.loads(raw.body) == malformed and raw.status == 200 and director._active is None
 
 
 def definitions():

@@ -10,6 +10,9 @@ from heartbeat2.model import FINISHED_WAKE_STATUSES, Session, Wake
 from heartbeat2.policy import INJECTION_CONFIG
 from test_engine import engine, arm, KEY
 
+# Written out, not read from the model, so removing a status from FINISHED_WAKE_STATUSES fails these tests.
+FINISHED = ['cancelled', 'done', 'expired', 'failed', 'orphaned']
+
 
 @pytest.fixture
 def runtime(engine, monkeypatch):
@@ -195,7 +198,11 @@ def test_finished_rows_show_no_next_time(runtime):
         assert 'cancelled' in out and ' · next ' not in out
 
 
-@pytest.mark.parametrize('status', sorted(FINISHED_WAKE_STATUSES))
+def test_finished_statuses_are_pinned():
+    assert FINISHED_WAKE_STATUSES == set(FINISHED) and commands.FINISHED_STATUSES == set(FINISHED)
+
+
+@pytest.mark.parametrize('status', FINISHED)
 def test_bulk_commands_skip_finished_items(runtime, status):
     e = runtime.get_engine()
     a = arm(e, status=status)
@@ -209,7 +216,7 @@ def test_bulk_commands_skip_finished_items(runtime, status):
 
 @pytest.mark.parametrize('action,start,end', [('pause', 'active', 'paused'), ('resume', 'paused', 'active'),
                                               ('cancel', 'active', 'cancelled')])
-@pytest.mark.parametrize('status', sorted(FINISHED_WAKE_STATUSES))
+@pytest.mark.parametrize('status', FINISHED)
 def test_tool_id_all_skips_finished_items(runtime, status, action, start, end):
     e = runtime.get_engine()
     done = arm(e, status=status)
