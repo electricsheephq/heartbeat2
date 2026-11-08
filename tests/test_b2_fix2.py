@@ -17,7 +17,11 @@ from heartbeat2.store import Store
 from tests.test_b2_round3 import results
 
 
-def test_n7_prearm_without_chat_turn(monkeypatch, tmp_path):
+@pytest.mark.parametrize('usage', [{}, None, {'prompt_tokens_details': None}, [1],
+                                   {'prompt_tokens': None, 'completion_tokens': None, 'total_tokens': None,
+                                    'prompt_tokens_details': {'cached_tokens': None}}],
+                         ids=['empty', 'null-usage', 'null-details', 'list-usage', 'null-counts'])
+def test_n7_prearm_without_chat_turn(monkeypatch, tmp_path, usage):
     spec = next(s for s in run.scenarios()['scenarios'] if s['id'] == 'N7')
     messages, requests, pre_owner = [], [], []
     monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
@@ -73,7 +77,7 @@ def test_n7_prearm_without_chat_turn(monkeypatch, tmp_path):
             messages.append({'role': 'user', 'content': re.sub(r' \[in:[^]]+\]', '', text)})
             if '[in:capture]' in text:
                 requests.append(copy.deepcopy(messages))
-                self.director.upstream.rows.append({'request': {'messages': requests[-1]}, 'usage': {}})
+                self.director.upstream.rows.append({'request': {'messages': requests[-1]}, 'usage': usage})
             else:
                 token = re.search(r'\[in:([^]]+)\]', text)[1]
                 messages.append({'role': 'assistant', 'content': self.director.scripts[token][0].text})
@@ -110,6 +114,23 @@ def test_n7_prearm_without_chat_turn(monkeypatch, tmp_path):
     result = json.loads((args.out / 'P1/N7-1.json').read_text())
     assert result['prearm_ids'] == [wake['id']]
     assert wake['created_at'] <= result['sent_at'] < wake['next_due_at']
+    assert result['status'] == 'COMPLETE'
+    assert result['tokens'] == dict(prompt_tokens=0, completion_tokens=0, total_tokens=0, cached_tokens=0)
+
+
+@pytest.mark.parametrize('usage,split', [
+    (None, dict(input=0, cache_read=0, cache_write=0, output=0)),
+    ({'prompt_tokens_details': None}, dict(input=0, cache_read=0, cache_write=0, output=0)),
+    ([1], dict(input=0, cache_read=0, cache_write=0, output=0)),
+    ({'cache_read_input_tokens': None, 'cache_creation_input_tokens': None, 'input_tokens': None,
+      'output_tokens': None, 'prompt_tokens': 7, 'completion_tokens': 3,
+      'prompt_tokens_details': {'cached_tokens': 5}}, dict(input=2, cache_read=5, cache_write=0, output=3)),
+], ids=['null-usage', 'null-details', 'list-usage', 'null-counts'])
+def test_score_nullable_usage(usage, split):
+    data = results()[:1]
+    data[0]['upstream_rows'] = [{'wake': True, 'usage': usage}]
+    scored = score.score_results(data, run.scenarios(round=3), round=3)
+    assert scored['paths']['P1']['bars']['B2-5']['cache_split'] == split
 
 
 def invoke_runner(monkeypatch, tmp_path, *options):

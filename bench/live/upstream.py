@@ -10,6 +10,16 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
+def usage_of(value):
+    """A usage object as a dict; null, a list or any other value counts as no usage."""
+    return value if isinstance(value, dict) else {}
+
+
+def first_count(*values):
+    """The first value that is a number, skipping null or malformed counts; 0 when none is."""
+    return next((v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)), 0)
+
+
 class QuotaError(RuntimeError):
     pass
 
@@ -81,7 +91,8 @@ class Upstream:
             with self.lock:
                 row = {'scenario': self.scenario, 'rep': self.rep, 'path': self.path,
                        'request': request, 'response': response, 'status': status,
-                       'usage': response.get('usage', {}), 'elapsed': time.monotonic() - started, 'started_at': started_at,
+                       'usage': usage_of(response.get('usage')) if isinstance(response, dict) else {},
+                       'elapsed': time.monotonic() - started, 'started_at': started_at,
                        'wake': self.wake, 'injected': injected,
                        'run_status': 'QUOTA' if stopped or rate_limited == 2 else 'CALL'}
                 if stopped:

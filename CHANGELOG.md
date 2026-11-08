@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.2.3 — 2026-11-09
+## 0.2.4 — 2026-11-08
+
+- `/pulse list` shows every active, proposed and paused item plus the 10 most recently created finished ones, and says how many older finished items it hid. `/pulse list all` shows everything, as before. A chat used for a few weeks no longer buries its live items under old ones.
+- `/pulse list`, `/pulse status` and the ledger keep each item on one line: a note or title with line breaks is shown with them collapsed to spaces.
+- A finished item no longer shows a "next" time, so a cancelled reminder no longer looks as if it will still fire.
+- A paused item names what resumes it: `keep` or `resume` for a pause the governor proposed, the resume time for `/pulse pause <id> for 3d`, and `resume` otherwise. Before, every paused row offered `keep`, which only answers a governor card.
+- `/pulse pause all`, `resume all` and `cancel all`, and the `pulse` tool with `id: all`, skip items that have already finished instead of listing each one as "skipped (item is terminal)". Which items change is the same as before.
+- The README's "See it work" screenshots are markdown images, so the plugin's page in the Hermes catalog shows them too.
+- Benchmarks: live runs no longer fail on a provider that returns `usage: null`, null token counts or a malformed response body (#45), and round-6 judge packets include the wake payload a wake reply answered (#107).
+
+## 0.2.3 — 2026-11-08
 
 - `/pulse status`, `/pulse list` and the ledger now shorten a long note at the last space or line break that fits, and mark the cut with "…". Before, they cut mid-word (for example "…helpful to offer. Sile"). Titles that `/pulse add` stores from a long note are shortened the same way. A single word longer than the limit is still cut inside the word.
 - The README has a "See it work" section: three screenshots from one real Telegram run, in which the agent watches a test log, writes first when two tests fail, then restores the old code and reruns the suite.

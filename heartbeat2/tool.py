@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 import re
 
-from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS
+from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
 from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS, owner_class
 from .schedule import parse_at, parse_duration, next_every, next_cron
 
@@ -160,7 +160,7 @@ class Tool:
                 if args.get('id') == 'all':
                     if action == 'update':
                         return {'error':'update_requires_id'}
-                    wakes = e.store.list_wakes(s.session_key)
+                    wakes = [w for w in e.store.list_wakes(s.session_key) if w.status not in FINISHED_WAKE_STATUSES]
                 else:
                     w = e.store.get_wake(args.get('id',''))
                     if w is None:

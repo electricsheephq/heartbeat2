@@ -6,9 +6,12 @@ import re
 import pytest
 
 from heartbeat2 import commands
-from heartbeat2.model import Session, Wake
+from heartbeat2.model import FINISHED_WAKE_STATUSES, Session, Wake
 from heartbeat2.policy import INJECTION_CONFIG
 from test_engine import engine, arm, KEY
+
+# Written out, not read from the model, so removing a status from FINISHED_WAKE_STATUSES fails these tests.
+FINISHED = ['cancelled', 'done', 'expired', 'failed', 'orphaned']
 
 
 @pytest.fixture
@@ -139,3 +142,104 @@ def test_long_notes_shorten_at_a_word_not_mid_word(runtime):
     assert commands._clip('Pay\nsupercalifragilisticexpialidocious-invoice', 20) == 'Pay…'
     assert commands._clip('hello world and more', 13) == 'hello world…'
     assert commands._clip('x' * 100, 10) == 'x' * 9 + '…'
+
+
+def test_list_default_shows_live_items_and_newest_finished(runtime):
+    e = runtime.get_engine()
+    assert commands.handle('list', runtime) == 'No wakes or watchers in this chat.'
+    finished = []
+    for n in range(11):
+        w = arm(e, title=f'finished {n}')
+        commands.handle(f'cancel {w.id}', runtime)
+        finished.append(w)
+        e.clock.advance(60)
+    out = commands.handle('list', runtime)
+    assert finished[0].id not in out and all(w.id in out for w in finished[1:])
+    assert out.splitlines()[-1] == '1 older finished item hidden; /pulse list all'
+    # Bookkeeping that rewrites an old finished wake (here a session rebind) must not bring it back.
+    assert e.store.cas_wake(finished[0].id, 'cancelled', armed_session_id='sid2')
+    assert finished[0].id not in commands.handle('list', runtime)
+    live = arm(e, title='live', next_due_at=e.clock.now()+86400)
+    last = arm(e, title='finished last')
+    commands.handle(f'cancel {last.id}', runtime)
+    out = commands.handle('list', runtime)
+    assert live.id in out and last.id in out
+    assert finished[0].id not in out and finished[1].id not in out
+    assert out.splitlines()[-1] == '2 older finished items hidden; /pulse list all'
+    out = commands.handle('list all', runtime)
+    assert all(w.id in out for w in finished+[live, last]) and 'hidden' not in out
+
+
+def test_list_and_ledger_rows_collapse_note_and_title_whitespace(runtime):
+    e = runtime.get_engine()
+    note = 'first line\n\nsecond   line'
+    w = e.store.create_wake(Wake(KEY, note, 'at', title=''))
+    titled = arm(e, title='first title\n\nsecond   title')
+    out = commands.handle('list', runtime)
+    assert len(out.splitlines()) == 2
+    assert 'first line second line' in out and 'first title second title' in out
+    ledger = commands.handle('ledger', runtime).splitlines()
+    assert len(ledger) == 3 and ledger[0].startswith('Ledger 7d:')
+    assert any(row.startswith(w.id+' first line second line:') for row in ledger[1:])
+    assert any(row.startswith(titled.id+' first title second title:') for row in ledger[1:])
+    assert f'\nNote: {note}\n' in commands.handle(f'why {w.id}', runtime)
+    assert e.store.get_wake(w.id).note == note
+    assert e.store.get_wake(titled.id).title == titled.title
+
+
+def test_paused_rows_name_the_command_that_resumes_them(runtime):
+    e = runtime.get_engine()
+    governed = arm(e, status='paused', status_reason='governor:noop')
+    held = arm(e, title='held')
+    commands.handle(f'pause {held.id}', runtime)
+    timed = arm(e, title='timed')
+    commands.handle(f'pause {timed.id} for 3d', runtime)
+    rows = {line.split(' ')[0]: line for line in commands.handle('list', runtime).splitlines()}
+    assert 'paused · resumes on keep/resume' in rows[governed.id]
+    assert 'paused · resumes on resume' in rows[held.id] and 'keep' not in rows[held.id]
+    until = commands._time(e, e.clock.now() + 3 * 86400)
+    assert f'paused · resumes {until} or on resume' in rows[timed.id] and 'keep' not in rows[timed.id]
+    # keep is refused for a command pause, which is why its row no longer offers it.
+    assert 'use /pulse resume' in commands.handle(f'keep {held.id}', runtime)
+
+
+def test_finished_rows_show_no_next_time(runtime):
+    e = runtime.get_engine()
+    added = commands.handle('add in 2h check the deploy', runtime)
+    w = e.store.get_wake(re.search(r'w_[a-z2-7]{8}', added)[0])
+    assert ' · next ' in added
+    cancelled = commands.handle(f'cancel {w.id}', runtime)
+    row = next(line for line in commands.handle('list', runtime).splitlines() if line.startswith(w.id))
+    for out in (cancelled, row):
+        assert 'cancelled' in out and ' · next ' not in out
+
+
+def test_finished_statuses_are_pinned():
+    assert FINISHED_WAKE_STATUSES == set(FINISHED) and commands.FINISHED_STATUSES == set(FINISHED)
+
+
+@pytest.mark.parametrize('status', FINISHED)
+def test_bulk_commands_skip_finished_items(runtime, status):
+    e = runtime.get_engine()
+    a = arm(e, status=status)
+    b = arm(e)
+    out = commands.handle('cancel all', runtime)
+    assert a.id not in out and 'item is terminal' not in out
+    assert b.id in out and e.store.get_wake(b.id).status == 'cancelled'
+    assert commands.handle('pause all', runtime) == 'No matching items in this chat.'
+    assert e.store.get_wake(a.id).status == status
+
+
+@pytest.mark.parametrize('action,start,end', [('pause', 'active', 'paused'), ('resume', 'paused', 'active'),
+                                              ('cancel', 'active', 'cancelled')])
+@pytest.mark.parametrize('status', FINISHED)
+def test_tool_id_all_skips_finished_items(runtime, status, action, start, end):
+    e = runtime.get_engine()
+    done = arm(e, status=status)
+    live = arm(e, status=start)
+    result = e.tool.handle({'action': action, 'id': 'all'}, session_id='sid')
+    assert result.get('ok'), result
+    ids = [item.get('id') or item.get('wake', {}).get('id') for item in result['results']]
+    assert ids == [live.id]
+    assert e.store.get_wake(live.id).status == end
+    assert e.store.get_wake(done.id).status == status
