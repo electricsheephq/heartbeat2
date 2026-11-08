@@ -35,10 +35,28 @@ def test_status_says_a_spent_role_rests_and_leaves_it_out_of_next_due(engine, mo
     assert '· next ' in _row(out, later)
 
 
-def test_status_resting_ignores_paused_and_finished_roles(engine, monkeypatch):
+def test_status_header_is_none_when_the_only_role_is_resting(engine, monkeypatch):
     e = engine
-    paused = arm(e, 'every', role=True, title='Paused', budget_turns_per_day=1, status='paused',
-                 status_reason='command', trigger_json={'kind': 'every', 'every': '2m'})
+    role = arm(e, 'every', role=True, title='Notes', budget_turns_per_day=1,
+               trigger_json={'kind': 'every', 'every': '2m'})
+    e.dispatch(pending(e, role))
+    start(e)
+    end(e, 'progress', False)
+    e.store.cas_wake(role.id, 'active', next_due_at=e.clock.now() + 120)
+    out = _status(e, monkeypatch)
+    assert 'next due: none' in out and '· resting until tomorrow · today 1/1' in _row(out, role)
+
+
+def test_status_resting_ignores_paused_and_non_role_wakes(engine, monkeypatch):
+    e = engine
+    role = arm(e, 'every', role=True, title='Spent then paused', budget_turns_per_day=1,
+               trigger_json={'kind': 'every', 'every': '2m'})
+    e.dispatch(pending(e, role))
+    start(e)
+    end(e, 'progress', False)
+    assert commands._resting(e, e.store.get_wake(role.id))
+    assert e.store.cas_wake(role.id, 'active', status='paused', status_reason='command')
+    paused = e.store.get_wake(role.id)
     out = _status(e, monkeypatch)
     assert 'resting until tomorrow' not in _row(out, paused) and '· paused · ' in _row(out, paused)
     assert not commands._resting(e, paused)

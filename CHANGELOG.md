@@ -3,7 +3,7 @@
 ## 0.3.2 — 2026-11-09
 
 - **`/pulse status` agrees with the desk about a resting role.** A role that has used its turns for the day now reads `resting until tomorrow` in `/pulse status` too, instead of a next time it won't take, and it no longer sets the status header's `next due`.
-- **README: `/pulse` mid-turn.** Known issues now note that Hermes currently drops a plugin's slash command sent while the agent is running a turn ([NousResearch/hermes-agent#131051](https://github.com/NousResearch/hermes-agent/issues/131051)); send it again once the agent has replied.
+- **README: `/pulse` mid-turn.** Known issues now note that Hermes currently drops a plugin's slash command sent while the agent is running a turn ([NousResearch/hermes-agent#131051](https://github.com/NousResearch/hermes-agent/issues/131051)). If `/pulse` gets no reply, wait a minute and send the same command again, with its arguments.
 
 ## 0.3.1 — 2026-11-08
 
