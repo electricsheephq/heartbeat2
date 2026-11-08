@@ -1,5 +1,6 @@
 """Loopback-only bench tests; no Hermes imports on the unit path."""
 import importlib.util
+import io
 import json
 import re
 import sys
@@ -80,6 +81,28 @@ def test_forwarder_and_fault_fallback(server, monkeypatch, tmp_path):
     assert up.forward(body)[1] == 429 and up.quota
     assert up.rows[-1]['run_status'] == 'QUOTA'
     assert up.forward(body)[1] == 429 and len(seen) == 7
+
+
+@pytest.mark.parametrize('response,usage', [
+    ({'usage': None}, {}),
+    ({'usage': {'prompt_tokens_details': None}}, {'prompt_tokens_details': None}),
+    (None, {}),
+    ([], {}),
+])
+def test_forwarder_records_nullable_usage(monkeypatch, tmp_path, response, usage):
+    monkeypatch.setenv('B2_TEST_KEY', 'synthetic-key')
+    up = Upstream('https://upstream.invalid/v1', 'synthetic', 'B2_TEST_KEY',
+                  tmp_path / 'record.jsonl')
+    def open_response(*args, **kwargs):
+        stream = io.BytesIO(json.dumps(response).encode())
+        stream.status = 200
+        return stream
+    monkeypatch.setattr(up.opener, 'open', open_response)
+    assert up.forward({'messages': []}) == (response, 200)
+    row = json.loads(up.record_path.read_text())
+    assert row['usage'] == usage
+    assert up.rows[0]['usage'] == usage
+    assert row['response'] == response
 
 
 def test_director_routes_without_importing_hermes(monkeypatch):

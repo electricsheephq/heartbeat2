@@ -840,6 +840,27 @@ def test_packets_retain_contract_receipts_and_occurrence_scope(tmp_path):
     assert 'old receipt' not in json.dumps(delivery)
 
 
+def test_watcher_packet_includes_wake_payload(tmp_path):
+    scored_fixture(tmp_path, 'W')
+    path = tmp_path / 'W-1.json'
+    result = json.loads(path.read_text())
+    wake = result['turns'][0]['created'][0]
+    payload = '[{"message": "DONE"}]'
+    result['upstream_rows'] = [dict(
+        wake=True, occurrence=f'{wake["id"]}/due:1',
+        started_at=result['bot_messages'][0]['date'] - 1,
+        request=dict(messages=[dict(role='user', content=
+            '<wake-payload source="inbox" trust="untrusted">\n' + payload + '\n</wake-payload>')]))]
+    path.write_text(json.dumps(result))
+    write_score(tmp_path)
+    packets = json.loads((tmp_path / 'packets.json').read_text())
+    packet_map = json.loads((tmp_path / 'packets-map.json').read_text())
+    delivery = next(p for p in packets if packet_map[p['id']]['bar'] == 'B3-8')
+    assert payload in delivery['evidence']
+    assert json.dumps(dict(due=wake['next_due_at'], note=wake['note'])) in delivery['evidence']
+    assert all(payload not in p['evidence'] for p in packets if packet_map[p['id']]['bar'] == 'B3-7')
+
+
 def test_score_marks_unjudged_bars_pending_until_merge(tmp_path):
     summary = scored_fixture(tmp_path)
     rep = summary['repetitions'][0]

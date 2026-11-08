@@ -89,7 +89,7 @@ def aggregate(score):
             for c in cells:
                 for row in c.get('upstream_rows', []):
                     usage = row.get('usage') or {}
-                    read = usage.get('cache_read_input_tokens', usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))
+                    read = usage.get('cache_read_input_tokens', (usage.get('prompt_tokens_details') or {}).get('cached_tokens', 0))
                     written = usage.get('cache_creation_input_tokens', 0)
                     values = (usage.get('input_tokens', max(0, usage.get('prompt_tokens', 0) - read - written)), read, written, usage.get('output_tokens', usage.get('completion_tokens', 0)))
                     for key, value in zip(split, values):

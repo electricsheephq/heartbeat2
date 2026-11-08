@@ -17,7 +17,9 @@ from heartbeat2.store import Store
 from tests.test_b2_round3 import results
 
 
-def test_n7_prearm_without_chat_turn(monkeypatch, tmp_path):
+@pytest.mark.parametrize('usage', [{}, None, {'prompt_tokens_details': None}],
+                         ids=['empty', 'null-usage', 'null-details'])
+def test_n7_prearm_without_chat_turn(monkeypatch, tmp_path, usage):
     spec = next(s for s in run.scenarios()['scenarios'] if s['id'] == 'N7')
     messages, requests, pre_owner = [], [], []
     monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
@@ -73,7 +75,7 @@ def test_n7_prearm_without_chat_turn(monkeypatch, tmp_path):
             messages.append({'role': 'user', 'content': re.sub(r' \[in:[^]]+\]', '', text)})
             if '[in:capture]' in text:
                 requests.append(copy.deepcopy(messages))
-                self.director.upstream.rows.append({'request': {'messages': requests[-1]}, 'usage': {}})
+                self.director.upstream.rows.append({'request': {'messages': requests[-1]}, 'usage': usage})
             else:
                 token = re.search(r'\[in:([^]]+)\]', text)[1]
                 messages.append({'role': 'assistant', 'content': self.director.scripts[token][0].text})
@@ -110,6 +112,18 @@ def test_n7_prearm_without_chat_turn(monkeypatch, tmp_path):
     result = json.loads((args.out / 'P1/N7-1.json').read_text())
     assert result['prearm_ids'] == [wake['id']]
     assert wake['created_at'] <= result['sent_at'] < wake['next_due_at']
+    assert result['status'] == 'COMPLETE'
+    assert result['tokens'] == dict(prompt_tokens=0, completion_tokens=0, total_tokens=0, cached_tokens=0)
+
+
+@pytest.mark.parametrize('usage', [None, {'prompt_tokens_details': None}],
+                         ids=['null-usage', 'null-details'])
+def test_score_nullable_usage(usage):
+    data = results()[:1]
+    data[0]['upstream_rows'] = [{'wake': True, 'usage': usage}]
+    scored = score.score_results(data, run.scenarios(round=3), round=3)
+    assert scored['paths']['P1']['bars']['B2-5']['cache_split'] == dict(
+        input=0, cache_read=0, cache_write=0, output=0)
 
 
 def invoke_runner(monkeypatch, tmp_path, *options):

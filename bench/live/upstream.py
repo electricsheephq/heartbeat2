@@ -81,7 +81,8 @@ class Upstream:
             with self.lock:
                 row = {'scenario': self.scenario, 'rep': self.rep, 'path': self.path,
                        'request': request, 'response': response, 'status': status,
-                       'usage': response.get('usage', {}), 'elapsed': time.monotonic() - started, 'started_at': started_at,
+                       'usage': (response.get('usage') or {}) if isinstance(response, dict) else {},
+                       'elapsed': time.monotonic() - started, 'started_at': started_at,
                        'wake': self.wake, 'injected': injected,
                        'run_status': 'QUOTA' if stopped or rate_limited == 2 else 'CALL'}
                 if stopped:

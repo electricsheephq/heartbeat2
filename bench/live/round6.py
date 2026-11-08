@@ -364,7 +364,7 @@ def write_summary(out, summary, name):
 
 
 def write_score(out):
-    from .adjudicate import turn_fields
+    from .adjudicate import evidence, turn_fields
     from .round3 import turn_pulse
     declaration = json.loads((out / 'declaration.json').read_text())
     results, packets, packet_map = [], [], {}
@@ -399,7 +399,8 @@ def write_score(out):
                 wake_note='; '.join(t['owner']['text'] for t in sources),
                 owner_message=turn['owner']['text'] if turn else None,
                 evidence=[json.dumps(dict(due=w.get('next_due_at'), note=w.get('note'))) for t in sources
-                          for w in t['created'] if firing is None or w['id'] == firing],
+                          for w in t['created'] if firing is None or w['id'] == firing] +
+                         (evidence({'upstream_rows': rows}) if turn is None else []),
                 delivered_text='\n'.join(m['text'] for m in messages), pulse_results=pulse_results,
                 receipts=[r['receipt'] for r in pulse_results if 'receipt' in r],
                 tool_contract=fields['pulse_description'], **fields))
