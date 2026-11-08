@@ -15,7 +15,7 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import MESSAGING_PLATFORMS, owner_class, is_watcher, one_shot
+from .policy import MESSAGING_PLATFORMS, owner_class, is_owner, is_watcher, one_shot
 from .schedule import time_due, local_day, parse_duration, next_every
 from . import governor
 
@@ -483,6 +483,19 @@ class Poller:
         if now-session.last_human_at>=after:
             s.add_occurrence(w.id,'s:'+session.episode_id)
 
+    def message_hold_reason(self,w,s):
+        """Agent recurring work may continue while its messages are held."""
+        if s is None or is_owner(w) or w.kind not in RECURRING_KINDS or is_watcher(w):
+            return ''
+        from .commands import quiet_until
+        if quiet_until(self,s.session_key,urgent=w.urgent) is not None:
+            return 'quiet_hours'
+        if self.policy.unanswered_gate(w,s.unanswered_count):
+            return 'unanswered'
+        if self.daily(s.session_key)['delivered']>=self.policy.max_messages_per_day:
+            return 'daily_message_cap'
+        return ''
+
     def gate(self,w,o,s):
         now=self.clock.now()
         if o.state=='pending' and o.held_since is not None and o.error.startswith('held_'):
@@ -512,16 +525,17 @@ class Poller:
                 health.pop('trial'); self.store.set_meta('provider_health',json.dumps(health))
         if health and (health['until']>now or health.get('trial')):
             return 'provider_unavailable',True,health['until'] if health['until']>now else None
-        # Windows hold pending work before mute/caps can drop it. Re-evaluate
-        # every gate once the window ends; owner reminders only bypass mute.
+        # Message gates silence agent recurring work; spend and dispatch gates
+        # still apply. Other wakes retain the existing hold/drop ordering.
+        message_held=self.message_hold_reason(w,s)
         from .commands import quiet_until
         quiet=quiet_until(self,s.session_key,urgent=w.urgent)
-        if quiet is not None: return 'quiet_hours',w.kind not in RECURRING_KINDS,quiet
+        if quiet is not None and not message_held: return 'quiet_hours',w.kind not in RECURRING_KINDS,quiet
         mute=self.policy.unanswered_gate(w,s.unanswered_count)
-        if mute: return mute,mute=='held_unanswered',None
+        if mute and not message_held: return mute,mute=='held_unanswered',None
         totals=self.daily(s.session_key)
         cap='daily_model_cap' if totals['model_turns']>=self.policy.max_model_wakes_per_day else 'daily_message_cap' if totals['delivered']>=self.policy.max_messages_per_day else ''
-        if cap and not (owner_class(w) and one_shot(w)):
+        if cap and not (cap=='daily_message_cap' and message_held) and not (owner_class(w) and one_shot(w)):
             if is_watcher(w):
                 return 'held_daily_cap',True,None
             return cap,False,None
@@ -580,6 +594,10 @@ class Poller:
         if cache_line is None:
             cache_line='' if s.connection.in_transaction else self.cache_line(w)
         held_by=o.error  # Claim clears the stored deferral; retain it for this prompt.
+        message_held=self.message_hold_reason(w,session)
+        if message_held:
+            if not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=True,
+                                       held_reason='message_held:'+message_held): return
         if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
         o=s.get_occurrence(w.id,o.dedupe_key)
         health=json.loads(s.get_meta('provider_health') or '{}')
@@ -597,7 +615,8 @@ class Poller:
         text=render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-1,
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
-             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,cache_line=cache_line,marker_tag=tag)
+             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
+             cache_line=cache_line,marker_tag=tag)
         if not self.eligible():
             # Lost the home after claiming: give the claim back unsent, as it was.
             if health:

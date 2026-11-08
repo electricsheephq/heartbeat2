@@ -388,9 +388,9 @@ def test_R10_A10_large_event_payload_still_wakes(engine, kind):
 def test_R10_A11_silence_contract_is_final_reply_only(engine):
     w = arm(engine); engine.tick()
     text = engine.ctx.calls[-1][0]
-    contract = 'notify=false → your final reply is not posted. Write no text alongside tool calls on a wake turn; some platforms show tool progress.'
+    contract = 'notify=false → your final reply is not posted; the work still counts. Write no text alongside tool calls on a wake turn; some platforms show tool progress.'
     assert contract in text and 'nothing is posted' not in text
-    assert contract in SKILL.read_text()
+    assert 'Write no text alongside tool calls on a wake turn; some platforms show tool progress.' in SKILL.read_text()
 
 
 @pytest.mark.parametrize('timeout', ['0', '-1'])

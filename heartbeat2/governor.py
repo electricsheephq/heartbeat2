@@ -11,11 +11,16 @@ VALUABLE = {'progress','done','needs_attention'}
 
 
 def value(engine,o):
-    if engine.store.get_meta('ignored:'+o.id) or o.force_silent or not o.notify:
+    # Ignored deliveries retain their existing ratio/engagement semantics.
+    if engine.store.get_meta('ignored:'+o.id):
+        return 0
+    if o.outcome in VALUABLE and o.summary.strip():
+        return 1
+    if o.force_silent or not o.notify:
         return 0
     if engine.store.get_meta('engaged:'+o.id):
         return int(o.delivered)
-    return int(o.outcome in VALUABLE)
+    return int(o.delivered and o.outcome in VALUABLE)
 
 
 def pause(engine,wake,rule):

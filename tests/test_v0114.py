@@ -591,7 +591,9 @@ def test_timed_quiet_chain_preserves_live_gate_decisions(engine, command, monkey
         monkeypatch.setattr(commands,'quiet_until',chained)
         new = engine.gate(w,o,s)
         assert new[:2] == old[:2]
-        assert new == (('quiet_hours',kind!='every',now+11*3600) if hours<11 else ('',False,None))
+        assert new == (('quiet_hours',True,now+11*3600) if hours<11 and kind!='every' else ('',False,None))
+        if kind=='every':
+            assert engine.message_hold_reason(w,s) == ('quiet_hours' if hours<11 else '')
     engine.clock.wall = now
     engine.policy = replace(engine.policy, quiet_hours_urgent=True)
     assert commands.quiet_until(engine,KEY,urgent=True) is None

@@ -53,7 +53,7 @@ config_schema:
     type: str
     default: "22:00-08:00"
     label: "Quiet hours"
-    description: "HH:MM-HH:MM, may cross midnight; blank for none. Due one-shots wait until the end; recurring ticks inside are skipped."
+    description: "HH:MM-HH:MM, may cross midnight; blank for none. Due one-shots wait until the end. The agent's own recurring work keeps running inside them, with its messages held."
   quiet_hours_urgent:
     type: bool
     default: false
@@ -73,7 +73,7 @@ config_schema:
     type: int
     default: 2
     label: "Unanswered messages before mute"
-    description: "Wakes you armed always fire; agent watchers wait for your reply; agent reminders are dropped."
+    description: "Wakes you armed always fire; agent watchers wait for your reply; agent one-time reminders are dropped; the agent's recurring work keeps running, with its messages held."
   min_interval_minutes:
     type: int
     default: 15

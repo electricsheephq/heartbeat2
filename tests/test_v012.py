@@ -47,14 +47,18 @@ def test_mute_holds_watchers(engine, creator):
 
 
 @pytest.mark.parametrize('kind,creator,trigger', [('every','agent',{}), ('owner_silent','user',{'builtin':True})])
-def test_mute_drops_nudges(engine, kind, creator, trigger):
+def test_mute_holds_recurring_messages_but_drops_builtin_checkin(engine, kind, creator, trigger):
     engine.policy = replace(engine.policy, owner_silent_checkin=True)
     session(engine, unanswered_count=2, last_human_at=engine.clock.now()-90000)
     w = arm(engine, kind, creator=creator, trigger_json=trigger)
     o = pending(engine, w)
     engine.dispatch(o)
-    assert engine.store.get_occurrence(w.id, o.dedupe_key).error == 'unanswered'
-    assert engine.store.get_occurrence(w.id, o.dedupe_key).state == 'skipped'
+    current = engine.store.get_occurrence(w.id, o.dedupe_key)
+    if kind == 'every':
+        assert current.state == 'claimed' and current.force_silent
+        assert current.held_reason == 'message_held:unanswered'
+    else:
+        assert current.error == 'unanswered' and current.state == 'skipped'
 
 
 @pytest.mark.parametrize('creator,expected', [('user','claimed'), ('agent','skipped')])
