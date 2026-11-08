@@ -187,6 +187,22 @@ def test_list_and_ledger_rows_collapse_note_and_title_whitespace(runtime):
     assert e.store.get_wake(titled.id).title == titled.title
 
 
+def test_paused_rows_name_the_command_that_resumes_them(runtime):
+    e = runtime.get_engine()
+    governed = arm(e, status='paused', status_reason='governor:noop')
+    held = arm(e, title='held')
+    commands.handle(f'pause {held.id}', runtime)
+    timed = arm(e, title='timed')
+    commands.handle(f'pause {timed.id} for 3d', runtime)
+    rows = {line.split(' ')[0]: line for line in commands.handle('list', runtime).splitlines()}
+    assert 'paused · resumes on keep/resume' in rows[governed.id]
+    assert 'paused · resumes on resume' in rows[held.id] and 'keep' not in rows[held.id]
+    until = commands._time(e, e.clock.now() + 3 * 86400)
+    assert f'paused · resumes {until} or on resume' in rows[timed.id] and 'keep' not in rows[timed.id]
+    # keep is refused for a command pause, which is why its row no longer offers it.
+    assert 'use /pulse resume' in commands.handle(f'keep {held.id}', runtime)
+
+
 def test_finished_rows_show_no_next_time(runtime):
     e = runtime.get_engine()
     added = commands.handle('add in 2h check the deploy', runtime)

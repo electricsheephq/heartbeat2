@@ -87,9 +87,16 @@ def _time(engine, epoch):
     return datetime.fromtimestamp(epoch, engine.policy.resolved_timezone()).strftime('%Y-%m-%d %H:%M %Z') if epoch is not None else 'none'
 
 
+def _paused(engine, wake):
+    # Only a governor pause takes keep; only a timed /pulse pause resumes on its own (resume_timed).
+    if wake.status_reason.startswith('governor:'): return 'paused · resumes on keep/resume'
+    until = float(engine.store.get_meta('resume_after:'+wake.id) or 0) if wake.status_reason == 'command' else 0
+    return f'paused · resumes {_time(engine, until)} or on resume' if until else 'paused · resumes on resume'
+
+
 def _item(engine, wake):
     if wake.status in FINISHED_STATUSES: due = ''
-    elif wake.status == 'paused': due = 'paused · resumes on keep/resume'
+    elif wake.status == 'paused': due = _paused(engine, wake)
     else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
     return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · {wake.kind}' + (f' · {due}' if due else '') + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
