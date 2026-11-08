@@ -9,6 +9,22 @@
 - **It catches its own pointless wakes.** A watcher costs no model call until something changes. A wake that keeps finding nothing slows down, suggests a watcher, then pauses and asks you once.
 - **You own every guardrail.** Quiet hours, daily caps, the unanswered mute, intervals and lifetimes are plugin settings. The agent works inside them: it can only narrow its own wakes (shorter lifetime, fewer fires, slower pacing) or switch itself off, never widen a setting.
 
+## See it work
+
+One real run in a Telegram DM, captured as it happened (only reply-quote headers and two internal tool names are painted out). The owner switches a rounding function, starts the tests in a terminal, and asks the agent to speak up only if something fails.
+
+**1. Ask once.** The agent arms a file watcher on the test log and says what it will do. Mid-run, `/pulse status` shows the watcher checking and no new messages.
+
+<p align="center"><img src="docs/media/see-it-work-1-armed.png" alt="The agent's receipt for a failure-only watcher on build.log, and /pulse status showing the watcher active while the tests run" width="100%"></p>
+
+**2. It writes first.** Two tests fail. About a minute later the agent posts the failures and the wrong values, with no message from the owner in between.
+
+<p align="center"><img src="docs/media/see-it-work-2-followup.png" alt="The agent's unprompted follow-up listing two failed tests next to the terminal's pytest failures" width="100%"></p>
+
+**3. Same conversation.** Asked "Is that my round() change?", it answers from the chat it already has, restores the Decimal version and reruns the suite: all 10 tests pass.
+
+<p align="center"><img src="docs/media/see-it-work-3-fix.png" alt="The agent confirms the round() change caused both failures and reports all 10 tests passing after restoring the Decimal version" width="100%"></p>
+
 ## What it feels like
 
 **A follow-up that reads the room.**

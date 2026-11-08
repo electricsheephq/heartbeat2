@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3 — 2026-11-09
+
+- `/pulse status`, `/pulse list` and the ledger now shorten a long note at the last space or line break that fits, and mark the cut with "…". Before, they cut mid-word (for example "…helpful to offer. Sile"). Titles that `/pulse add` stores from a long note are shortened the same way. A single word longer than the limit is still cut inside the word.
+- The README has a "See it work" section: three screenshots from one real Telegram run, in which the agent watches a test log, writes first when two tests fail, then restores the old code and reruns the suite.
+
 ## 0.2.2 — 2026-11-03
 
 - Only the gateway that serves a profile now opens that profile's schedule, holds its poller lock or delivers its wakes. A Hermes gateway can load every profile's plugins when it starts, and it gives its message injector to all of them. Before, a gateway that did not serve a profile could tick that profile's schedule and send a due wake through itself; Hermes accepted the wake and then dropped it, so it was retried and could be given up after three tries. HeartBeat now asks the gateway with Hermes's own routing rule; a multiplex host must also have admitted the profile (#113).

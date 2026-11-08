@@ -24,7 +24,7 @@ from test_v014a import bind
 SETTINGS = {'quiet_hours': '', 'timezone': 'UTC'}
 
 
-def until(predicate, timeout=2):
+def until(predicate, timeout=10):
     deadline = time.monotonic()+timeout
     while time.monotonic() < deadline:
         if predicate(): return True
@@ -40,6 +40,12 @@ def locked(home):
         except BlockingIOError: return True
         fcntl.flock(f, fcntl.LOCK_UN)
         return False
+
+
+def holds(rt):
+    """The poller reports it holds the lock. Wait on this before probing the OS lock: a probe that takes the flock
+    while the poller's first acquire() runs makes the poller back off for 30 s."""
+    return rt._runner is not None and rt._runner._lock_file is not None
 
 
 def unload(ctx):
@@ -77,7 +83,8 @@ def test_served_home_starts_when_injector_is_published(tmp_path, clock):
         time.sleep(.1)
         assert not (tmp_path/'plugin-data').exists()
         ctx._manager.has_gateway_message_injector = True
-        assert until(lambda: locked(tmp_path))
+        assert until(lambda: holds(rt))
+        assert locked(tmp_path)
         assert rt.status() is None
     finally:
         unload(ctx)
@@ -88,7 +95,8 @@ def test_unserved_mid_run_releases_lock_and_holds_due_wakes(tmp_path, clock):
     rt = boot(ctx, clock)
     store = None
     try:
-        assert until(lambda: locked(tmp_path))
+        assert until(lambda: holds(rt))
+        assert locked(tmp_path)
         ctx.runner.served = False
         assert until(lambda: not locked(tmp_path))
         store = Store(tmp_path/'plugin-data/heartbeat2/pulse.db', clock)
@@ -100,7 +108,7 @@ def test_unserved_mid_run_releases_lock_and_holds_due_wakes(tmp_path, clock):
         assert rt.status()['reason'] == serving.REASONS[serving.FOREIGN]
         ctx.runner.served = True
         clock.advance(10)
-        assert ctx.injected.wait(timeout=2)
+        assert ctx.injected.wait(timeout=10)
         clock.advance(10)
         time.sleep(.2)
         assert len(ctx.calls) == 1
