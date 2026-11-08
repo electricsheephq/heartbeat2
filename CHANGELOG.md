@@ -11,7 +11,7 @@ HeartBeat 2.0 now gives your agent time of its own between your messages, not ju
 - **Your absence holds messages, not work.** For the agent's own recurring work, roles and own time, quiet hours, the unanswered mute and the daily message cap now hold back messages while the turn still runs silently. The daily wake-turn cap still stops turns, and so does the new optional daily cost limit (`daily_cost_limit_usd`) for turns the agent started; it keeps a running total per day, so replays and history cleanup can't reset it. Your own reminders behave as before.
 - **A new wake contract.** The wake prompt tells the agent the turn is its own to act on, explains each outcome, and drops "avoid writing files when staying silent". The usage skill, the tool, skill and manifest descriptions, the README and SECURITY.md are rewritten around roles, own time and budgets. `/pulse watch` refuses roles and own time, which stay recurring.
 
-Upgrade: reinstall and restart the gateway. The two new wake columns are added in place to the existing plugin-data database.
+Upgrade: reinstall and restart the gateway. The daily cost limit counts spend from the upgrade onward. The two new wake columns are added in place to the existing plugin-data database.
 
 ## 0.2.4 — 2026-11-08
 

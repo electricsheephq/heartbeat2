@@ -198,3 +198,27 @@ def test_switch_keeps_wake_turn_limits_for_the_old_turn(engine, kind):
     if kind == 'role':
         e.tool.handle({'action': 'update', 'id': w.id, 'budget': {'turns_per_day': 12}}, session_id='sid')
         assert e.store.get_wake(w.id).budget_turns_per_day == 2
+
+
+def test_own_time_lifetime_is_settings_owned(engine):
+    e = engine
+    w = own(e)
+    for until in ({'expires': 'in 1h'}, {'owner_replies': True}, {'max_fires': 1}):
+        result = e.tool.handle({'action': 'update', 'id': w.id, 'until': until}, session_id='sid')
+        assert result.get('error') == 'builtin_settings_owned', result
+    assert e.store.get_wake(w.id).expires_at is None
+
+
+def test_desk_ignores_a_claim_superseded_before_it_started(engine):
+    e = engine
+    w = arm(e, 'self', role=True, next_due_at=e.clock.now()+3600)
+    e.dispatch(pending(e, w))
+    start(e)
+    end(e, 'progress', False, summary='drafted notes')
+    e.clock.advance(601)
+    e.dispatch(pending(e, e.store.get_wake(w.id), 'second'))
+    e.intake.on_session_reset(old_session_id='sid', new_session_id='new')
+    assert e.store.get_occurrence(w.id, 'second').state == 'superseded'
+    from heartbeat2.desk import render_desk
+    text = render_desk(e, e.store.get_session(KEY), clock=e.clock, timezone=e.policy.resolved_timezone(), policy=e.policy)
+    assert 'last: drafted notes' in text, text

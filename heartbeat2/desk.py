@@ -29,7 +29,7 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
     roles = sorted((w for w in wakes if w.role), key=lambda w: (w.updated_at, w.created_at), reverse=True)
     rows = []
     for w in roles:
-        history = [o for o in store.list_occurrences(w.id) if o.claimed_at is not None and o.ended_at is not None]
+        history = [o for o in store.list_occurrences(w.id) if o.started_at is not None and o.ended_at is not None]
         last = max(history, key=lambda o: o.ended_at) if history else None
         summary = _clip(_oneline(last.summary or last.outcome or last.state), 80) if last else 'none'
         due = ('paused · ' + _oneline(w.status_reason or 'paused') if w.status == 'paused'

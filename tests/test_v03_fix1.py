@@ -101,6 +101,9 @@ def test_f1_gc_cannot_restore_daily_budget(engine, monkeypatch):
     assert e.store.get_occurrence(w.id, 't:test').state == 'done'
     assert e.store.get_meta('spend:'+w.id+'/t:test') == 'agent'
     assert e.store.get_meta('agent_spend:'+KEY+':2000-01-01') is None
+    # Even with the priced occurrence gone, the durable daily total still holds.
+    e.store.connection.execute('DELETE FROM occurrences WHERE wake_id=? AND dedupe_key=?', (w.id, 't:test'))
+    assert total(e)['cost_microusd'] == 1000000
     e.dispatch(pending(e, e.store.get_wake(w.id), 'after-gc'))
     assert e.store.get_occurrence(w.id, 'after-gc').error == 'daily_cost_cap'
 
