@@ -15,7 +15,7 @@ def test_desk_shows_each_roles_rhythm(engine):
     out = desk(e)
     assert f'- role {every.id} Notes · every 2m · ' in out
     assert f'- role {daily.id} Daily · every 1d at 09:00 · ' in out
-    assert f'- role {nightly.id} Nightly · cron 0 3 * * * · ' in out
+    assert f'- role {nightly.id} Nightly · cron `0 3 * * *` · ' in out
     assert f'- role {paced.id} Paced · self-paced · ' in out
 
 
@@ -58,4 +58,4 @@ def test_desk_rhythm_survives_odd_stored_triggers(engine):
     out = desk(e)
     assert f'- role {odd.id} Odd · every · ' in out
     assert f'- role {wide.id} Wide · every 2m · ' in out
-    assert f'- role {weekly.id} Weekly · cron 30 9 1,15 * mon-fri · ' in out
+    assert f'- role {weekly.id} Weekly · cron `30 9 1,15 * mon-fri` · ' in out
