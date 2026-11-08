@@ -20,11 +20,12 @@ def cost_line(store, key, timezone, policy):
 
 def _rhythm(wake) -> str:
     """The role's rhythm as the owner set it: every 2m, every 1d at 09:00, cron …, or self-paced."""
-    trigger = wake.trigger_json or {}
+    trigger = wake.trigger_json if isinstance(wake.trigger_json, dict) else {}
     if wake.kind == 'every' and trigger.get('every') is not None:
-        return f"every {trigger['every']}" + (f" at {trigger['at']}" if trigger.get('at') else '')
+        anchor = f" at {_clip(_oneline(str(trigger['at'])), 8)}" if trigger.get('at') else ''
+        return f"every {_clip(_oneline(str(trigger['every'])), 16)}{anchor}"
     if wake.kind == 'cron' and trigger.get('cron'):
-        return 'cron ' + _clip(_oneline(str(trigger['cron'])), 24)
+        return 'cron ' + _clip(_oneline(str(trigger['cron'])), 40)
     if wake.kind == 'self':
         return 'self-paced'
     return wake.kind

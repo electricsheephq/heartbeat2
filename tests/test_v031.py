@@ -23,7 +23,8 @@ def test_desk_says_a_spent_role_rests_until_tomorrow(engine):
     e = engine
     role = arm(e, 'every', role=True, title='Notes', budget_turns_per_day=1,
                trigger_json={'kind': 'every', 'every': '2m'})
-    assert 'next ' in desk(e) and 'today 0/1' in desk(e)
+    row = next(line for line in desk(e).splitlines() if line.startswith(f'- role {role.id} '))
+    assert '· next ' in row and row.endswith('today 0/1')
     e.dispatch(pending(e, role))
     start(e)
     end(e, 'progress', False)
@@ -38,10 +39,23 @@ def test_refused_command_watcher_names_cwd_and_the_allowlist(engine, tmp_path):
     assert result.get('error') == 'invalid_request', result
     detail = result['detail']
     assert detail.startswith('command probe is not allowlisted; drop git -C and set the cwd field to the repository')
-    assert '(allowed: gh pr view, gh pr checks' in detail and 'git log)' in detail
+    assert '(allowed: gh pr, gh run, git ls-remote, git status, git log)' in detail
     plain = create(e, {'kind': 'command', 'command': ['rm', 'file']})['detail']
     assert plain.startswith('command probe is not allowlisted (allowed: ') and 'git -C' not in plain
+    e.policy = replace(e.policy, probe_commands='mytool --token SECRET123 report, git log')
+    shown = create(e, {'kind': 'command', 'command': ['git', '-C', str(tmp_path), 'log']})['detail']
+    assert '(allowed: mytool --token, git log)' in shown and 'SECRET123' not in shown
     e.policy = replace(e.policy, source_command=False)
-    off = create(e, {'kind': 'command', 'command': ['git', 'status']})
-    assert off.get('error'), off
-    assert 'allowed:' not in str(off)
+    off = create(e, {'kind': 'command', 'command': ['git', '-C', str(tmp_path), 'log']})
+    assert off.get('error') == 'source_disabled' and 'git -C' not in str(off), off
+
+
+def test_desk_rhythm_survives_odd_stored_triggers(engine):
+    e = engine
+    odd = arm(e, 'every', role=True, title='Odd', trigger_json=['every', '2m'])
+    wide = arm(e, 'every', role=True, title='Wide', trigger_json={'kind': 'every', 'every': '2m' + ' ' * 1900})
+    weekly = arm(e, 'cron', role=True, title='Weekly', trigger_json={'kind': 'cron', 'cron': '30 9 1,15 * mon-fri'})
+    out = desk(e)
+    assert f'- role {odd.id} Odd · every · ' in out
+    assert f'- role {wide.id} Wide · every 2m · ' in out
+    assert f'- role {weekly.id} Weekly · cron 30 9 1,15 * mon-fri · ' in out
