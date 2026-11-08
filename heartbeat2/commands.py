@@ -68,11 +68,13 @@ def resume_timed(engine):
 
 
 def _clip(text, limit):
-    """Shorten text to whole words within limit, marking the cut."""
+    """Shorten text at the last word break (any whitespace) within limit and mark the cut with "…".
+    A single word longer than the limit is cut inside the word."""
     if len(text) <= limit: return text
     head = text[:limit-1]
-    cut = head.rsplit(' ', 1)[0] if ' ' in head else head
-    return cut.rstrip(' .,;:·') + '…'
+    brk = re.search(r'\s\S*$', head)
+    cut = head[:brk.start()] if brk and brk.start() > 0 else head
+    return cut.rstrip(' \t\r\n.,;:·') + '…'
 
 
 def _time(engine, epoch):
