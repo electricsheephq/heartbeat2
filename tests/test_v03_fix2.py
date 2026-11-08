@@ -235,3 +235,32 @@ def test_own_time_babysit_and_pacing_are_settings_owned(engine):
     e.own_time()
     back = e.store.get_wake(w.id)
     assert (back.status, back.fires, back.max_fires, back.babysit) == ('active', 0, None, False)
+
+
+def test_fenced_turn_spend_still_counts(engine, monkeypatch):
+    from heartbeat2 import cache
+    e = engine
+    w = arm(e, 'self', role=True, next_due_at=e.clock.now()+3600)
+    e.dispatch(pending(e, w))
+    start(e)
+    e.intake.on_session_reset(old_session_id='sid', new_session_id='new')
+    monkeypatch.setattr(cache, 'cost', lambda *a, **kw: 1)
+    e.intake.post_api_request(session_id='sid', turn_id='turn', usage={'prompt_tokens': 10})
+    assert e.store.agent_cost_today(KEY, e.policy.resolved_timezone())['cost_microusd'] == 1000000
+    e.policy = replace(e.policy, daily_cost_limit_usd=1)
+    other = arm(e, 'every', armed_session_id='new')
+    e.dispatch(pending(e, other, 'capped'))
+    assert e.store.get_occurrence(other.id, 'capped').error == 'daily_cost_cap'
+
+
+def test_own_time_repaces_once_when_the_floor_rises(engine):
+    e = engine
+    w = own(e, 1)
+    e.policy = replace(e.policy, agent_ungated_floor_minutes=120)
+    e.own_time()
+    w = e.store.get_wake(w.id)
+    assert (w.base_interval_s, w.pacing_min_s, w.trigger_json['floor']) == (7200, 7200, 7200)
+    due = w.next_due_at
+    e.clock.advance(60)
+    e.own_time()
+    assert e.store.get_wake(w.id).next_due_at == due

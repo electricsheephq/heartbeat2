@@ -81,7 +81,7 @@ def test_own_time_arming_settings_and_reactivation(engine):
     assert w.id == OWN_ID and w.kind == 'self' and w.creator == 'user'
     assert w.created_in == 'human_turn' and not is_owner(w)
     assert w.note == NOTE and w.title == 'Own time' and w.reason == 'Own time.'
-    assert w.trigger_json == {'builtin': True, 'own_time': True, 'hours': 6} and w.expires_at is None
+    assert w.trigger_json == {'builtin': True, 'own_time': True, 'hours': 6, 'floor': w.pacing_min_s} and w.expires_at is None
     assert w.base_interval_s == w.eff_interval_s == 21600
     assert w.pacing_min_s == max(e.policy.min_interval_minutes, e.policy.agent_ungated_floor_minutes) * 60
     assert w.pacing_max_s == 43200 and w.next_due_at == e.clock.now() + 21600

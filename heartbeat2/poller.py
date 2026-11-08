@@ -462,15 +462,15 @@ class Poller:
                     'think something through, tidy your notes or memory, or rest. Message the owner only if it\'s worth their attention.',
                     'self',id=wid,platform=session.platform,chat_type=session.chat_type,chat_id=session.chat_id,
                     armed_session_id=session.current_session_id,creator='user',title='Own time',reason='Own time.',
-                    trigger_json={'builtin':True,'own_time':True,'hours':hours},base_interval_s=interval,eff_interval_s=interval,
+                    trigger_json={'builtin':True,'own_time':True,'hours':hours,'floor':floor},base_interval_s=interval,eff_interval_s=interval,
                     pacing_min_s=floor,pacing_max_s=maximum,next_due_at=now+interval))
                 continue
             updates={}
             reactivate=w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason=='settings'
-            if w.trigger_json.get('hours')!=hours or reactivate:
+            if w.trigger_json.get('hours')!=hours or w.trigger_json.get('floor',floor)!=floor or reactivate:
                 updates.update(base_interval_s=interval,eff_interval_s=interval,pacing_min_s=floor,
                                pacing_max_s=maximum,next_due_at=now+interval,
-                               trigger_json={**w.trigger_json,'hours':hours})
+                               trigger_json={**w.trigger_json,'hours':hours,'floor':floor})
             if reactivate:
                 updates.update(status='active',status_reason='',armed_session_id=session.current_session_id,
                                fires=0,max_fires=None,babysit=False)

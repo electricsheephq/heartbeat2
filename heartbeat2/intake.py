@@ -794,11 +794,19 @@ class Intake:
             if priced:
                 cache.touch(s,session,started_at=kwargs.get('started_at'),route=route,prompt=prompt,read=read,api_mode=kwargs.get('api_mode',''))
         f=self.flights.get(session_id)
-        if not f or f.invalid and not f.replay or turn_id and f.turn_id and turn_id!=f.turn_id: return None
+        if not f or turn_id and f.turn_id and turn_id!=f.turn_id: return None
         price=None
         if priced:
             try: price=cache.cost(route,prompt=prompt,read=read,written=written,out=count('completion_tokens','output_tokens'),ttl=cache.cache_ttl_for(route,store=s,platform=s.get_session(key).platform,api_mode=kwargs.get('api_mode',''))[0])
             except Exception: pass
+        if f.invalid and not f.replay:
+            # A fenced turn stays silent, but its spend still counts toward the agent's daily cost total.
+            w=s.get_wake(f.wake_id)
+            if w:
+                with s.atomic():
+                    s.add_agent_spend(w,f.wake_id+'/'+f.dedupe_key,e.policy.resolved_timezone(),
+                                      round(price*1e6) if price is not None else 0,int(price is None))
+            return None
         if f.invalid and f.replay:
             counts={'tokens_in':prompt,'tokens_out':count('completion_tokens','output_tokens'),
                     'cache_read_tokens':read,'cache_write_tokens':written,
