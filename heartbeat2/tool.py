@@ -189,7 +189,7 @@ class Tool:
                 for w in wakes:
                     if action == 'update' and 'role' in args:
                         return {'error':'role_is_fixed'}
-                    if action == 'update' and w.trigger_json.get('builtin') and ('trigger' in args or 'until' in args):
+                    if action == 'update' and w.trigger_json.get('builtin') and any(k in args for k in ('trigger','until','babysit','pacing')):
                         return {'error':'builtin_settings_owned','detail':'Own time is set in Settings (own_time_hours).' if w.trigger_json.get('own_time') else 'The check-in is controlled in Settings.'}
                     gate = e.policy.mutation_gate(w, action=action, session_key=s.session_key,
                         created_in=created_in, new_kind=(args.get('trigger') or {}).get('kind'),

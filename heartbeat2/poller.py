@@ -472,7 +472,8 @@ class Poller:
                                pacing_max_s=maximum,next_due_at=now+interval,
                                trigger_json={**w.trigger_json,'hours':hours})
             if reactivate:
-                updates.update(status='active',status_reason='',armed_session_id=session.current_session_id)
+                updates.update(status='active',status_reason='',armed_session_id=session.current_session_id,
+                               fires=0,max_fires=None,babysit=False)
             if updates: s.cas_wake(w.id,w.status,expected_version=w.version,**updates)
 
     def silence(self):

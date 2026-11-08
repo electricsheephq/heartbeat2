@@ -222,3 +222,16 @@ def test_desk_ignores_a_claim_superseded_before_it_started(engine):
     from heartbeat2.desk import render_desk
     text = render_desk(e, e.store.get_session(KEY), clock=e.clock, timezone=e.policy.resolved_timezone(), policy=e.policy)
     assert 'last: drafted notes' in text, text
+
+
+def test_own_time_babysit_and_pacing_are_settings_owned(engine):
+    e = engine
+    w = own(e)
+    for extra in ({'babysit': True}, {'pacing': {'max': '7d'}}):
+        result = e.tool.handle({'action': 'update', 'id': w.id, **extra}, session_id='sid')
+        assert result.get('error') == 'builtin_settings_owned', result
+    # A wake that did end (for example after reaching max_fires) comes back clean on the next re-arm.
+    e.store.cas_wake(w.id, 'active', status='done', fires=24, max_fires=24, babysit=True)
+    e.own_time()
+    back = e.store.get_wake(w.id)
+    assert (back.status, back.fires, back.max_fires, back.babysit) == ('active', 0, None, False)
