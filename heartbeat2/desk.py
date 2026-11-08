@@ -25,7 +25,8 @@ def _rhythm(wake) -> str:
         anchor = f" at {_clip(_oneline(str(trigger['at'])), 8)}" if trigger.get('at') else ''
         return f"every {_clip(_oneline(str(trigger['every'])), 16)}{anchor}"
     if wake.kind == 'cron' and trigger.get('cron'):
-        return 'cron ' + _clip(_oneline(str(trigger['cron'])), 40)
+        # Inline code: chat markdown (Telegram) would otherwise eat a cron expression's `* *` as bold markers.
+        return 'cron `' + _clip(_oneline(str(trigger['cron'])).replace('`', ''), 40) + '`'
     if wake.kind == 'self':
         return 'self-paced'
     return wake.kind
