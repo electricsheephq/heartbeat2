@@ -15,15 +15,15 @@ One real run in a Telegram DM, captured as it happened (only reply-quote headers
 
 **1. Ask once.** The agent arms a file watcher on the test log and says what it will do. Mid-run, `/pulse status` shows the watcher checking and no new messages.
 
-<p align="center"><img src="docs/media/see-it-work-1-armed.png" alt="The agent's receipt for a failure-only watcher on build.log, and /pulse status showing the watcher active while the tests run" width="100%"></p>
+![The agent's receipt for a failure-only watcher on build.log, and /pulse status showing the watcher active while the tests run](docs/media/see-it-work-1-armed.png)
 
 **2. It writes first.** Two tests fail. About a minute later the agent posts the failures and the wrong values, with no message from the owner in between.
 
-<p align="center"><img src="docs/media/see-it-work-2-followup.png" alt="The agent's unprompted follow-up listing two failed tests next to the terminal's pytest failures" width="100%"></p>
+![The agent's unprompted follow-up listing two failed tests next to the terminal's pytest failures](docs/media/see-it-work-2-followup.png)
 
 **3. Same conversation.** Asked "Is that my round() change?", it answers from the chat it already has, restores the Decimal version and reruns the suite: all 10 tests pass.
 
-<p align="center"><img src="docs/media/see-it-work-3-fix.png" alt="The agent confirms the round() change caused both failures and reports all 10 tests passing after restoring the Decimal version" width="100%"></p>
+![The agent confirms the round() change caused both failures and reports all 10 tests passing after restoring the Decimal version](docs/media/see-it-work-3-fix.png)
 
 ## What it feels like
 
