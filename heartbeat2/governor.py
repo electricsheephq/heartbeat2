@@ -83,7 +83,7 @@ def apply(engine,wake,*,next_check=None):
     updates={}
     if w.kind in RECURRING_KINDS:
         floor=max(p.interval_floor(w),w.pacing_min_s or 0)
-        ceiling=min(p.noop_max_backoff_hours*3600,w.pacing_max_s or float('inf'))
+        ceiling=max(min(p.noop_max_backoff_hours*3600,w.pacing_max_s or float('inf')),w.base_interval_s or 0)
         # Saturate the exponent before computing it; arbitrary stale streaks
         # cannot overflow the scheduling math.
         backoff=min(ceiling,(w.base_interval_s or floor)*p.noop_backoff_factor**min(k,32))

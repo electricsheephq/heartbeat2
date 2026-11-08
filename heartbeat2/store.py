@@ -351,7 +351,7 @@ class Store:
         for o in self.list_occurrences(session_key=key):
             if o.state in {'claimed', 'started'}:
                 if o.state == 'claimed': totals['model_turns'] += 1
-                totals['delivered'] += 1
+                if not o.force_silent: totals['delivered'] += 1
         return totals
 
     def agent_cost_today(self, key, timezone):
@@ -537,19 +537,23 @@ class Store:
         terminal = sorted(TERMINAL_OCCURRENCE_STATES)
         placeholders = ",".join("?" for _ in terminal)
         with self.atomic():
-            # Live rows count toward the limit but are never discarded by GC.
+            # Live rows and recent dispatches survive history pruning.
             self.connection.execute(f"""WITH ranked AS (
-                SELECT rowid AS rid,state,
+                SELECT rowid AS rid,state,claimed_at,
                 ROW_NUMBER() OVER (PARTITION BY wake_id,state IN ({placeholders})
                     ORDER BY ended_at DESC,rowid DESC) AS rank,
                 SUM(CASE WHEN state IN ({placeholders}) THEN 0 ELSE 1 END)
                     OVER (PARTITION BY wake_id) AS live FROM occurrences)
                 DELETE FROM occurrences WHERE rowid IN (SELECT rid FROM ranked
-                    WHERE state IN ({placeholders}) AND rank>MAX(0,?-live))""",
-                terminal * 3 + [keep_occurrences])
+                    WHERE state IN ({placeholders}) AND rank>MAX(0,?-live)
+                      AND (claimed_at IS NULL OR claimed_at<?))""",
+                terminal * 3 + [keep_occurrences, now - 2 * 86400])
             self.connection.execute("DELETE FROM events WHERE consumed_at IS NOT NULL AND consumed_at<?", (now - 7 * 86400,))
             self.connection.execute("DELETE FROM ledger WHERE day<?", (ledger_cutoff,))
             self.connection.execute("DELETE FROM meta WHERE key LIKE 'agent_spend:%' AND substr(key,-10)<?", (ledger_cutoff,))
+            # Split 'spend:<wake_id>/<dedupe_key>' (wake ids never contain '/') so the lookup uses the primary key.
             self.connection.execute("""DELETE FROM meta WHERE key LIKE 'spend:%' AND NOT EXISTS
-                (SELECT 1 FROM occurrences WHERE 'spend:' || wake_id || '/' || dedupe_key = meta.key)""")
+                (SELECT 1 FROM occurrences o
+                 WHERE o.wake_id=substr(meta.key,7,instr(substr(meta.key,7),'/')-1)
+                   AND o.dedupe_key=substr(meta.key,7+instr(substr(meta.key,7),'/')))""")
             self.set_meta("last_gc_at", str(now))

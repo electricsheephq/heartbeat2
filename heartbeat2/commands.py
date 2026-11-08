@@ -337,6 +337,8 @@ def _transition(engine,session,wake,action,seconds):
         raise ValueError('proposed item: approve with /pulse ok or cancel')
     if action=='pause' and wake.status!='active': raise ValueError('pause needs an active item')
     if action=='watch' and wake.status not in {'active','paused'}: raise ValueError('watch needs an active or paused item')
+    if action=='watch' and (wake.role or wake.trigger_json.get('own_time')):
+        raise ValueError('roles and own time stay recurring; use /pulse slow, /pulse budget or /pulse cancel')
     if action=='resume' and wake.status!='paused': raise ValueError('resume needs a paused item')
     if action=='ok' and wake.status!='proposed': raise ValueError('ok needs a proposed item')
     clamps={}

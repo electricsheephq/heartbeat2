@@ -9,7 +9,7 @@
 - **Follow-ups and watchers.** A follow-up at a set time, a recurring check, a check-in after a long silence, or a deterministic watcher on a file, process, URL, read-only command or Hermes event. A watcher costs no model call until something changes.
 - **Same conversation, same model.** Every wake is a turn in the chat it belongs to, on that chat's own model. There is no side model, separate cron session or subagent.
 - **Quiet work counts.** A turn that researches, writes or prepares something without messaging you is real progress. Only wakes that keep finding nothing to do slow down, then pause and ask you once.
-- **You set the budgets.** Turns per day, an optional daily cost limit, turns per role, messages per day, the unanswered mute and quiet hours are your settings. They hold back messages and spending, not initiative: while you're away or asleep the agent can keep working, and it tells you what matters when you're back. The agent can tighten its own limits but never widen yours.
+- **You set the budgets.** Turns per day, an optional daily cost limit, turns per role, messages per day, the unanswered mute and quiet hours are your settings. They hold back messages and spending, not initiative: while you're away or asleep the agent can keep working, and it tells you what matters when you're back. That work still uses turns: the agent's recurring work, roles and own time keep running (and billing) under the mute and quiet hours, within the turns-per-day and cost limits. Roles and own time don't expire on a timer. The agent can tighten its own limits but never widen yours.
 
 ## See it work
 

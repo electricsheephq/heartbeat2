@@ -98,8 +98,8 @@ def test_f1_gc_cannot_restore_daily_budget(engine, monkeypatch):
     e.store.set_meta('agent_spend:'+KEY+':2000-01-01', '{"cost_microusd":9,"unpriced_calls":0}')
     e.store.gc(ledger_days=30, timezone=e.policy.resolved_timezone())
     assert total(e)['cost_microusd'] == 1000000
-    assert e.store.get_occurrence(w.id, 't:test') is None
-    assert e.store.get_meta('spend:'+w.id+'/t:test') is None
+    assert e.store.get_occurrence(w.id, 't:test').state == 'done'
+    assert e.store.get_meta('spend:'+w.id+'/t:test') == 'agent'
     assert e.store.get_meta('agent_spend:'+KEY+':2000-01-01') is None
     e.dispatch(pending(e, e.store.get_wake(w.id), 'after-gc'))
     assert e.store.get_occurrence(w.id, 'after-gc').error == 'daily_cost_cap'
@@ -298,3 +298,14 @@ def test_f10_role_cannot_be_babysit(engine):
     assert result.get('ok'), result
     assert result['wake']['expires_at'] <= e.clock.now()+4*3600
     assert result['wake']['max_fires'] == 24
+
+
+def test_f1_gc_keeps_live_spend_markers(engine):
+    e = engine
+    w = arm(e, 'every')
+    e.dispatch(pending(e, w, 'live'))
+    o = e.store.get_occurrence(w.id, 'live')
+    e.store.set_meta('spend:'+w.id+'/gone:1.5', 'agent')
+    e.store.gc(ledger_days=30)
+    assert e.store.get_meta('spend:'+o.id) == 'agent'
+    assert e.store.get_meta('spend:'+w.id+'/gone:1.5') is None

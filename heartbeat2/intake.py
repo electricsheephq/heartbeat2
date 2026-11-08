@@ -362,11 +362,18 @@ class Intake:
                 dedupe=f'{key}:origin:{turn_id}:{fp}:{ordinal}'
                 self.human(key,platform,dedupe=dedupe)
 
+    def _rebind_recurring(self,w,session_id,reason):
+        s=self.engine.store
+        if s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id):
+            for o in s.list_occurrences(w.id,state='claimed'):
+                s.cas_occurrence(w.id,o.dedupe_key,'claimed','superseded',
+                                 attempt=o.attempt,force_silent=True,error=reason)
+
     def _session_switch(self,w,session_id):
         """A known non-lineage switch has the same ownership boundary as /new."""
         e,s=self.engine,self.engine.store
         if w.role or w.trigger_json.get('builtin'):
-            s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
+            self._rebind_recurring(w,session_id,'session_switched')
             return False
         if w.status not in {'active','paused','proposed'}: return False
         if not s.cas_wake(w.id,w.status,expected_version=w.version,status='orphaned',status_reason='session_switched'): return False
@@ -525,7 +532,7 @@ class Intake:
                 # A marker is authoritative only for its original session.
                 if w is None or w.session_key!=key or o is None: return None
                 invalid=o.attempt!=attempt or o.state not in {'claimed','started'}
-                if w.armed_session_id and w.armed_session_id!=session_id:
+                if not invalid and w.armed_session_id and w.armed_session_id!=session_id:
                     tip=e.compression_tip(w.armed_session_id)
                     if tip==session_id:
                         s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
@@ -900,7 +907,7 @@ class Intake:
             keys=set()
             for w in s.list_wakes():
                 if (w.role or w.trigger_json.get('builtin')) and w.armed_session_id==old:
-                    s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=new_session_id)
+                    self._rebind_recurring(w,new_session_id,'session_reset')
                     session=s.get_session(w.session_key)
                     if session: s.cas_session(w.session_key,{'current_session_id':session.current_session_id},current_session_id=new_session_id,busy_since=None,busy_epoch=None)
                     continue

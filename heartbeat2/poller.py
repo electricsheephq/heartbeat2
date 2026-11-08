@@ -651,7 +651,7 @@ class Poller:
             try: late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
             except ValueError: pass
         text=render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
-             recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-1,
+             recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-(0 if o.force_silent else 1),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
              after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
              cache_line=cache_line,marker_tag=tag,

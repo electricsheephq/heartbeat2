@@ -35,7 +35,7 @@ DESCRIPTION = ('Your own time in this chat. Use create to arm a wake/watcher (no
                '(role=true on every/cron/self) for a standing responsibility you own: no expiry, a turns-per-day budget, a desk view; list to inspect; '
                'update to change instructions or trigger; pause to suspend; resume to restart a paused wake; '
                'cancel to end it; off to stop checks for this chat. During a wake turn, use respond to set '
-               'outcome and notify, optionally scratch/next_check; outcome=progress with notify=false is real work, never counted as idle. Bounds and clamps are reported. Never type silence markers. '
+               'outcome and notify, optionally scratch/next_check; outcome=progress with notify=false and a summary is real work, never counted as idle. Bounds and clamps are reported. Never type silence markers. '
                'Results include a `cache` line; pick intervals the line marks warm. '
                'Results include a receipt line; tell the owner what it says, not a promise of your own. '
                'If a result is proposed (armed=false and its receipt names a /pulse ok command), nothing is set yet: say so first and ask the owner to send that command; never call it set, done or scheduled. '
