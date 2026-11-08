@@ -180,3 +180,21 @@ def test_g6_rebind_supersedes_a_started_turn(engine, switch):
     other = arm(e, armed_session_id='new')
     e.tick()
     assert e.store.list_occurrences(other.id)[0].state == 'claimed'
+
+
+@pytest.mark.parametrize('kind', ['role', 'agent'])
+def test_switch_keeps_wake_turn_limits_for_the_old_turn(engine, kind):
+    e = engine
+    # A non-lineage switch during a running turn: its later tool calls are still a wake turn's, not the owner's.
+    owner_wake = arm(e, 'every', creator='user')
+    w = (arm(e, 'self', role=True, budget_turns_per_day=2, next_due_at=e.clock.now()+3600) if kind == 'role'
+         else arm(e, 'every', next_due_at=e.clock.now()+3600))
+    e.dispatch(pending(e, w))
+    start(e)
+    e.intake._session_switch(e.store.get_wake(w.id), 'new')
+    session(e, current_session_id='new')
+    edit = e.tool.handle({'action': 'update', 'id': owner_wake.id, 'note': 'changed by an old turn'}, session_id='sid')
+    assert edit.get('error') == 'owner_item', edit
+    if kind == 'role':
+        e.tool.handle({'action': 'update', 'id': w.id, 'budget': {'turns_per_day': 12}}, session_id='sid')
+        assert e.store.get_wake(w.id).budget_turns_per_day == 2

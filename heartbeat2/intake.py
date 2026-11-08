@@ -370,6 +370,12 @@ class Intake:
                 if o.state in {'claimed','started'}:
                     s.cas_occurrence(w.id,o.dedupe_key,o.state,'superseded',
                                      attempt=o.attempt,force_silent=True,error=reason)
+            self._fence(w.id)
+
+    def _fence(self,wake_id):
+        """A turn of a wake moved or orphaned mid-flight keeps wake-turn limits, as /new already ensures."""
+        for f in self.flights.values():
+            if f.wake_id==wake_id: f.invalid=True
 
     def _session_switch(self,w,session_id):
         """A known non-lineage switch has the same ownership boundary as /new."""
@@ -380,6 +386,7 @@ class Intake:
         if w.status not in {'active','paused','proposed'}: return False
         if not s.cas_wake(w.id,w.status,expected_version=w.version,status='orphaned',status_reason='session_switched'): return False
         e.cancel_occurrences(w.id,'session_switched')
+        self._fence(w.id)
         count=int(s.get_meta('switched_notice:'+w.session_key) or 0)+1
         s.set_meta('switched_notice:'+w.session_key,str(count))
         return True
