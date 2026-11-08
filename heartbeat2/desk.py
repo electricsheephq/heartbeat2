@@ -50,7 +50,8 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
         due = ('paused · ' + _oneline(w.status_reason or 'paused') if w.status == 'paused'
                else 'resting until tomorrow' if today >= budget
                else 'next ' + _time(view, w.next_due_at, compact=True))
-        rows.append(f'- role {w.id} {_clip(_oneline(w.title or w.note),80)} · {_rhythm(w)} · last: {summary} · '
+        title = _clip(_oneline(w.title or w.note), 80).replace('`', "'")  # a stray backtick would pair with the cron code span
+        rows.append(f'- role {w.id} {title} · {_rhythm(w)} · last: {summary} · '
                     f'{due} · today {today}/{budget}')
     other = [w for w in wakes if not w.role and w.status == 'active']
     due = [(t, w) for w in other for t in (w.next_due_at, w.deadline_at) if t is not None]
