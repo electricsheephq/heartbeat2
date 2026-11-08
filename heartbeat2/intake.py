@@ -365,7 +365,7 @@ class Intake:
     def _session_switch(self,w,session_id):
         """A known non-lineage switch has the same ownership boundary as /new."""
         e,s=self.engine,self.engine.store
-        if w.trigger_json.get('builtin'):
+        if w.role or w.trigger_json.get('builtin'):
             s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
             return False
         if w.status not in {'active','paused','proposed'}: return False
@@ -894,7 +894,7 @@ class Intake:
         with s.atomic():
             keys=set()
             for w in s.list_wakes():
-                if w.trigger_json.get('builtin') and w.armed_session_id==old:
+                if (w.role or w.trigger_json.get('builtin')) and w.armed_session_id==old:
                     s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=new_session_id)
                     session=s.get_session(w.session_key)
                     if session: s.cas_session(w.session_key,{'current_session_id':session.current_session_id},current_session_id=new_session_id,busy_since=None,busy_epoch=None)

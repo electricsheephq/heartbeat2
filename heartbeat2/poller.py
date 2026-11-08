@@ -417,7 +417,7 @@ class Poller:
             # A reminder still not due at its due bound (the setting was lowered) ends there; the grace is for a due one.
             due_end=w.created_at+self.policy.due_bound_s(w)
             late=due_end<=now and w.next_due_at is not None and w.next_due_at>due_end
-            if not w.trigger_json.get('builtin') and (hard_end<=now or late):
+            if not (w.role or w.trigger_json.get('builtin')) and (hard_end<=now or late):
                 s.cas_wake(w.id,'active',status='expired',status_reason='max_lifetime_changed')
                 self.cancel_occurrences(w.id,'max_lifetime_changed')
                 return
@@ -525,6 +525,8 @@ class Poller:
                 health.pop('trial'); self.store.set_meta('provider_health',json.dumps(health))
         if health and (health['until']>now or health.get('trial')):
             return 'provider_unavailable',True,health['until'] if health['until']>now else None
+        if w.role and self.store.dispatches_today(w.id,self.policy.resolved_timezone())>=self.policy.role_budget(w):
+            return 'role_budget',False,None
         # Message gates silence agent recurring work; spend and dispatch gates
         # still apply. Other wakes retain the existing hold/drop ordering.
         message_held=self.message_hold_reason(w,s)
@@ -595,9 +597,11 @@ class Poller:
             cache_line='' if s.connection.in_transaction else self.cache_line(w)
         held_by=o.error  # Claim clears the stored deferral; retain it for this prompt.
         message_held=self.message_hold_reason(w,session)
-        if message_held:
+        if message_held and (not o.force_silent or o.held_reason.startswith('message_held:')):
             if not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=True,
                                        held_reason='message_held:'+message_held): return
+        elif not message_held and o.force_silent and o.held_reason.startswith('message_held:'):
+            if not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=False,held_reason=''): return
         if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
         o=s.get_occurrence(w.id,o.dedupe_key)
         health=json.loads(s.get_meta('provider_health') or '{}')

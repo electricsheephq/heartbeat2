@@ -25,6 +25,8 @@ PARAMETERS = obj({
                     'emojis': {'type':'array','items':STR}}),
     'until': obj({'expires':STR, 'max_fires':{'type':'integer'}, 'owner_replies':BOOL}),
     'pacing': obj({'min':STR,'max':STR}), 'babysit':BOOL, 'urgent':BOOL, 'owner_asked':BOOL,
+    'role': {'type':'boolean', 'description':'Standing responsibility; recurring creates only, fixed after creation.'},
+    'budget': obj({'turns_per_day': {'type':'integer', 'description':'Daily role turns, capped by settings.'}}),
     'outcome': {'type':'string','enum':['no_change','progress','done','blocked','needs_attention']},
     'notify':BOOL, 'summary':STR, 'next_check':STR, 'scratch':STR,
 })
@@ -100,7 +102,9 @@ class Tool:
                 return {'error':'unknown_parameter'}
             if 'owner_asked' in args and not isinstance(args['owner_asked'], bool):
                 raise ValueError('owner_asked must be a boolean')
-            for field in ('trigger','until','pacing'):
+            if 'role' in args and not isinstance(args['role'], bool):
+                raise ValueError('role must be a boolean')
+            for field in ('trigger','until','pacing','budget'):
                 if field in args and not isinstance(args[field],dict):
                     raise ValueError(f'invalid request: {field} must be an object')
             trigger = args.get('trigger', {})
@@ -130,11 +134,14 @@ class Tool:
                         return {'error':'session_off'}
                     parent = e.store.get_wake(flight.wake_id) if flight else None
                     child_key = e.child_key(flight) if flight else ''
+                    if args.get('role') and (args.get('trigger') or {}).get('kind') not in RECURRING_KINDS:
+                        return {'error':'role_needs_recurring'}
+                    depth = (1 if parent.role else parent.depth+1) if parent else 0
+                    children = int(e.store.get_meta(child_key) or 0) if child_key else 0
                     gate = e.policy.creation_gate(session_key=s.session_key, platform=s.platform,
                         chat_type=s.chat_type, allow_gateway_injection=e.injection_allowed(),
                         kind=(args.get('trigger') or {}).get('kind',''), created_in=created_in,
-                        depth=parent.depth+1 if parent else 0,
-                        children_created=int(e.store.get_meta(child_key) or 0) if child_key else 0,
+                        depth=depth, parent_role=bool(parent and parent.role), children_created=children,
                         untrusted_payload=bool(flight and flight.untrusted),
                         active_count=sum(w.status in {'active','proposed'} for w in e.store.list_wakes(s.session_key)),
                         global_active_count=sum(w.status in {'active','proposed'} for w in e.store.list_wakes()))
@@ -145,12 +152,12 @@ class Tool:
                     w = Wake(s.session_key, args.get('note',''), (args.get('trigger') or {})['kind'],
                              platform=s.platform, chat_type=s.chat_type, chat_id=s.chat_id,
                              armed_session_id=session_id or s.current_session_id, created_in=created_in,
-                             depth=parent.depth+1 if parent else 0, parent_wake_id=parent.id if parent else None,
-                             status=gate.status, owner_requested=requested)
+                             depth=depth, parent_wake_id=parent.id if parent else None,
+                             status=gate.status, owner_requested=requested, role=args.get('role',False))
                     result = self.prepare(w,args)
                     w = e.store.create_wake(result.wake)
                     if child_key:
-                        e.store.set_meta(child_key,'1')
+                        e.store.set_meta(child_key,str(children+1))
                     item = {'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w),'receipt':self.receipt(w,s)}
                     if args.get('owner_asked') is True and not requested:
                         item['owner_asked_ignored'] = 'wake_turn' if flight is not None else 'not_owner_turn' if not evidence else 'not_one_shot'
@@ -168,6 +175,8 @@ class Tool:
                     wakes = [w]
                 results = []
                 for w in wakes:
+                    if action == 'update' and 'role' in args:
+                        return {'error':'role_is_fixed'}
                     if action == 'update' and w.trigger_json.get('builtin') and 'trigger' in args:
                         return {'error':'builtin_settings_owned','detail':'The check-in is controlled in Settings.'}
                     gate = e.policy.mutation_gate(w, action=action, session_key=s.session_key,
@@ -202,7 +211,16 @@ class Tool:
                         base = (replace(w,owner_requested=True) if action == 'update' and w.creator == 'agent'
                                 and not w.trigger_json.get('builtin') and w.parent_wake_id is None
                                 and args.get('owner_asked') is True and evidence and new_kind == 'at' else w)
-                        result = self.reschedule(w) if action=='resume' else self.prepare(base,args,reschedule=fresh,reparse_deadline=fresh)
+                        budget_clamps = {}
+                        request = args
+                        budget = args.get('budget',{}).get('turns_per_day')
+                        if w.role and flight and isinstance(budget,int) and not isinstance(budget,bool):
+                            limit = e.policy.role_budget(w)
+                            if budget > limit:
+                                request = {**args, 'budget':{'turns_per_day':limit}}
+                                budget_clamps['budget.turns_per_day'] = f'{budget} → {limit} (wake_turn cannot raise budget)'
+                        result = self.reschedule(w) if action=='resume' else self.prepare(base,request,reschedule=fresh,reparse_deadline=fresh)
+                        result.clamped.update(budget_clamps)
                         candidate, clamps = result.wake, result.clamped
                         until = args.get('until') if isinstance(args.get('until'),dict) else {}
                         timing = ('trigger_json','kind','next_due_at','deadline_at','base_interval_s','eff_interval_s','pacing_min_s','pacing_max_s')
@@ -345,16 +363,17 @@ class Tool:
                      w.deadline_at if w.deadline_at is not None else w.next_due_at if w.kind in PROBE_KINDS and w.next_due_at is not None else e.clock.now())
                 due=max(due,e.clock.now())
                 skip=w.kind in RECURRING_KINDS  # Poller.gate drops a recurring tick in quiet hours before spacing
-                release=quiet_until(e,w.session_key,urgent=w.urgent,now=due) if skip else None
+                release=quiet_until(e,w.session_key,urgent=w.urgent,now=due) if skip and not w.role else None
                 if release and release>due: parts.append(f'Quiet hours skip its ticks until {local(release)}.'); due=release
                 if p.wake_spacing_minutes>0 and s.last_wake_turn_at is not None and not (release and skip and due==release):
                     spacing=s.last_wake_turn_at+p.wake_spacing_minutes*60
                     if spacing>due: parts.append(f'Wake spacing holds it until {local(spacing)}.')
                     due=max(due,spacing)
                 release=quiet_until(e,w.session_key,urgent=w.urgent,now=due)
-                if release and release>due: parts.append(f'Quiet hours {"skip its ticks" if skip else "hold it"} until {local(release)}.')
+                if release and release>due: parts.append(f'Quiet hours {"hold its messages" if w.role else "skip its ticks" if skip else "hold it"} until {local(release)}.')
             if not owner_class(w) and s.unanswered_count>=p.max_unanswered:
-                parts.append('Muted: it waits for your reply.' if watcher else 'Muted: it is dropped unless you reply first.')
+                parts.append('Muted: messages are held; work still runs.' if w.role else
+                             'Muted: it waits for your reply.' if watcher else 'Muted: it is dropped unless you reply first.')
             if p.wake_spacing_minutes>0 and (w.kind in TIME_KINDS or watcher or w.kind=='owner_silent'):
                 parts.append(f'Wakes are at least {p.wake_spacing_minutes:g} min apart, so it can land a few minutes late.')
         if w.expires_at is not None: parts.append(f'Expires {local(w.expires_at)}.')
@@ -366,6 +385,7 @@ class Tool:
             text=text[:239]
             boundary=text.rfind('. ')
             text=(text[:boundary+1] if boundary>=0 else text)+'…'
+        if w.role: text+=f' · role: runs until you or the agent end it (/pulse cancel {w.id})'
         return text
 
     def reschedule(self,w):
@@ -382,6 +402,13 @@ class Tool:
     def prepare(self,w,args,*,reschedule=True,reparse_deadline=True):
         e=self.engine
         updates={k:args[k] for k in ('title','note','reason','babysit','urgent') if k in args}
+        if 'budget' in args:
+            budget = args['budget']
+            if set(budget) != {'turns_per_day'} or not w.role:
+                raise ValueError('budget.turns_per_day applies to roles')
+            if isinstance(budget['turns_per_day'],bool) or not isinstance(budget['turns_per_day'],int):
+                raise ValueError('budget.turns_per_day must be an integer')
+            updates['budget_turns_per_day'] = budget['turns_per_day']
         trigger=dict(args.get('trigger',w.trigger_json))
         if 'trigger' in args and 'event' in trigger:
             raise ValueError('trigger.event is not supported; choose the event with trigger.kind (for example kanban_completed)')

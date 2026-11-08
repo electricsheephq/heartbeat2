@@ -28,7 +28,7 @@ LEDGER_FIELDS = frozenset({"fires", "gated_skips", "governor_skips", "model_turn
     "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals", "checks", "no_verdict"} | CACHE_FIELDS)
 _JSON_FIELDS = {"trigger_json", "probe_state_json", "payload_json"}
 _BOOL_FIELDS = {"babysit", "urgent", "cancel_on_reply", "notify", "force_silent",
-                "enabled", "first_notice_sent", "agent_edited", "owner_requested"}
+                "enabled", "first_notice_sent", "agent_edited", "owner_requested", "role"}
 _TRANSITIONS = {
     "pending": { "skipped", "missed", "dead", "orphaned", "superseded"},
     "claimed": {"pending", "started", "dead", "interrupted", "orphaned", "superseded"},
@@ -175,7 +175,8 @@ class Store:
                 if "provider_deferrals" not in columns:
                     self.connection.execute("ALTER TABLE ledger ADD COLUMN provider_deferrals INTEGER NOT NULL DEFAULT 0")
                 additions = {'wakes': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0',
-                                      'agent_edited':'INTEGER NOT NULL DEFAULT 0', 'owner_requested':'INTEGER NOT NULL DEFAULT 0'},
+                                      'agent_edited':'INTEGER NOT NULL DEFAULT 0', 'owner_requested':'INTEGER NOT NULL DEFAULT 0',
+                                      'role':'INTEGER NOT NULL DEFAULT 0', 'budget_turns_per_day':'INTEGER'},
                     'ledger': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0'},
                     'occurrences': {'created_at':'REAL NOT NULL DEFAULT 0', 'matched_at':'REAL', 'held_since':'REAL',
                         'held_reason':"TEXT NOT NULL DEFAULT ''", 'held_matches':'INTEGER NOT NULL DEFAULT 0', 'api_calls':'INTEGER NOT NULL DEFAULT 0'}}
@@ -332,6 +333,14 @@ class Store:
             return [_record(Occurrence, row) for row in self.connection.execute(
                 "SELECT o.* FROM occurrences o JOIN wakes w ON w.id=o.wake_id" +
                 (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY o.rowid", values)]
+
+    def dispatches_today(self, wake_id, timezone):
+        """Count claimed/dispatched occurrences; refunded unsent claims don't spend."""
+        day = datetime.fromisoformat(local_day(self.clock.now(), timezone)).replace(tzinfo=timezone)
+        with self._lock:
+            return self.connection.execute(
+                'SELECT count(*) FROM occurrences WHERE wake_id=? AND claimed_at>=? AND claimed_at<?',
+                (wake_id, day.timestamp(), (day + timedelta(days=1)).timestamp())).fetchone()[0]
 
     def cas_occurrence(self, wake_id: str, dedupe_key: str, expected_state: str,
                        new_state: str, *, attempt: int | None = None, **updates) -> bool:

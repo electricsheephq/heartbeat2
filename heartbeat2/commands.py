@@ -15,6 +15,7 @@ LIST_RECENT_FINISHED = 10
 FINISHED_STATUSES = FINISHED_WAKE_STATUSES
 HELP = ('/pulse status | list [all] | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
+        'role every 1d [at 09:00] <charter> | role self <charter> | budget <id> <n>/day | '
         'pause|resume|cancel <id|all> [for 3d] | off|on | '
         'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
 
@@ -98,7 +99,9 @@ def _item(engine, wake):
     if wake.status in FINISHED_STATUSES: due = ''
     elif wake.status == 'paused': due = _paused(engine, wake)
     else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
-    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · {wake.kind}' + (f' · {due}' if due else '') + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+    role = (f' · today {engine.store.dispatches_today(wake.id,engine.policy.resolved_timezone())}/{engine.policy.role_budget(wake)}'
+            if wake.role else '')
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + wake.kind + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _occurrences(engine, wake):
@@ -128,10 +131,12 @@ def _ledger(engine, key, days):
     return '\n'.join(lines)
 
 
-def _add(engine, session, text):
+def _add(engine, session, text, *, role=False):
     clock = re.fullmatch(r'(\d{1,2}):(\d{2})(?:\s*([ap])\.?m\b\.?)?\s+(.+)', text, re.I|re.DOTALL)
     match = re.fullmatch(r'in (?P<duration>'+DURATIONS+r')\s+(?P<note>.+)', text, re.I|re.DOTALL)
-    if clock:
+    if role and text.startswith('self '):
+        trigger, note = {'kind':'self'}, text[5:].strip()
+    elif clock:
         hour = int(clock[1])
         if not clock[3] and re.match(r'[ap]\.?m\b', clock[4], re.I): raise ValueError('add a note after the time')
         if clock[3]:
@@ -159,7 +164,9 @@ def _add(engine, session, text):
             if not match: raise ValueError('use add in 2h <note>, add 16:30 <note>, every 1d at 09:00 <note>, or when silent 24h <note>')
             parse_duration(match['duration'])
             trigger, note = {'kind':'owner_silent','after':match['duration']}, match['note']
-    wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command',
+    if role and trigger['kind'] not in {'every','self'}:
+        raise ValueError('role_needs_recurring')
+    wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command', role=role,
         platform=session.platform, chat_type=session.chat_type, chat_id=session.chat_id,
         armed_session_id=session.current_session_id, title=_clip(note,80))
     _activation(engine,session,wake)
@@ -241,6 +248,17 @@ def handle(raw_args, runtime):
                 if not 1 <= days <= engine.policy.ledger_days: raise ValueError('ledger range exceeds retained days')
                 return _ledger(engine,key,days)
             if action == 'add': return _add(engine,session,rest)
+            if action == 'role': return _add(engine,session,rest,role=True)
+            if action == 'budget':
+                match = re.fullmatch(r'(\S+)\s+(\d+)/day',rest)
+                if not match: raise ValueError('budget expects <id> <n>/day')
+                wake = engine.store.get_wake(match[1])
+                if wake is None or wake.session_key != key: raise ValueError('unknown item in this chat')
+                if not wake.role: raise ValueError('budget applies to roles')
+                budget = max(1,min(int(match[2]),engine.policy.role_turns_per_day_max))
+                if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,budget_turns_per_day=budget):
+                    raise ValueError('concurrent item change')
+                return _item(engine,engine.store.get_wake(wake.id))
             if action in {'off','on'} and not rest:
                 if not engine.store.cas_session(key, {'enabled':session.enabled}, enabled=action=='on'):
                     raise ValueError('concurrent session change')

@@ -69,6 +69,21 @@ config_schema:
     default: 6
     label: "Wake messages per day"
     description: "Per chat, local day."
+  role_turns_per_day_default:
+    type: int
+    default: 6
+    label: "Turns per role per day (default)"
+    description: "A role's own budget unless it sets a lower one. Each turn is a full model turn."
+  role_turns_per_day_max:
+    type: int
+    default: 12
+    label: "Most turns a role may take per day"
+    description: "Caps any budget a role sets. The chat's wake-turn limit still applies."
+  max_children_per_wake_turn:
+    type: int
+    default: 3
+    label: "Follow-ups a role may arm per turn"
+    description: "How many wakes or watchers one role turn may create. Other wake turns may create one."
   max_unanswered:
     type: int
     default: 2
