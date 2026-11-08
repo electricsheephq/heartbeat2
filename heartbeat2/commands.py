@@ -98,12 +98,26 @@ def _paused(engine, wake):
     return f'paused · resumes {_time(engine, until)} or on resume' if until else 'paused · resumes on resume'
 
 
-def _item(engine, wake):
+def _role_today(engine, wake):
+    """(turns today, daily budget) for a role; the poller rests a role once today reaches its budget."""
+    return engine.store.dispatches_today(wake.id, engine.policy.resolved_timezone()), engine.policy.role_budget(wake)
+
+
+def _resting(engine, wake, today_budget=None):
+    """True for an active role that has used today's budget: it takes no turn until tomorrow, whatever next_due_at says.
+    Pass the (today, budget) pair already read for this render so the header and the row agree across midnight."""
+    if not wake.role or wake.status != 'active': return False
+    today, budget = today_budget or _role_today(engine, wake)
+    return today >= budget
+
+
+def _item(engine, wake, today_budget=None):
+    today_budget = (today_budget or _role_today(engine, wake)) if wake.role else None
     if wake.status in FINISHED_STATUSES: due = ''
     elif wake.status == 'paused': due = _paused(engine, wake)
+    elif today_budget and wake.status == 'active' and today_budget[0] >= today_budget[1]: due = 'resting until tomorrow'
     else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
-    role = (f' · today {engine.store.dispatches_today(wake.id,engine.policy.resolved_timezone())}/{engine.policy.role_budget(wake)}'
-            if wake.role else '')
+    role = f' · today {today_budget[0]}/{today_budget[1]}' if today_budget else ''
     return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + wake.kind + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
@@ -219,7 +233,9 @@ def handle(raw_args, runtime):
                     for name,value in row.items():
                         if isinstance(value,int): counts[name]=counts.get(name,0)+value
                 active = [w for w in engine.store.list_wakes(key) if w.status in {'active','proposed','paused'}]
-                next_due = min((x for w in active if w.status=='active' for x in (w.next_due_at,w.deadline_at) if x is not None),default=None)
+                role_today = {w.id: _role_today(engine,w) for w in active if w.role}  # read once: header and rows agree
+                next_due = min((x for w in active if w.status=='active' and not _resting(engine,w,role_today.get(w.id))
+                                for x in (w.next_due_at,w.deadline_at) if x is not None),default=None)
                 lines = [f'HeartBeat 2.0: {"on" if session.enabled and engine.policy.enabled else "off"} · poller {status["state"]}'
                          + (f' ({status["reason"]})' if status.get('reason') else ''),
                          f'allow_gateway_injection: {str(engine.injection_allowed()).lower()}',
@@ -239,7 +255,7 @@ def handle(raw_args, runtime):
                     lines.append(f'Provider gate: provider_unavailable ({health["class"]}) · next recovery attempt: {_time(engine,health["until"])}; any successful model call clears it.')
                 if status.get('state')=='stalled': lines.append('Stalled since '+_time(engine,status.get('since')))
                 if not engine.injection_allowed(): lines.append(INJECTION_CONFIG)
-                lines.extend(_item(engine,w) for w in active)
+                lines.extend(_item(engine,w,role_today.get(w.id)) for w in active)
                 lines.extend(f'{w.id}: keep / slow / stop / watch' for w in active if w.status_reason.startswith('governor:'))
                 return '\n'.join(lines)
             if action == 'list' and rest in {'','all'}:
