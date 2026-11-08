@@ -18,6 +18,18 @@ def cost_line(store, key, timezone, policy):
     return text
 
 
+def _rhythm(wake) -> str:
+    """The role's rhythm as the owner set it: every 2m, every 1d at 09:00, cron …, or self-paced."""
+    trigger = wake.trigger_json or {}
+    if wake.kind == 'every' and trigger.get('every') is not None:
+        return f"every {trigger['every']}" + (f" at {trigger['at']}" if trigger.get('at') else '')
+    if wake.kind == 'cron' and trigger.get('cron'):
+        return 'cron ' + _clip(_oneline(str(trigger['cron'])), 24)
+    if wake.kind == 'self':
+        return 'self-paced'
+    return wake.kind
+
+
 def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=len) -> str:
     store = getattr(engine_or_store, 'store', engine_or_store)
     now, key = clock.now(), session.session_key
@@ -32,10 +44,12 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
         history = [o for o in store.list_occurrences(w.id) if o.started_at is not None and o.ended_at is not None]
         last = max(history, key=lambda o: o.ended_at) if history else None
         summary = _clip(_oneline(last.summary or last.outcome or last.state), 80) if last else 'none'
+        today, budget = store.dispatches_today(w.id, zone(timezone)), policy.role_budget(w)
         due = ('paused · ' + _oneline(w.status_reason or 'paused') if w.status == 'paused'
+               else 'resting until tomorrow' if today >= budget
                else 'next ' + _time(view, w.next_due_at, compact=True))
-        rows.append(f'- role {w.id} {_clip(_oneline(w.title or w.note),80)} · {w.kind} · last: {summary} · '
-                    f'{due} · today {store.dispatches_today(w.id,zone(timezone))}/{policy.role_budget(w)}')
+        rows.append(f'- role {w.id} {_clip(_oneline(w.title or w.note),80)} · {_rhythm(w)} · last: {summary} · '
+                    f'{due} · today {today}/{budget}')
     other = [w for w in wakes if not w.role and w.status == 'active']
     due = [(t, w) for w in other for t in (w.next_due_at, w.deadline_at) if t is not None]
     next_due = min(due, key=lambda pair: pair[0]) if due else None
