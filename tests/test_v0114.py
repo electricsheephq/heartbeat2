@@ -161,11 +161,11 @@ def test_quiet_implicit_extension_and_recurring_skip(engine):
     assert updated.get('error') == 'invalid_request', updated
     assert updated['detail'].endswith('; set until.expires to extend it')
     assert engine.store.get_wake(w.id).expires_at == w.next_due_at+3600
-    # Recurring ticks in quiet hours are skipped, not held until the release.
+    # The agent's recurring work runs in quiet hours (since 0.3.0); only its messages are held.
     recurring = create(engine, {'kind':'every','every':'1d at 23:00'},
                        until={'expires':'tomorrow 07:00'})
     assert recurring.get('ok'), recurring
-    assert 'Quiet hours skip its ticks until' in receipt(recurring) and 'hold it' not in receipt(recurring)
+    assert 'Quiet hours hold its messages until' in receipt(recurring) and 'skip its ticks' not in receipt(recurring)
 
 
 @pytest.mark.parametrize('kind', ['command', 'subagent_done'])
@@ -591,7 +591,9 @@ def test_timed_quiet_chain_preserves_live_gate_decisions(engine, command, monkey
         monkeypatch.setattr(commands,'quiet_until',chained)
         new = engine.gate(w,o,s)
         assert new[:2] == old[:2]
-        assert new == (('quiet_hours',kind!='every',now+11*3600) if hours<11 else ('',False,None))
+        assert new == (('quiet_hours',True,now+11*3600) if hours<11 and kind!='every' else ('',False,None))
+        if kind=='every':
+            assert engine.message_hold_reason(w,s) == ('quiet_hours' if hours<11 else '')
     engine.clock.wall = now
     engine.policy = replace(engine.policy, quiet_hours_urgent=True)
     assert commands.quiet_until(engine,KEY,urgent=True) is None

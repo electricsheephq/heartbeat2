@@ -13,7 +13,7 @@ from .schedule import parse_duration, quiet_end
 
 
 def is_owner(wake):
-    return wake.creator == 'user' and not wake.trigger_json.get('builtin') and not wake.agent_edited
+    return wake.creator == 'user' and not wake.role and not wake.trigger_json.get('builtin') and not wake.agent_edited
 
 
 def owner_requested(wake):
@@ -27,6 +27,10 @@ def owner_class(wake):
 
 def is_watcher(wake):
     return wake.kind in PROBE_KINDS | EVENT_KINDS
+
+
+def holds_messages(wake):
+    return not is_owner(wake) and wake.kind in RECURRING_KINDS and not is_watcher(wake)
 
 
 def one_shot(wake):
@@ -69,6 +73,11 @@ class Policy:
     quiet_hours: str = "22:00-08:00"
     quiet_hours_urgent: bool = False
     max_model_wakes_per_day: int = 24
+    daily_cost_limit_usd: float = 0.0
+    own_time_hours: int = 0
+    role_turns_per_day_default: int = 6
+    role_turns_per_day_max: int = 12
+    max_children_per_wake_turn: int = 3
     max_messages_per_day: int = 6
     max_unanswered: int = 2
     min_interval_minutes: int = 15
@@ -130,6 +139,12 @@ class Policy:
                 if not math.isfinite(number) or not number.is_integer() or number < 0:
                     raise ValueError(f"invalid nonnegative integer setting: {f.name}")
                 value = int(number)
+            elif isinstance(default, float):
+                if isinstance(value, bool):
+                    raise ValueError(f'invalid number setting: {f.name}')
+                value = float(value)
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError(f'invalid nonnegative number setting: {f.name}')
             else:
                 # YAML 1.1 turns yes/no/on/off into bools before we see them.
                 if isinstance(value, bool):
@@ -142,6 +157,10 @@ class Policy:
                      profile_timezone=profile_timezone)
         if result.agent_can_create not in {"yes", "ask_first", "no"}:
             raise ValueError("agent_can_create must be yes, ask_first, or no")
+        role_max = max(1, min(result.role_turns_per_day_max, result.max_model_wakes_per_day))
+        result = replace(result, role_turns_per_day_max=role_max,
+                         role_turns_per_day_default=max(1, min(result.role_turns_per_day_default, role_max)),
+                         max_children_per_wake_turn=max(1, min(result.max_children_per_wake_turn, 50)))
         for name in ("min_interval_minutes", "agent_ungated_floor_minutes", "probe_floor_seconds",
                      "max_lifetime_days", "max_reminder_days", "checkin_after_hours", "noop_backoff_factor",
                      "noop_max_backoff_hours", "ledger_days"):
@@ -159,6 +178,7 @@ class Policy:
             "max_lifetime_days": 3650,
             "max_reminder_days": 3650,
             "checkin_after_hours": 8760,
+            "own_time_hours": 168,
         }.items():
             if getattr(result, name) > maximum:
                 raise ValueError(f"{name} exceeds maximum {maximum:g}")
@@ -206,7 +226,7 @@ class Policy:
                       active_count: int = 0, global_active_count: int = 0,
                       created_in: str = "human_turn", depth: int = 0,
                       children_created: int = 0, untrusted_payload: bool = False,
-                      registered_gateway: bool = False) -> Gate:
+                      registered_gateway: bool = False, parent_role: bool = False) -> Gate:
         if not session_key or session_key == "default":
             return Gate(False, "missing_session")
         if not platform or platform in NON_GATEWAY_PLATFORMS or (platform not in MESSAGING_PLATFORMS and not registered_gateway):
@@ -230,9 +250,9 @@ class Policy:
         if global_active_count >= 50:
             return Gate(False, "global_max_active")
         if created_in == "wake_turn":
-            if depth > self.max_rearm_chain:
+            if not parent_role and depth > self.max_rearm_chain:
                 return Gate(False, "rearm_depth")
-            if children_created >= 1:
+            if children_created >= (self.max_children_per_wake_turn if parent_role else 1):
                 return Gate(False, "rearm_child")
             if untrusted_payload and kind != "at":
                 return Gate(False, "untrusted_rearm")
@@ -243,7 +263,11 @@ class Policy:
                       babysit: bool | None = None, untrusted_payload: bool = False) -> Gate:
         if wake.session_key != session_key:
             return Gate(False, "wrong_session")
-        if wake.creator == "user" and created_in != "human_turn":
+        if wake.trigger_json.get('own_time') and action in {'pause','cancel','off'}:
+            return Gate(False, 'builtin_settings_owned', 'Own time is set in Settings (own_time_hours).')
+        if wake.role and babysit:
+            return Gate(False, 'role_not_babysit')
+        if wake.creator == "user" and not wake.role and created_in != "human_turn":
             return Gate(False, "owner_item")
         if action not in {"update", "resume", "pause", "cancel", "off"}:
             return Gate(False, "unknown_action")
@@ -262,6 +286,8 @@ class Policy:
         if action == "resume" and wake.status_reason.startswith("governor:") and created_in != "human_turn":
             return Gate(False, "needs_owner")
         kind = new_kind if new_kind is not None else wake.kind
+        if wake.role and kind not in RECURRING_KINDS:
+            return Gate(False, 'role_needs_recurring')
         if kind not in KINDS:
             return unknown_kind(kind)
         family = ("silence" if kind == "owner_silent" else "events" if kind in EVENT_KINDS
@@ -319,6 +345,12 @@ class Policy:
                 clamped[label] = f"{old} → {value} ({rule})"
         for attr, limit in (("title", 80), ("note", 2000), ("reason", 280), ("scratch", 4000)):
             change(attr, getattr(wake, attr)[:limit], attr, "length")
+        if wake.budget_turns_per_day is not None:
+            value = wake.budget_turns_per_day
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError('budget.turns_per_day must be an integer')
+            change('budget_turns_per_day', max(1, min(value, self.role_turns_per_day_max)),
+                   'budget.turns_per_day', 'role_turns_per_day_max')
         floor = self.interval_floor(wake, probe_gated=probe_gated)
         floor_rule = "babysit_floor" if wake.babysit else ("agent_ungated_floor" if agent_authored(wake) and not probe_gated else "min_interval")
         if wake.kind in RECURRING_KINDS:
@@ -336,7 +368,7 @@ class Policy:
                 # Cron retains its expression; this interval is the earliest
                 # permitted next scheduled time rather than a rewritten cron.
                 if value is None and wake.kind in {"cron", "self"}:
-                    value = floor
+                    value = max(floor, 86400 // self.role_budget(wake)) if wake.role and wake.kind == 'self' else floor
                 if value is not None:
                     value = parse_duration(value)
                     bounded = max(value, floor, minimum)
@@ -353,17 +385,17 @@ class Policy:
             if old != interval:
                 clamped["check_every"] = f"{old} → {interval} (probe_floor)"
         now = self.clock.now()
-        if not (wake.trigger_json.get('builtin') and wake.expires_at is None):
+        if not ((wake.role or wake.trigger_json.get('builtin')) and wake.expires_at is None):
             max_life = self.max_life_s(wake)
             # The implicit expiry stays max_lifetime_days for every wake; only a long owner
             # reminder outlives it, via the hard end and Tool.feasible's due-based grace.
             base_life = min(self.max_lifetime_days * 86400, 4 * 3600) if wake.babysit else self.max_lifetime_days * 86400
             default_life = min(base_life, 7 * 86400) if wake.creator == "agent" and wake.kind in RECURRING_KINDS else min(base_life, max_life)
-            hard_end = (wake.created_at or now) + max_life
+            hard_end = now + self.max_reminder_days * 86400 if wake.role else (wake.created_at or now) + max_life
             expires = min(now + default_life, hard_end) if wake.expires_at is None else min(wake.expires_at, hard_end)
             if not math.isfinite(expires) or expires <= now:
                 raise ValueError("expiry must be in the future")
-            rule = "max_lifetime" if wake.expires_at is None and now + default_life < hard_end else self.lifetime_setting(wake).removesuffix('_days')
+            rule = 'max_reminder' if wake.role else ("max_lifetime" if wake.expires_at is None and now + default_life < hard_end else self.lifetime_setting(wake).removesuffix('_days'))
             change("expires_at", expires, "expires", "babysit_lifetime" if wake.babysit else rule)
         if wake.max_fires is not None and (isinstance(wake.max_fires, bool) or not isinstance(wake.max_fires, int) or wake.max_fires < 1):
             raise ValueError("max_fires must be positive")
@@ -382,6 +414,10 @@ class Policy:
             return None
         return quiet_end(self.clock.now() if now is None else now, self.quiet_hours,
                          self.resolved_timezone())
+
+    def role_budget(self, wake):
+        return max(1, min(wake.budget_turns_per_day if wake.budget_turns_per_day is not None
+                          else self.role_turns_per_day_default, self.role_turns_per_day_max))
 
     def unanswered_gate(self, wake: Wake, unanswered_count: int) -> str | None:
         if unanswered_count >= self.max_unanswered and not owner_class(wake):

@@ -358,7 +358,7 @@ def test_I16_dispatch_gate_matrix(engine):
               ('session_paused', {}, {'paused_until':e.clock.now()+60}, {}),
               ('dm_only', {}, {'chat_type':'group'}, {}),
               ('unanswered', {}, {'unanswered_count':2}, {}),
-              ('quiet_hours', {'kind':'every','eff_interval_s':3600}, {}, {'quiet_hours':'00:00-23:59'}),
+              ('quiet_hours', {'kind':'every','creator':'user','eff_interval_s':3600}, {}, {'quiet_hours':'00:00-23:59'}),
               ('daily_message_cap', {}, {}, {'max_messages_per_day':0}),
               ('daily_model_cap', {}, {}, {'max_model_wakes_per_day':0}),
               ('busy', {}, {'busy_since':e.clock.now()}, {}),

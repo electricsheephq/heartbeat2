@@ -66,6 +66,8 @@ class Wake:
     no_verdict: int = 0
     agent_edited: bool = False
     owner_requested: bool = False
+    role: bool = False
+    budget_turns_per_day: int | None = None
     noop_streak: int = 0
     ignored_streak: int = 0
     error_streak: int = 0

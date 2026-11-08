@@ -116,8 +116,14 @@ confusion, but cannot guarantee that a full model turn follows every instruction
 A structured `pulse respond` with notify=false yields exactly `[SILENT]`; missing
 respond also defaults to silence. Hermes response trailers can break the final
 exact-marker match after transformation. Never treat fake-injector acceptance
-as proof of delivery. Enabled/settings/source gates, quiet hours, caps, busy
-checks, estop, unanswered mute and the no-op governor bound the engine's work.
+as proof of delivery. Enabled/settings/source gates, the daily wake-turn cap, the
+optional daily cost limit, per-role turn budgets, busy checks, estop and the idle
+governor bound the engine's work and spend. Quiet hours, the daily message cap and
+the unanswered mute bound what reaches the owner: during them the agent's own
+recurring work and roles still run, silently, and their messages are not delivered.
+Roles and own-time turns are full model turns with the conversation's normal tools;
+turn them on only in conversations whose tools you are happy to have run on their
+own.
 A deadline reports that nothing happened; it does not assert success.
 Hermes may auto-resume a wake turn interrupted by a crash; heartbeat2 keeps the
 replay silent, never counts it as a fire or delivery, and counts it as a model

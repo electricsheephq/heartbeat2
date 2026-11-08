@@ -13,8 +13,9 @@ from .tool import session_env, Infeasible
 DURATIONS = _DURATION.pattern+r'(?:\s*(?:,\s*)?(?:and\s*)?'+_DURATION.pattern+r')*'  # one way to split whitespace: linear
 LIST_RECENT_FINISHED = 10
 FINISHED_STATUSES = FINISHED_WAKE_STATUSES
-HELP = ('/pulse status | list [all] | ledger [7d] | why <id> | add in 2h <note> | '
+HELP = ('/pulse status | desk | list [all] | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
+        'role every 1d [at 09:00] <charter> | role self <charter> | budget <id> <n>/day | '
         'pause|resume|cancel <id|all> [for 3d] | off|on | '
         'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
 
@@ -83,8 +84,11 @@ def _clip(text, limit):
     return cut.rstrip(' \t\r\n.,;:·') + '…'
 
 
-def _time(engine, epoch):
-    return datetime.fromtimestamp(epoch, engine.policy.resolved_timezone()).strftime('%Y-%m-%d %H:%M %Z') if epoch is not None else 'none'
+def _time(engine, epoch, *, compact=False):
+    if epoch is None: return 'none'
+    tz = engine.policy.resolved_timezone()
+    fmt = ('%H:%M' if local_day(epoch,tz)==local_day(engine.clock.now(),tz) else '%a %H:%M') if compact else '%Y-%m-%d %H:%M %Z'
+    return datetime.fromtimestamp(epoch,tz).strftime(fmt)
 
 
 def _paused(engine, wake):
@@ -98,7 +102,9 @@ def _item(engine, wake):
     if wake.status in FINISHED_STATUSES: due = ''
     elif wake.status == 'paused': due = _paused(engine, wake)
     else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
-    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · {wake.kind}' + (f' · {due}' if due else '') + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+    role = (f' · today {engine.store.dispatches_today(wake.id,engine.policy.resolved_timezone())}/{engine.policy.role_budget(wake)}'
+            if wake.role else '')
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + wake.kind + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _occurrences(engine, wake):
@@ -128,10 +134,12 @@ def _ledger(engine, key, days):
     return '\n'.join(lines)
 
 
-def _add(engine, session, text):
+def _add(engine, session, text, *, role=False):
     clock = re.fullmatch(r'(\d{1,2}):(\d{2})(?:\s*([ap])\.?m\b\.?)?\s+(.+)', text, re.I|re.DOTALL)
     match = re.fullmatch(r'in (?P<duration>'+DURATIONS+r')\s+(?P<note>.+)', text, re.I|re.DOTALL)
-    if clock:
+    if role and text.startswith('self '):
+        trigger, note = {'kind':'self'}, text[5:].strip()
+    elif clock:
         hour = int(clock[1])
         if not clock[3] and re.match(r'[ap]\.?m\b', clock[4], re.I): raise ValueError('add a note after the time')
         if clock[3]:
@@ -159,7 +167,9 @@ def _add(engine, session, text):
             if not match: raise ValueError('use add in 2h <note>, add 16:30 <note>, every 1d at 09:00 <note>, or when silent 24h <note>')
             parse_duration(match['duration'])
             trigger, note = {'kind':'owner_silent','after':match['duration']}, match['note']
-    wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command',
+    if role and trigger['kind'] not in {'every','self'}:
+        raise ValueError('role_needs_recurring')
+    wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command', role=role,
         platform=session.platform, chat_type=session.chat_type, chat_id=session.chat_id,
         armed_session_id=session.current_session_id, title=_clip(note,80))
     _activation(engine,session,wake)
@@ -191,6 +201,9 @@ def handle(raw_args, runtime):
             if session is None or session.platform not in MESSAGING_PLATFORMS:
                 return 'Error: /pulse needs a known messaging-gateway session.'
             if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
+            if action == 'desk' and not rest:
+                from .desk import render_desk
+                return render_desk(engine,session,clock=engine.clock,timezone=engine.policy.resolved_timezone(),policy=engine.policy)
             if action == 'status' and not rest:
                 status = engine.status()
                 q = quiet_until(engine,key)
@@ -214,6 +227,9 @@ def handle(raw_args, runtime):
                          f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {daily["delivered"]}/{engine.policy.max_messages_per_day} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
                          f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
                 held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
+                if engine.policy.daily_cost_limit_usd:
+                    from .desk import cost_line
+                    lines.append(cost_line(engine.store,key,engine.policy.resolved_timezone(),engine.policy))
                 if held: lines.append(f'Held items: {held}')
                 if engine.settings_notice(): lines.append(engine.settings_notice())
                 if cache.ttl_for_session(engine.store,session)==(300,'hermes'):
@@ -241,6 +257,17 @@ def handle(raw_args, runtime):
                 if not 1 <= days <= engine.policy.ledger_days: raise ValueError('ledger range exceeds retained days')
                 return _ledger(engine,key,days)
             if action == 'add': return _add(engine,session,rest)
+            if action == 'role': return _add(engine,session,rest,role=True)
+            if action == 'budget':
+                match = re.fullmatch(r'(\S+)\s+(\d+)/day',rest)
+                if not match: raise ValueError('budget expects <id> <n>/day')
+                wake = engine.store.get_wake(match[1])
+                if wake is None or wake.session_key != key: raise ValueError('unknown item in this chat')
+                if not wake.role: raise ValueError('budget applies to roles')
+                budget = max(1,min(int(match[2]),engine.policy.role_turns_per_day_max))
+                if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,budget_turns_per_day=budget):
+                    raise ValueError('concurrent item change')
+                return _item(engine,engine.store.get_wake(wake.id))
             if action in {'off','on'} and not rest:
                 if not engine.store.cas_session(key, {'enabled':session.enabled}, enabled=action=='on'):
                     raise ValueError('concurrent session change')
@@ -310,6 +337,8 @@ def _transition(engine,session,wake,action,seconds):
         raise ValueError('proposed item: approve with /pulse ok or cancel')
     if action=='pause' and wake.status!='active': raise ValueError('pause needs an active item')
     if action=='watch' and wake.status not in {'active','paused'}: raise ValueError('watch needs an active or paused item')
+    if action=='watch' and (wake.role or wake.trigger_json.get('own_time')):
+        raise ValueError('roles and own time stay recurring; use /pulse slow, /pulse budget or /pulse cancel')
     if action=='resume' and wake.status!='paused': raise ValueError('resume needs a paused item')
     if action=='ok' and wake.status!='proposed': raise ValueError('ok needs a proposed item')
     clamps={}

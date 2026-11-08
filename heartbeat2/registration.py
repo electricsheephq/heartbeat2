@@ -268,7 +268,7 @@ def _register_surfaces(ctx,runtime):
     skill=getattr(ctx,'register_skill',None)
     if skill:
         skill('heartbeat2-usage',Path(__file__).resolve().parents[1]/'skills/heartbeat2-usage/SKILL.md',
-              'Close named open loops with bounded wakes and deterministic watchers.')
+              'Your own time in this chat: roles you own, follow-ups, watchers and own-time turns, within the owner\'s budgets.')
         skill('heartbeat2-report-problem',Path(__file__).resolve().parents[1]/'skills/heartbeat2-report-problem/SKILL.md',
               'HeartBeat 2.0: report a bug or problem')
 

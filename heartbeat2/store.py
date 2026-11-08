@@ -28,7 +28,7 @@ LEDGER_FIELDS = frozenset({"fires", "gated_skips", "governor_skips", "model_turn
     "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals", "checks", "no_verdict"} | CACHE_FIELDS)
 _JSON_FIELDS = {"trigger_json", "probe_state_json", "payload_json"}
 _BOOL_FIELDS = {"babysit", "urgent", "cancel_on_reply", "notify", "force_silent",
-                "enabled", "first_notice_sent", "agent_edited", "owner_requested"}
+                "enabled", "first_notice_sent", "agent_edited", "owner_requested", "role"}
 _TRANSITIONS = {
     "pending": { "skipped", "missed", "dead", "orphaned", "superseded"},
     "claimed": {"pending", "started", "dead", "interrupted", "orphaned", "superseded"},
@@ -175,7 +175,8 @@ class Store:
                 if "provider_deferrals" not in columns:
                     self.connection.execute("ALTER TABLE ledger ADD COLUMN provider_deferrals INTEGER NOT NULL DEFAULT 0")
                 additions = {'wakes': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0',
-                                      'agent_edited':'INTEGER NOT NULL DEFAULT 0', 'owner_requested':'INTEGER NOT NULL DEFAULT 0'},
+                                      'agent_edited':'INTEGER NOT NULL DEFAULT 0', 'owner_requested':'INTEGER NOT NULL DEFAULT 0',
+                                      'role':'INTEGER NOT NULL DEFAULT 0', 'budget_turns_per_day':'INTEGER'},
                     'ledger': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0'},
                     'occurrences': {'created_at':'REAL NOT NULL DEFAULT 0', 'matched_at':'REAL', 'held_since':'REAL',
                         'held_reason':"TEXT NOT NULL DEFAULT ''", 'held_matches':'INTEGER NOT NULL DEFAULT 0', 'api_calls':'INTEGER NOT NULL DEFAULT 0'}}
@@ -332,6 +333,43 @@ class Store:
             return [_record(Occurrence, row) for row in self.connection.execute(
                 "SELECT o.* FROM occurrences o JOIN wakes w ON w.id=o.wake_id" +
                 (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY o.rowid", values)]
+
+    def dispatches_today(self, wake_id, timezone):
+        """Count claimed/dispatched occurrences; refunded unsent claims don't spend."""
+        day = datetime.fromisoformat(local_day(self.clock.now(), timezone)).replace(tzinfo=timezone)
+        with self._lock:
+            return self.connection.execute(
+                'SELECT count(*) FROM occurrences WHERE wake_id=? AND claimed_at>=? AND claimed_at<?',
+                (wake_id, day.timestamp(), (day + timedelta(days=1)).timestamp())).fetchone()[0]
+
+    def daily_counts(self, key, timezone):
+        totals = {'model_turns': 0, 'delivered': 0}
+        day = local_day(self.clock.now(), timezone)
+        for w in self.list_wakes(key):
+            row = self.get_ledger(day, w.id) or {}
+            for k in totals: totals[k] += row.get(k, 0)
+        for o in self.list_occurrences(session_key=key):
+            if o.state in {'claimed', 'started'}:
+                if o.state == 'claimed': totals['model_turns'] += 1
+                if not o.force_silent: totals['delivered'] += 1
+        return totals
+
+    def agent_cost_today(self, key, timezone):
+        """Read durable usage-arrival totals, independent of retained history."""
+        day = local_day(self.clock.now(), timezone)
+        return json.loads(self.get_meta(f'agent_spend:{key}:{day}') or
+                          '{"cost_microusd":0,"unpriced_calls":0}')
+
+    def add_agent_spend(self, wake, occurrence_id, timezone, cost_microusd, unpriced_calls):
+        """Called inside the usage transaction; retain the dispatch spend class."""
+        from .policy import owner_class
+        spend = self.get_meta('spend:' + occurrence_id)
+        if spend == 'owner' or spend is None and owner_class(wake): return
+        day = local_day(self.clock.now(), timezone)
+        totals = self.agent_cost_today(wake.session_key, timezone)
+        totals['cost_microusd'] += cost_microusd
+        totals['unpriced_calls'] += unpriced_calls
+        self.set_meta(f'agent_spend:{wake.session_key}:{day}', _json(totals))
 
     def cas_occurrence(self, wake_id: str, dedupe_key: str, expected_state: str,
                        new_state: str, *, attempt: int | None = None, **updates) -> bool:
@@ -499,16 +537,23 @@ class Store:
         terminal = sorted(TERMINAL_OCCURRENCE_STATES)
         placeholders = ",".join("?" for _ in terminal)
         with self.atomic():
-            # Live rows count toward the limit but are never discarded by GC.
+            # Live rows and recent dispatches survive history pruning.
             self.connection.execute(f"""WITH ranked AS (
-                SELECT rowid AS rid,state,
+                SELECT rowid AS rid,state,claimed_at,
                 ROW_NUMBER() OVER (PARTITION BY wake_id,state IN ({placeholders})
                     ORDER BY ended_at DESC,rowid DESC) AS rank,
                 SUM(CASE WHEN state IN ({placeholders}) THEN 0 ELSE 1 END)
                     OVER (PARTITION BY wake_id) AS live FROM occurrences)
                 DELETE FROM occurrences WHERE rowid IN (SELECT rid FROM ranked
-                    WHERE state IN ({placeholders}) AND rank>MAX(0,?-live))""",
-                terminal * 3 + [keep_occurrences])
+                    WHERE state IN ({placeholders}) AND rank>MAX(0,?-live)
+                      AND (claimed_at IS NULL OR claimed_at<?))""",
+                terminal * 3 + [keep_occurrences, now - 2 * 86400])
             self.connection.execute("DELETE FROM events WHERE consumed_at IS NOT NULL AND consumed_at<?", (now - 7 * 86400,))
             self.connection.execute("DELETE FROM ledger WHERE day<?", (ledger_cutoff,))
+            self.connection.execute("DELETE FROM meta WHERE key LIKE 'agent_spend:%' AND substr(key,-10)<?", (ledger_cutoff,))
+            # Split 'spend:<wake_id>/<dedupe_key>' (wake ids never contain '/') so the lookup uses the primary key.
+            self.connection.execute("""DELETE FROM meta WHERE key LIKE 'spend:%' AND NOT EXISTS
+                (SELECT 1 FROM occurrences o
+                 WHERE o.wake_id=substr(meta.key,7,instr(substr(meta.key,7),'/')-1)
+                   AND o.dedupe_key=substr(meta.key,7+instr(substr(meta.key,7),'/')))""")
             self.set_meta("last_gc_at", str(now))

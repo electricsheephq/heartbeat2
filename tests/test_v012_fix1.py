@@ -293,7 +293,7 @@ def test_N8_docs_upgrade_cost_routes_and_final_mute():
     for path in ('README.md', 'skills/heartbeat2-usage/SKILL.md'):
         text = (root/path).read_text()
         assert 'OpenAI API routes' in text and 'Codex OAuth' in text and 'unknown until learned' in text
-    assert 'Wakes you armed always fire; agent watchers wait for your reply; agent reminders are dropped.' in (root/'plugin.yaml').read_text()
+    assert "Wakes you armed always fire; agent watchers wait for your reply; agent one-time reminders are dropped; the agent's recurring work keeps running, with its messages held." in (root/'plugin.yaml').read_text()
     changelog = (root/'CHANGELOG.md').read_text()
     assert 'Upgrade' in changelog and 'restart the gateway' in changelog and 'plugin-data' in changelog
 

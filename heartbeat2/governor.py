@@ -11,11 +11,16 @@ VALUABLE = {'progress','done','needs_attention'}
 
 
 def value(engine,o):
-    if engine.store.get_meta('ignored:'+o.id) or o.force_silent or not o.notify:
+    # Ignored deliveries retain their existing ratio/engagement semantics.
+    if engine.store.get_meta('ignored:'+o.id):
+        return 0
+    if o.outcome in VALUABLE and o.summary.strip():
+        return 1
+    if o.force_silent or not o.notify:
         return 0
     if engine.store.get_meta('engaged:'+o.id):
         return int(o.delivered)
-    return int(o.outcome in VALUABLE)
+    return int(o.delivered and o.outcome in VALUABLE)
 
 
 def pause(engine,wake,rule):
@@ -78,7 +83,7 @@ def apply(engine,wake,*,next_check=None):
     updates={}
     if w.kind in RECURRING_KINDS:
         floor=max(p.interval_floor(w),w.pacing_min_s or 0)
-        ceiling=min(p.noop_max_backoff_hours*3600,w.pacing_max_s or float('inf'))
+        ceiling=max(min(p.noop_max_backoff_hours*3600,w.pacing_max_s or float('inf')),w.base_interval_s or 0)
         # Saturate the exponent before computing it; arbitrary stale streaks
         # cannot overflow the scheduling math.
         backoff=min(ceiling,(w.base_interval_s or floor)*p.noop_backoff_factor**min(k,32))

@@ -96,14 +96,15 @@ def test_negative_controls(engine, control):
     finish(engine)
     session(engine, unanswered_count=engine.policy.max_unanswered)
     o = pending(engine, w)
-    expected = 'held_unanswered' if kind == 'subagent_done' else 'unanswered'
+    expected = 'held_unanswered' if kind == 'subagent_done' else '' if kind == 'every' else 'unanswered'
     assert engine.gate(w, o, engine.store.get_session(KEY))[0] == expected
     session(engine, unanswered_count=0)
     for setting, expected in [('max_model_wakes_per_day','daily_model_cap'),
                               ('max_messages_per_day','daily_message_cap')]:
         old = engine.policy
         engine.policy = replace(old, **{setting:0})
-        assert engine.gate(w, o, engine.store.get_session(KEY))[0] == ('held_daily_cap' if kind == 'subagent_done' else expected)
+        assert engine.gate(w, o, engine.store.get_session(KEY))[0] == ('held_daily_cap' if kind == 'subagent_done'
+            else '' if kind == 'every' and setting == 'max_messages_per_day' else expected)
         engine.policy = old
 
 

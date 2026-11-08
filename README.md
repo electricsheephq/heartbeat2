@@ -2,12 +2,14 @@
 
 # HeartBeat 2.0
 
-**Your Hermes agent can say "I'll check back at four", and then actually do it: in the same chat, on the same model, with everything it already knows.** It can watch a build, a log file, a process or a URL and speak up only when something changed. When there is nothing worth saying, it stays quiet.
+**Give your Hermes agent a working life between your messages.** Put it in charge of something and it keeps working on it on its own time: in the same chat, on the same model, with everything it already knows, inside the budgets you set. It can watch a build, a log, a process or a URL and speak up only when something changed. When there's nothing worth saying, it keeps working quietly or rests.
 
-- **You or your agent create the wakes and watchers.** A follow-up at a set time, a recurring check, a check-in after a long silence, or a deterministic watcher on a file, process, URL, read-only command or Hermes event. You arm them with `/pulse`; the agent arms them with its `pulse` tool.
-- **Same conversation, same model.** A wake is a turn in the chat that armed it, on that chat's own model. There is no side model, separate cron session or subagent.
-- **It catches its own pointless wakes.** A watcher costs no model call until something changes. A wake that keeps finding nothing slows down, suggests a watcher, then pauses and asks you once.
-- **You own every guardrail.** Quiet hours, daily caps, the unanswered mute, intervals and lifetimes are plugin settings. The agent works inside them: it can only narrow its own wakes (shorter lifetime, fewer fires, slower pacing) or switch itself off, never widen a setting.
+- **Roles it owns.** "You're in charge of the release notes." A role is a standing responsibility with a charter, a notebook the agent keeps between turns, and a rhythm the agent sets itself. It doesn't expire on a timer. You can hand one over, or the agent can take one on and tell you.
+- **Its own time.** Turn on own time and the agent gets regular turns with no assigned task. It looks at its desk (its roles, what's due, what it noticed, what budget is left) and decides: work on a role, follow something up, set up a watcher, tidy its notes or memory, or rest.
+- **Follow-ups and watchers.** A follow-up at a set time, a recurring check, a check-in after a long silence, or a deterministic watcher on a file, process, URL, read-only command or Hermes event. A watcher costs no model call until something changes.
+- **Same conversation, same model.** Every wake is a turn in the chat it belongs to, on that chat's own model. There is no side model, separate cron session or subagent.
+- **Quiet work counts.** A turn that researches, writes or prepares something without messaging you is real progress. Only wakes that keep finding nothing to do slow down, then pause and ask you once.
+- **You set the budgets.** Turns per day, an optional daily cost limit, turns per role, messages per day, the unanswered mute and quiet hours are your settings. They hold back messages and spending, not initiative: while you're away or asleep the agent can keep working, and it tells you what matters when you're back. That work still uses turns: the agent's recurring work, roles and own time keep running (and billing) under the mute and quiet hours, within the turns-per-day and cost limits. Roles and own time don't expire on a timer. The agent can tighten its own limits but never widen yours.
 
 ## See it work
 
@@ -148,9 +150,10 @@ pulse tool results name the ignored setting.
 `/pulse` is a control panel, not conversation. Using it never counts as replying to the agent. Anything else you send counts as a reply, including a reaction or an edit on platforms that report them: it resets the unanswered mute and cancels wakes armed to stop when you reply. A reaction or edit counts only when its chat maps to one HeartBeat session; in a chat shared by several sessions (for example DM threads or topics) it is ignored. The other exceptions are listed under known issues: a message queued while the agent is busy on Signal or SimpleX, and a Codex app-server steer.
 
 **Your agent** gets one tool, `pulse` (`create · list · update · pause · resume · cancel · respond · off`), and the bundled `heartbeat2-usage` skill. The skill teaches it to:
-- arm a wake only for a named open loop, never just to stay in touch;
+- take on roles and keep working on them, follow up on what it started, and use its own time well;
+- treat your budgets as the rules it works inside, and message you only when it's worth your attention;
 - prefer a watcher to a timer whenever a deterministic check can tell "changed";
-- answer every wake with `respond`: `outcome` (no_change · progress · done · blocked · needs_attention), `notify`, a one-line `summary`, and optionally `next_check` and `scratch` notes for its next wake. `done` ends the wake. A wake that stays silent (`notify=false`) counts as a no-op for backoff, whatever its outcome.
+- answer every wake with `respond`: `outcome` (no_change · progress · done · blocked · needs_attention), `notify`, a one-line `summary`, and optionally `next_check` and `scratch` notes for its next wake. `done` ends the wake. A silent turn (`notify=false`) that ends `progress` counts as real work; only `no_change` and `blocked` count toward slowing a wake down.
 
 A wake turn is a normal turn in your chat: the agent has the same tools as in any other turn there. HeartBeat 2.0 does not restrict them, so arm wakes in conversations whose tools you are happy to have run while you are away.
 
@@ -179,17 +182,17 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Agent can arm wakes | `agent_can_create` | `yes` | yes · ask_first (the agent's wakes wait for `/pulse ok <id>`) · no |
 | Direct messages only | `dm_only` | on | Refuse group chats. Unknown chat types are refused too. When off, group and topic wakes are recognised behind the gateway's sender prefix. |
 | Time zone | `timezone` | (blank) | IANA name such as Europe/Paris. Blank uses the profile's time zone. |
-| Quiet hours | `quiet_hours` | `22:00-08:00` | HH:MM-HH:MM, may cross midnight; blank for none. Due one-shots wait until the end; recurring ticks inside are skipped. |
+| Quiet hours | `quiet_hours` | `22:00-08:00` | HH:MM-HH:MM, may cross midnight; blank for none. Due one-shots wait until the end. Your agent's own recurring work and roles keep running inside them, silently: their messages are held. |
 | Urgent wakes ignore quiet hours | `quiet_hours_urgent` | off | Let wakes marked urgent through quiet hours. |
 | Wake turns per day | `max_model_wakes_per_day` | 24 | Per chat, local day. Each wake turn is a full model turn. |
 | Wake messages per day | `max_messages_per_day` | 6 | Per chat, local day. |
-| Unanswered messages before mute | `max_unanswered` | 2 | Wakes you armed, and one-time reminders you ask for in chat, always fire; agent watchers wait for your reply; other agent reminders are dropped. An agent edit revokes the exemption (for a chat reminder, so does an agent resume), except a watcher-only conversion you requested with `/pulse watch`. |
+| Unanswered messages before mute | `max_unanswered` | 2 | Wakes you armed, and one-time reminders you ask for in chat, always fire; agent watchers wait for your reply; other one-time agent reminders are dropped. The agent's recurring work and roles keep running silently, with their messages held until you reply. An agent edit revokes the exemption (for a chat reminder, so does an agent resume), except a watcher-only conversion you requested with `/pulse watch`. |
 | Shortest repeat (minutes) | `min_interval_minutes` | 15 | Floor for every recurring time wake. |
 | Shortest agent timer without a watcher (minutes) | `agent_ungated_floor_minutes` | 55 | Floor for recurring timers the agent arms without a watcher. |
 | Minutes between wake turns | `wake_spacing_minutes` | 10 | Per chat. |
 | Fastest watcher check (seconds) | `probe_floor_seconds` | 60 | Watchers never check more often than this. |
 | Active wakes per chat | `max_active` | 10 | Also capped at 50 across the profile. |
-| Longest lifetime (days) | `max_lifetime_days` | 14 | Recurring wakes, watchers and agent follow-ups expire by then; agent recurring wakes default to 7 days. |
+| Longest lifetime (days) | `max_lifetime_days` | 14 | Recurring wakes, watchers and agent follow-ups expire by then; agent recurring wakes default to 7 days. Roles and own time have no lifetime limit. |
 | Longest owner one-time reminder (days) | `max_reminder_days` | 365 | Owner-requested one-time reminders, including `/pulse add`, can be due up to this many days out, with `max_lifetime_days` of grace after a long reminder's due time. The hard end is the sum of both settings. If `max_lifetime_days` is larger, its existing bound applies instead; maximum 3650 days. |
 | Check in after a long silence | `owner_silent_checkin` | off | Off by default. One check-in per silence, with how to turn it off. |
 | Silence before a check-in (hours) | `checkin_after_hours` | 24 | Doubles for the next silence if a check-in is ignored. |
@@ -217,10 +220,10 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 ## Guardrails, briefly
 Every guardrail is configurable:
 - Recurring timers repeat at most every 15 minutes, or every 55 minutes when the agent arms one without a watcher. Watchers check at most once a minute.
-- Every wake expires after 14 days at most, except a one-time reminder you ask for, which can be due up to 365 days out (`max_reminder_days`, never below `max_lifetime_days`). A reminder due later than 14 days stays deliverable for 14 days after its due time, so downtime at the due time follows the catch-up rule instead of expiring silently.
+- Roles and own time don't expire on a timer; a role's explicit expiry can be up to 365 days out (`max_reminder_days`). Every other wake expires after 14 days at most, except a one-time reminder you ask for, which can be due up to 365 days out (`max_reminder_days`, never below `max_lifetime_days`). A reminder due later than 14 days stays deliverable for 14 days after its due time, so downtime at the due time follows the catch-up rule instead of expiring silently.
 - A wake that could not fire before it expires is refused, including an owner-silence wait or a probe's next check without a deadline. On create, an implicit lifetime stretches to fit, up to the maximum. Existing wakes keep their expiry; an edit past it is refused with a hint to set `until.expires` when extending can help, otherwise it names the maximum lifetime. Quiet hours count at the real dispatch time for one-shot times and watcher deadlines. A timed quiet override chains into the default quiet hours if they still apply when it ends. A one-shot outside the catch-up window is refused; one due now fires on the next check. A timed resume that cannot fit ends the wake with a notice. Receipts name the silence duration and are at most 240 characters; long ones end with an ellipsis.
 - Daily caps hold watchers until capacity frees, including on a new local day; your unedited one-shot reminders, including one-time reminders you ask for in chat, bypass both caps.
-- After 2 unanswered messages, agent watchers hold until you write; other agent timers and built-in check-ins drop their occurrence. Wakes you armed, and one-time reminders you ask for in chat (the agent marks them `owner_asked`), still fire unless the agent edited their trigger, timing or note; a watcher-only conversion you requested with `/pulse watch` keeps owner status. Held matches merge, keeping the latest payload; pauses preserve them and expiry is visible in `/pulse why`.
+- After 2 unanswered messages, agent watchers hold until you write, and agent one-time follow-ups and built-in check-ins drop their occurrence. The agent's recurring work, roles and own time keep running with their messages held; quiet hours and the daily message cap hold their messages the same way. Wakes you armed, and one-time reminders you ask for in chat (the agent marks them `owner_asked`), still fire unless the agent edited their trigger, timing or note; a watcher-only conversion you requested with `/pulse watch` keeps owner status. Held matches merge, keeping the latest payload; pauses preserve them and expiry is visible in `/pulse why`.
 - A wake turn that carries untrusted data, such as a log line or a web page, cannot arm new recurring work.
 - Hermes' emergency stop halts every wake.
 - `/pulse off` stops everything in that chat, and only you can turn it back on.

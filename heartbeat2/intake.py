@@ -362,15 +362,31 @@ class Intake:
                 dedupe=f'{key}:origin:{turn_id}:{fp}:{ordinal}'
                 self.human(key,platform,dedupe=dedupe)
 
+    def _rebind_recurring(self,w,session_id,reason):
+        s=self.engine.store
+        if s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id):
+            # A turn claimed or running in the old conversation ends there, as an orphaned wake's does.
+            for o in s.list_occurrences(w.id):
+                if o.state in {'claimed','started'}:
+                    s.cas_occurrence(w.id,o.dedupe_key,o.state,'superseded',
+                                     attempt=o.attempt,force_silent=True,error=reason)
+            self._fence(w.id)
+
+    def _fence(self,wake_id):
+        """A turn of a wake moved or orphaned mid-flight keeps wake-turn limits, as /new already ensures."""
+        for f in self.flights.values():
+            if f.wake_id==wake_id: f.invalid=True
+
     def _session_switch(self,w,session_id):
         """A known non-lineage switch has the same ownership boundary as /new."""
         e,s=self.engine,self.engine.store
-        if w.trigger_json.get('builtin'):
-            s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
+        if w.role or w.trigger_json.get('builtin'):
+            self._rebind_recurring(w,session_id,'session_switched')
             return False
         if w.status not in {'active','paused','proposed'}: return False
         if not s.cas_wake(w.id,w.status,expected_version=w.version,status='orphaned',status_reason='session_switched'): return False
         e.cancel_occurrences(w.id,'session_switched')
+        self._fence(w.id)
         count=int(s.get_meta('switched_notice:'+w.session_key) or 0)+1
         s.set_meta('switched_notice:'+w.session_key,str(count))
         return True
@@ -525,7 +541,7 @@ class Intake:
                 # A marker is authoritative only for its original session.
                 if w is None or w.session_key!=key or o is None: return None
                 invalid=o.attempt!=attempt or o.state not in {'claimed','started'}
-                if w.armed_session_id and w.armed_session_id!=session_id:
+                if not invalid and w.armed_session_id and w.armed_session_id!=session_id:
                     tip=e.compression_tip(w.armed_session_id)
                     if tip==session_id:
                         s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
@@ -589,7 +605,8 @@ class Intake:
             for w in s.list_wakes(key):
                 card=s.get_meta('card:'+w.id)
                 if card:
-                    lines.append(f'{w.title or "A wake"} ({w.id}) paused ({card}): keep / slow / stop via /pulse; convert with /pulse watch {w.id}.')
+                    ending = '.' if w.role or w.trigger_json.get('own_time') else f'; convert with /pulse watch {w.id}.'
+                    lines.append(f'{w.title or "A wake"} ({w.id}) paused ({card}): keep / slow / stop via /pulse{ending}')
                     s.set_meta('card:'+w.id,'')
             limits={f.name:getattr(e.policy,f.name) for f in fields(e.policy) if f.name not in {'clock','profile_timezone'}}
             fingerprint=hashlib.sha256(json.dumps(limits,sort_keys=True).encode()).hexdigest()
@@ -777,11 +794,19 @@ class Intake:
             if priced:
                 cache.touch(s,session,started_at=kwargs.get('started_at'),route=route,prompt=prompt,read=read,api_mode=kwargs.get('api_mode',''))
         f=self.flights.get(session_id)
-        if not f or f.invalid and not f.replay or turn_id and f.turn_id and turn_id!=f.turn_id: return None
+        if not f or turn_id and f.turn_id and turn_id!=f.turn_id: return None
         price=None
         if priced:
             try: price=cache.cost(route,prompt=prompt,read=read,written=written,out=count('completion_tokens','output_tokens'),ttl=cache.cache_ttl_for(route,store=s,platform=s.get_session(key).platform,api_mode=kwargs.get('api_mode',''))[0])
             except Exception: pass
+        if f.invalid and not f.replay:
+            # A fenced turn stays silent, but its spend still counts toward the agent's daily cost total.
+            w=s.get_wake(f.wake_id)
+            if w:
+                with s.atomic():
+                    s.add_agent_spend(w,f.wake_id+'/'+f.dedupe_key,e.policy.resolved_timezone(),
+                                      round(price*1e6) if price is not None else 0,int(price is None))
+            return None
         if f.invalid and f.replay:
             counts={'tokens_in':prompt,'tokens_out':count('completion_tokens','output_tokens'),
                     'cache_read_tokens':read,'cache_write_tokens':written,
@@ -792,20 +817,24 @@ class Intake:
                 if w and s.cas_wake(w.id,w.status,expected_version=w.version,
                     **{k:getattr(w,k)+v for k,v in counts.items()}):
                     e.ledger(w,**counts)
+                    s.add_agent_spend(w, f.wake_id+'/'+f.dedupe_key, e.policy.resolved_timezone(),
+                                      counts['cost_microusd'], counts['unpriced_calls'])
             return None
         o=s.get_occurrence(f.wake_id,f.dedupe_key)
         if o and o.attempt==f.attempt: s.set_meta('provider_error:'+o.id,'')
         with s.atomic():
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
             if o and o.state=='started':
-                s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=f.attempt,
+                if s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=f.attempt,
                     api_calls=o.api_calls+1,
                     cache_read_tokens=o.cache_read_tokens+read,cache_write_tokens=o.cache_write_tokens+written,
                     warm_wakes=o.warm_wakes+int(priced and not o.api_calls and prompt>0 and read/prompt>=.5),
                     cold_wakes=o.cold_wakes+int(priced and not o.api_calls and (not prompt or read/prompt<.5)),
                     cost_microusd=o.cost_microusd+(round(price*1e6) if price is not None else 0),unpriced_calls=o.unpriced_calls+int(price is None),
                     tokens_in=o.tokens_in+count('prompt_tokens','input_tokens'),
-                    tokens_out=o.tokens_out+count('completion_tokens','output_tokens'))
+                    tokens_out=o.tokens_out+count('completion_tokens','output_tokens')):
+                    s.add_agent_spend(s.get_wake(o.wake_id), o.id, e.policy.resolved_timezone(),
+                                      round(price*1e6) if price is not None else 0, int(price is None))
         return None
 
     @fail_open
@@ -894,8 +923,8 @@ class Intake:
         with s.atomic():
             keys=set()
             for w in s.list_wakes():
-                if w.trigger_json.get('builtin') and w.armed_session_id==old:
-                    s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=new_session_id)
+                if (w.role or w.trigger_json.get('builtin')) and w.armed_session_id==old:
+                    self._rebind_recurring(w,new_session_id,'session_reset')
                     session=s.get_session(w.session_key)
                     if session: s.cas_session(w.session_key,{'current_session_id':session.current_session_id},current_session_id=new_session_id,busy_since=None,busy_epoch=None)
                     continue

@@ -15,13 +15,13 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import MESSAGING_PLATFORMS, owner_class, is_watcher, one_shot
+from .policy import MESSAGING_PLATFORMS, owner_class, is_owner, is_watcher, one_shot, holds_messages
 from .schedule import time_due, local_day, parse_duration, next_every
 from . import governor
 
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
-FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_message_cap','dm_only',
+FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
 # by another (for a startup replay: the crashed) process.
@@ -194,17 +194,7 @@ class Poller:
                 'minimum_s':max(self.policy.interval_floor(w),w.pacing_min_s or 0)}
 
     def daily(self,key):
-        day=local_day(self.clock.now(),self.policy.resolved_timezone())
-        totals={'model_turns':0,'delivered':0}
-        for w in self.store.list_wakes(key):
-            row=self.store.get_ledger(day,w.id) or {}
-            for k in totals: totals[k]+=row.get(k,0)
-        # Reserve daily capacity for accepted work that has not ended yet.
-        for o in self.store.list_occurrences(session_key=key):
-            if o.state in {'claimed','started'}:
-                if o.state=='claimed': totals['model_turns']+=1
-                totals['delivered']+=1
-        return totals
+        return self.store.daily_counts(key,self.policy.resolved_timezone())
 
     def cancel_occurrences(self,wid,reason,*,preserve_started=False):
         for o in self.store.list_occurrences(wid):
@@ -264,6 +254,7 @@ class Poller:
             if not self.eligible(): return  # Probes can block; the home may be unserved by now.
             with s.atomic():
                 for w in s.list_wakes(): self.terminal_one_shot(w)
+                self.own_time()
                 self.times()
                 self.silence()
                 if now-float(s.get_meta('last_gc_at') or 0)>=3600:
@@ -417,7 +408,7 @@ class Poller:
             # A reminder still not due at its due bound (the setting was lowered) ends there; the grace is for a due one.
             due_end=w.created_at+self.policy.due_bound_s(w)
             late=due_end<=now and w.next_due_at is not None and w.next_due_at>due_end
-            if not w.trigger_json.get('builtin') and (hard_end<=now or late):
+            if not (w.role or w.trigger_json.get('builtin')) and (hard_end<=now or late):
                 s.cas_wake(w.id,'active',status='expired',status_reason='max_lifetime_changed')
                 self.cancel_occurrences(w.id,'max_lifetime_changed')
                 return
@@ -449,6 +440,41 @@ class Poller:
                 if not s.list_occurrences(w.id):
                     s.add_occurrence(w.id,f't:{w.deadline_at:.17g}',payload=[{'message':'deadline passed — nothing happened'}])
                 s.cas_wake(w.id,'active',expected_version=w.version,deadline_at=None)
+
+    def own_time(self):
+        s,now=self.store,self.clock.now()
+        hours=self.policy.own_time_hours
+        for w in s.list_wakes():
+            if w.trigger_json.get('own_time') and not hours and (w.status != 'cancelled' or w.status_reason != 'settings'):
+                if s.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='settings'):
+                    self.cancel_occurrences(w.id,'settings',preserve_started=True)
+        if not hours: return
+        floor=max(self.policy.min_interval_minutes,self.policy.agent_ungated_floor_minutes)*60
+        interval=max(hours*3600,floor)
+        maximum=max(2*hours*3600,floor)
+        for session in s.list_sessions():
+            if session.last_human_at is None or not session.episode_id: continue
+            wid='owntime_'+hashlib.sha256(session.session_key.encode()).hexdigest()[:16]
+            w=s.get_wake(wid)
+            if w is None:
+                s.create_wake(Wake(session.session_key,
+                    'This is your own time. Look at your desk: work on what you own, follow up on something you noticed, '
+                    'think something through, tidy your notes or memory, or rest. Message the owner only if it\'s worth their attention.',
+                    'self',id=wid,platform=session.platform,chat_type=session.chat_type,chat_id=session.chat_id,
+                    armed_session_id=session.current_session_id,creator='user',title='Own time',reason='Own time.',
+                    trigger_json={'builtin':True,'own_time':True,'hours':hours,'floor':floor},base_interval_s=interval,eff_interval_s=interval,
+                    pacing_min_s=floor,pacing_max_s=maximum,next_due_at=now+interval))
+                continue
+            updates={}
+            reactivate=w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason=='settings'
+            if w.trigger_json.get('hours')!=hours or w.trigger_json.get('floor',floor)!=floor or reactivate:
+                updates.update(base_interval_s=interval,eff_interval_s=interval,pacing_min_s=floor,
+                               pacing_max_s=maximum,next_due_at=now+interval,
+                               trigger_json={**w.trigger_json,'hours':hours,'floor':floor})
+            if reactivate:
+                updates.update(status='active',status_reason='',armed_session_id=session.current_session_id,
+                               fires=0,max_fires=None,babysit=False)
+            if updates: s.cas_wake(w.id,w.status,expected_version=w.version,**updates)
 
     def silence(self):
         s,now=self.store,self.clock.now()
@@ -483,13 +509,28 @@ class Poller:
         if now-session.last_human_at>=after:
             s.add_occurrence(w.id,'s:'+session.episode_id)
 
+    def message_hold_reason(self,w,s):
+        """Agent recurring work may continue while its messages are held."""
+        if s is None or not holds_messages(w):
+            return ''
+        from .commands import quiet_until
+        if quiet_until(self,s.session_key,urgent=w.urgent) is not None:
+            return 'quiet_hours'
+        if self.policy.unanswered_gate(w,s.unanswered_count):
+            return 'unanswered'
+        if self.daily(s.session_key)['delivered']>=self.policy.max_messages_per_day:
+            return 'daily_message_cap'
+        return ''
+
     def gate(self,w,o,s):
         now=self.clock.now()
         if o.state=='pending' and o.held_since is not None and o.error.startswith('held_'):
             self.store.set_meta('not_before:'+o.id,'')
         if w.kind=='owner_silent' and o.dedupe_key.startswith('s:') and (s is None or o.dedupe_key!='s:'+(s.episode_id or '')):
             return 'episode_ended',False,None
-        if w.trigger_json.get('builtin'):
+        if w.trigger_json.get('own_time'):
+            if not self.policy.own_time_hours: return 'setting_off',False,None
+        elif w.trigger_json.get('builtin'):
             if not self.policy.owner_silent_checkin: return 'setting_off',True,None
             after=self.policy.checkin_after_hours*3600*(2 if w.ignored_streak else 1)
             if s and s.last_human_at is not None and now-s.last_human_at<after: return 'checkin_not_due',True,None
@@ -512,16 +553,23 @@ class Poller:
                 health.pop('trial'); self.store.set_meta('provider_health',json.dumps(health))
         if health and (health['until']>now or health.get('trial')):
             return 'provider_unavailable',True,health['until'] if health['until']>now else None
-        # Windows hold pending work before mute/caps can drop it. Re-evaluate
-        # every gate once the window ends; owner reminders only bypass mute.
+        if w.role and self.store.dispatches_today(w.id,self.policy.resolved_timezone())>=self.policy.role_budget(w):
+            return 'role_budget',False,None
+        if (not owner_class(w) and self.policy.daily_cost_limit_usd>0
+                and self.store.agent_cost_today(w.session_key,self.policy.resolved_timezone())['cost_microusd']/1e6
+                    >=self.policy.daily_cost_limit_usd):
+            return 'daily_cost_cap',False,None
+        # Message gates silence agent recurring work; spend and dispatch gates
+        # still apply. Other wakes retain the existing hold/drop ordering.
+        message_held=self.message_hold_reason(w,s)
         from .commands import quiet_until
         quiet=quiet_until(self,s.session_key,urgent=w.urgent)
-        if quiet is not None: return 'quiet_hours',w.kind not in RECURRING_KINDS,quiet
+        if quiet is not None and not message_held: return 'quiet_hours',w.kind not in RECURRING_KINDS,quiet
         mute=self.policy.unanswered_gate(w,s.unanswered_count)
-        if mute: return mute,mute=='held_unanswered',None
+        if mute and not message_held: return mute,mute=='held_unanswered',None
         totals=self.daily(s.session_key)
         cap='daily_model_cap' if totals['model_turns']>=self.policy.max_model_wakes_per_day else 'daily_message_cap' if totals['delivered']>=self.policy.max_messages_per_day else ''
-        if cap and not (owner_class(w) and one_shot(w)):
+        if cap and not (cap=='daily_message_cap' and message_held) and not (owner_class(w) and one_shot(w)):
             if is_watcher(w):
                 return 'held_daily_cap',True,None
             return cap,False,None
@@ -580,13 +628,22 @@ class Poller:
         if cache_line is None:
             cache_line='' if s.connection.in_transaction else self.cache_line(w)
         held_by=o.error  # Claim clears the stored deferral; retain it for this prompt.
-        if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
+        message_held=self.message_hold_reason(w,session)
+        if message_held and (not o.force_silent or o.held_reason.startswith('message_held:')):
+            if not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=True,
+                                       held_reason='message_held:'+message_held): return
+        elif not message_held and o.force_silent and o.held_reason.startswith('message_held:'):
+            if not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=False,held_reason=''): return
+        with s.atomic():
+            if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
+            s.set_meta('spend:'+o.id, 'owner' if owner_class(w) else 'agent')
         o=s.get_occurrence(w.id,o.dedupe_key)
         health=json.loads(s.get_meta('provider_health') or '{}')
         if health:
             health['trial']=o.id
             s.set_meta('provider_health',json.dumps(health))
-        from .wake_text import render_wake
+        from .wake_text import render_wake, escape_text
+        from .desk import render_desk
         from .intake import marker_tag
         tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
         recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
@@ -595,9 +652,13 @@ class Poller:
             try: late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
             except ValueError: pass
         text=render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
-             recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-1,
+             recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-(0 if o.force_silent else 1),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
-             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,cache_line=cache_line,marker_tag=tag)
+             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
+             cache_line=cache_line,marker_tag=tag,
+             desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
+                              measure=lambda text: len(escape_text(text)))
+                  if w.role or w.trigger_json.get('own_time') else '')
         if not self.eligible():
             # Lost the home after claiming: give the claim back unsent, as it was.
             if health:
