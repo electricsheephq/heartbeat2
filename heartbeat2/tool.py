@@ -442,7 +442,13 @@ class Tool:
         text=' '.join(parts)
         if len(text)>240: text=text.replace('Wakes are at least ','Wakes at least ').replace(' min apart, so it can land a few minutes late.',' min apart; may land a few minutes late.')
         if len(text)>240: text=' '.join(x for x in parts if not x.startswith('Wakes are at least '))
-        if len(text)>240 and w.status!='proposed':  # A proposal shows its whole filters before approval.
+        if len(text)>240 and w.status=='proposed' and watcher and len(parts)>2:
+            # Before approval the filters matter most: drop the other notes first.
+            text=' '.join(parts[:2])
+        if len(text)>240 and w.status=='proposed' and watcher and len(parts[0])<200:
+            # Keep the whole approval line and as much of the filters as fits, rather than cutting at the last sentence.
+            text=(parts[0]+' '+parts[1])[:239]+'…'
+        if len(text)>240:
             text=text[:239]
             boundary=text.rfind('. ')
             text=(text[:boundary+1] if boundary>=0 else text)+'…'

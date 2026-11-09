@@ -410,9 +410,12 @@ def test_deferred_card_pricing_failure_is_logged(engine, caplog):
     assert any('card pricing failed' in r.getMessage() for r in caplog.records)
 
 
-def test_proposed_watcher_receipt_keeps_long_filters(engine):
+@pytest.mark.parametrize('task,board,whole', [('task-'+'x'*40, 'board-'+'y'*30, True), ('task-'+'x'*150, 'board-'+'y'*60, False)])
+def test_proposed_watcher_receipt_keeps_its_filters(engine, task, board, whole):
+    # Receipts stay within 240 characters; a proposal keeps its approval line and its filters ahead of other notes.
     e = engine
-    task = 'task-'+'x'*150
-    w = arm(e, 'kanban_completed', status='proposed', trigger_json={'kind': 'kanban_completed', 'task_id': task, 'board': 'board-'+'y'*60})
+    w = arm(e, 'kanban_completed', status='proposed', trigger_json={'kind': 'kanban_completed', 'task_id': task, 'board': board})
     text = e.tool.receipt(w, e.store.get_session(KEY))
-    assert 'for task '+task in text and 'on board board-' in text and text.startswith('Not set yet:')
+    assert len(text) <= 240 and text.startswith(f'Not set yet: it is armed only after the owner sends /pulse ok {w.id}.')
+    assert 'It would wait for kanban_completed events for task '+(task+' on board '+board if whole else task[:60]) in text
+    assert text.endswith('.' if whole else '…')
