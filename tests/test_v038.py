@@ -270,3 +270,18 @@ def test_owner_pause_of_the_running_wake_holds_for_the_rest_of_its_turn(engine, 
     # Its budget can't rise from this turn either.
     raised = engine.tool.handle(dict(action='update', id=w.id, budget={'turns_per_day': 12}), session_id='sid')
     assert 'wake_turn cannot raise budget' in str(raised.get('clamped', raised)), raised
+
+
+def test_history_pruning_keeps_only_results_the_owner_can_still_get(engine):
+    from test_v037 import recorded
+    w = arm(engine, 'self', role=True)
+    kept = recorded(engine, w, 'kept')
+    never = [recorded(engine, w, 'no_change', outcome='no_change'), recorded(engine, w, 'blank', summary=' \n\t')]
+    for n in range(4):
+        engine.clock.advance(1)
+        recorded(engine, w, f'new{n}', held_reason='', notify=False)
+    with engine.store.atomic():
+        engine.store.connection.execute('UPDATE occurrences SET claimed_at=?', (engine.clock.now() - 3 * 86400,))
+    engine.store.gc(ledger_days=30, keep_occurrences=4)
+    assert engine.store.held_reports(KEY) == [engine.store.get_occurrence(w.id, 'kept')]
+    assert all(engine.store.get_occurrence(w.id, o.dedupe_key) is None for o in never)

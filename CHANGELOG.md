@@ -6,6 +6,7 @@
 - **Watch one task or board.** Kanban watchers accept `task_id` and `board` filters and name them in their receipts (#135).
 - **Priced spend, checked before a turn.** The daily cost setting now explains that it stops new agent turns once today's priced spend reaches the limit, cannot cap a turn already running, and does not count unpriced calls. Status and desk label those calls as not counted (#136).
 - **Your pause holds.** A wake you paused with `/pulse pause` can be resumed by the agent only during your own turn in the chat, never from one of its wake turns, including the turn you paused. Kanban filters must not be empty.
+- **Tidier history.** Pruning keeps exactly the held results that can still come back to you, and no longer keeps held turns that ended with nothing to report (#146).
 
 ## 0.3.7 — 2026-11-10
 

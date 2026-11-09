@@ -573,6 +573,9 @@ class Store:
         ledger_cutoff = (datetime.fromisoformat(local_day(now, timezone)).date() - timedelta(days=ledger_days - 1)).isoformat()
         terminal = sorted(TERMINAL_OCCURRENCE_STATES)
         placeholders = ",".join("?" for _ in terminal)
+        # Keep exactly the rows held_reports can still return (#146).
+        held = sorted(HELD_REPORT_OUTCOMES)
+        held_outcomes = ",".join("?" for _ in held)
         with self.atomic():
             # Live rows and recent dispatches survive history pruning.
             self.connection.execute(f"""WITH ranked AS (
@@ -585,8 +588,10 @@ class Store:
                     WHERE state IN ({placeholders}) AND rank>MAX(0,?-live)
                       AND (claimed_at IS NULL OR claimed_at<?)
                       AND rid NOT IN (SELECT rowid FROM occurrences WHERE state='done'
-                          AND held_reason LIKE 'message_held:%' AND notify=1 AND delivered=0))""",
-                terminal * 3 + [keep_occurrences, now - 2 * 86400])
+                          AND held_reason LIKE 'message_held:%' AND notify=1 AND delivered=0
+                          AND ended_at IS NOT NULL AND outcome IN ({held_outcomes})
+                          AND trim(summary, ' '||char(9)||char(10)||char(13)) <> ''))""",
+                terminal * 3 + [keep_occurrences, now - 2 * 86400] + held)
             self.connection.execute("DELETE FROM events WHERE consumed_at IS NOT NULL AND consumed_at<?", (now - 7 * 86400,))
             self.connection.execute("DELETE FROM ledger WHERE day<?", (ledger_cutoff,))
             self.connection.execute("DELETE FROM meta WHERE key LIKE 'agent_spend:%' AND substr(key,-10)<?", (ledger_cutoff,))
