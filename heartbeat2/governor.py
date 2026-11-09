@@ -191,6 +191,10 @@ def settle_ignored(engine):
 
 
 def hint(engine,wake):
-    if wake.noop_streak==engine.policy.suggest_gate_after:
-        return 'Consider a file|process|url|command watcher via pulse update, push next_check out, or cancel.'
-    return ''
+    if wake.noop_streak!=engine.policy.suggest_gate_after: return ''
+    # Cron follows its expression (next_check is ignored there), and a role stays recurring: offer only what works.
+    pace='change its cron schedule via pulse update' if wake.kind=='cron' else 'push next_check out'
+    if wake.role or wake.trigger_json.get('own_time'):
+        return (f'This keeps finding nothing: {pace}, lower its budget, arm a separate watcher for what it waits on, '
+                'or end it with outcome=done.')
+    return f'Consider a file|process|url|command watcher via pulse update, {pace}, or cancel.'

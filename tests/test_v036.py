@@ -109,3 +109,31 @@ def test_every_role_still_takes_next_check(engine):
                                 next_check='6h'), session_id='sid')
     f = e.intake.flights['sid']
     assert result.get('ok') and e.store.get_occurrence(f.wake_id, f.dedupe_key).next_check_s is not None
+
+
+def test_idle_hint_offers_only_what_works(engine):
+    from dataclasses import replace
+    from heartbeat2 import governor
+    e = engine
+    n = e.policy.suggest_gate_after
+    role = replace(_role(e), noop_streak=n)
+    text = governor.hint(e, role)
+    assert 'watcher via pulse update' not in text and 'separate watcher' in text and 'push next_check out' in text
+    cron_role = replace(_role(e, 'cron', cron='0 9 * * *'), noop_streak=n)
+    assert 'change its cron schedule' in governor.hint(e, cron_role) and 'next_check' not in governor.hint(e, cron_role)
+    plain = replace(arm(e, 'every', trigger_json={'kind': 'every', 'every': '2h'}), noop_streak=n)
+    assert governor.hint(e, plain) == 'Consider a file|process|url|command watcher via pulse update, push next_check out, or cancel.'
+    assert governor.hint(e, replace(plain, noop_streak=n - 1)) == ''
+
+
+def test_readme_lists_every_setting_and_the_role_commands():
+    from pathlib import Path
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / 'README.md').read_text()
+    schema = yaml.safe_load((root / 'plugin.yaml').read_text())['config_schema']
+    assert [k for k in schema if f'`{k}`' not in readme] == []
+    for row in ('`/pulse role self <charter>`', '`/pulse desk`', '`/pulse budget <id> 3/day`',
+                '`create · list · desk · update'):
+        assert row in readme
+    assert 'turn it into a watcher, or finish it' not in (root / 'skills/heartbeat2-usage/SKILL.md').read_text()

@@ -1,5 +1,5 @@
 name: heartbeat2
-version: "0.3.5"
+version: "0.3.6"
 description: >-
   HeartBeat 2.0: your agent's own time between your messages. Roles it owns, follow-ups,
   own-time turns and free deterministic watchers, all in the conversation that armed them and
@@ -88,12 +88,12 @@ config_schema:
     type: int
     default: 6
     label: "Turns per role per day (default)"
-    description: "A role's own budget unless it sets a lower one. Each turn is a full model turn."
+    description: "A role's budget when none is set for it. Each turn is a full model turn."
   role_turns_per_day_max:
     type: int
     default: 12
     label: "Most turns a role may take per day"
-    description: "Caps any budget a role sets. The chat's wake-turn limit still applies."
+    description: "Caps every role budget. A budget you set with /pulse budget is a ceiling the agent can go under but not raise unless you ask. The chat's wake-turn limit still applies."
   max_children_per_wake_turn:
     type: int
     default: 3
