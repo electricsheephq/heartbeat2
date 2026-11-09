@@ -91,7 +91,7 @@ def test_single_chat_item_required(engine, command, action, rest):
     assert snapshot(engine) == before
 
 
-@pytest.mark.parametrize('kind', ['every', 'reaction'])
+@pytest.mark.parametrize('kind', ['every', 'self'])
 def test_run_quiet_hours_matches_scheduled_gate(engine, command, kind):
     e = engine
     e.policy = replace(e.policy, quiet_hours='00:00-23:59')
@@ -329,11 +329,19 @@ def test_deferred_card_pricing_never_restores_a_consumed_card(engine):
     assert engine.store.get_meta('card:'+w.id) == ''
 
 
-def test_run_keeps_a_watchers_deadline_notice(engine, command):
+@pytest.mark.parametrize('kind,trigger', [
+    ('kanban_completed', {'kind': 'kanban_completed', 'task_id': 't1'}),
+    ('reaction', {'kind': 'reaction'}),
+    ('command', {'kind': 'command', 'command': 'true', 'check_every': 60}),
+])
+def test_run_refuses_watchers(engine, command, kind, trigger):
+    # A run would merge with real matches and spend fires, and could end a watcher before its deadline notice.
     e = engine
-    w = arm(e, 'kanban_completed', trigger_json={'kind': 'kanban_completed', 'task_id': 't1'}, deadline_at=e.clock.now()+600)
-    assert command('run '+w.id).startswith('Queued')
+    w = arm(e, kind, trigger_json=trigger, deadline_at=e.clock.now()+600, max_fires=1)
+    before = snapshot(e)
+    out = command('run '+w.id)
+    assert out.startswith('Error:') and 'watcher fires when what it watches changes' in out and '/pulse test '+w.id in out
+    assert snapshot(e) == before and not e.store.list_occurrences(w.id)
     e.clock.advance(601)
     e.times()
-    keys = [o.dedupe_key for o in e.store.list_occurrences(w.id)]
-    assert any(k.startswith('t:') for k in keys), keys
+    assert [o.dedupe_key[:2] for o in e.store.list_occurrences(w.id)] == ['t:']

@@ -447,8 +447,7 @@ class Poller:
             elif w.kind in PROBE_KINDS|EVENT_KINDS and w.deadline_at is not None and w.deadline_at<=now:
                 # Deadline fallback is one fire only, and only when no trigger
                 # occurrence has already been produced (including pending).
-                # An owner's /pulse run is not "something happened": only real trigger occurrences cancel the fallback.
-                if not [x for x in s.list_occurrences(w.id) if not x.dedupe_key.startswith('r:')]:
+                if not s.list_occurrences(w.id):
                     s.add_occurrence(w.id,f't:{w.deadline_at:.17g}',payload=[{'message':'deadline passed — nothing happened'}])
                 s.cas_wake(w.id,'active',expected_version=w.version,deadline_at=None)
 

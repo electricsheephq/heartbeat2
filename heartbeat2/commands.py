@@ -215,7 +215,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
     o=Occurrence(w.id,f'r:{engine.clock.now():.17g}',payload_json=[{'message':'The owner asked to run this now (/pulse run).'}],attempt=1)
     try:
         with engine.store.atomic():
-            # tick() and the claim barrier refuse before gate() when HeartBeat is off or paused for the whole profile.
+            # When HeartBeat is off or paused for the whole profile, tick() refuses before gate() and the claim barrier after it: nothing is sent.
             reason,defer,until=(('plugin_off',True,None) if not engine.policy.enabled else
                                 ('paused_all',True,None) if engine.paused() else engine.gate(w,o,session))
             message_held=engine.message_hold_reason(w,session)
@@ -272,6 +272,8 @@ def handle(raw_args, runtime):
                 if wake.status=='proposed': raise ValueError(f'approve it first with /pulse ok {wake.id}')
                 if wake.status=='paused': raise ValueError(f'resume it first with /pulse resume {wake.id}')
                 if wake.kind=='at': raise ValueError(f'a one-time reminder fires once at its time; preview it with /pulse test {wake.id}')
+                if wake.kind in PROBE_KINDS|EVENT_KINDS:
+                    raise ValueError(f'a watcher fires when what it watches changes; preview it with /pulse test {wake.id}')
                 if wake.kind=='owner_silent' or wake.trigger_json.get('builtin'):
                     raise ValueError(f'this one fires on its own when its time comes; preview it with /pulse test {wake.id}')
                 occurrences=engine.store.list_occurrences(wake.id)
