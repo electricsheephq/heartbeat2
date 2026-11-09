@@ -544,7 +544,12 @@ class Poller:
         if not s.enabled: return 'session_off',False,None
         if s.paused_until is not None and s.paused_until>now: return 'session_paused',True,None
         if self.policy.dm_only and (s.chat_type!='dm' or w.chat_type!='dm'): return 'dm_only',False,None
-        if s.platform not in MESSAGING_PLATFORMS: return 'non_gateway',False,None
+        if s.platform == 'api_server' and s.session_key == 'heartbeat2:voice:' + s.chat_id:
+            from .voice import hub, supported
+            transport = hub(self)
+            if not supported(self, s): return 'voice_disconnected',True,None
+            if not transport.wake_ready(s.chat_id): return 'busy',True,None
+        elif s.platform not in MESSAGING_PLATFORMS: return 'non_gateway',False,None
         health=json.loads(self.store.get_meta('provider_health') or '{}')
         if health.get('trial'):
             wid,key=health['trial'].split('/',1)
@@ -665,7 +670,12 @@ class Poller:
                 health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
             s.refund(w.id,o.dedupe_key,attempt=o.attempt,error=held_by)
             return
-        try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
+        try:
+            if session.platform == 'api_server':
+                from .voice import inject
+                accepted = inject(self, session, text)
+            else:
+                accepted=self.ctx.inject_message(text,session_key=w.session_key)
         except Exception: accepted=False
         if accepted:
             s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))

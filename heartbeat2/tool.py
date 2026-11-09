@@ -72,6 +72,17 @@ class Tool:
         self.engine, self.session_key_fn = engine, session_key_fn
 
     def identity(self):
+        from . import voice
+        target = voice.current(self.engine)
+        if target:
+            chat_id, sid = target
+            key = 'heartbeat2:voice:' + chat_id
+            s = self.engine.store.get_session(key)
+            if s is None:
+                s = Session(key, platform='api_server', chat_type='dm',
+                            chat_id=chat_id, current_session_id=sid)
+                self.engine.store.upsert_session(s)
+            return s
         key = self.session_key_fn()
         if not key or key == 'default':
             return None
@@ -96,6 +107,7 @@ class Tool:
                 and e.intake.owner_turns.get(session_id) == turn)
 
     def _handle(self, args, *, session_id='', **kwargs):
+        from .voice import supported
         e = self.engine
         try:
             e.refresh()
@@ -147,6 +159,7 @@ class Tool:
                         kind=(args.get('trigger') or {}).get('kind',''), created_in=created_in,
                         depth=depth, parent_role=parent_role, children_created=children,
                         untrusted_payload=bool(flight and flight.untrusted),
+                        voice_session=supported(e, s),
                         active_count=sum(w.status in {'active','proposed'} for w in e.store.list_wakes(s.session_key)),
                         global_active_count=sum(w.status in {'active','proposed'} for w in e.store.list_wakes()))
                     if not gate.allowed:
@@ -203,7 +216,8 @@ class Tool:
                     if action in {'resume','update'}:
                         if not s.enabled:
                             return {'error':'session_off'}
-                        if s.platform in NON_GATEWAY_PLATFORMS or s.platform not in MESSAGING_PLATFORMS:
+                        if not supported(e, s) and (s.platform in NON_GATEWAY_PLATFORMS
+                                                    or s.platform not in MESSAGING_PLATFORMS):
                             return {'error':'non_gateway'}
                         if e.policy.dm_only and s.chat_type != 'dm':
                             return {'error':'dm_only'}

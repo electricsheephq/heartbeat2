@@ -226,10 +226,13 @@ class Policy:
                       active_count: int = 0, global_active_count: int = 0,
                       created_in: str = "human_turn", depth: int = 0,
                       children_created: int = 0, untrusted_payload: bool = False,
-                      registered_gateway: bool = False, parent_role: bool = False) -> Gate:
+                      registered_gateway: bool = False, parent_role: bool = False,
+                      voice_session: bool = False) -> Gate:
         if not session_key or session_key == "default":
             return Gate(False, "missing_session")
-        if not platform or platform in NON_GATEWAY_PLATFORMS or (platform not in MESSAGING_PLATFORMS and not registered_gateway):
+        live_voice = voice_session and platform == 'api_server'
+        if not live_voice and (not platform or platform in NON_GATEWAY_PLATFORMS
+                               or (platform not in MESSAGING_PLATFORMS and not registered_gateway)):
             return Gate(False, "non_gateway")
         if self.dm_only and chat_type != "dm":
             return Gate(False, "dm_only")
