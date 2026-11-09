@@ -8,6 +8,7 @@ from heartbeat2 import commands
 from heartbeat2.desk import cost_line
 from heartbeat2.tool import PARAMETERS
 from test_engine import KEY, arm, engine, pending, start
+from test_v03_u3 import priced
 
 
 @pytest.fixture
@@ -286,3 +287,11 @@ def test_history_pruning_keeps_only_results_the_owner_can_still_get(engine):
     engine.store.gc(ledger_days=30, keep_occurrences=4)
     assert engine.store.held_reports(KEY) == [engine.store.get_occurrence(w.id, 'kept')]
     assert all(engine.store.get_occurrence(w.id, o.dedupe_key) is None for o in never)
+
+
+def test_status_shows_unpriced_calls_without_a_limit(engine, command):
+    assert engine.policy.daily_cost_limit_usd == 0
+    assert 'cost today' not in command('status') and 'unpriced' not in command('status')
+    w = arm(engine, 'self', role=True, title='Release notes')
+    priced(engine, w, 0, unpriced=3)
+    assert '3 unpriced calls not counted' in command('status')

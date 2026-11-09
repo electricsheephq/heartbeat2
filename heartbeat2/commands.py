@@ -249,9 +249,9 @@ def handle(raw_args, runtime):
                          f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {messages_count(daily["delivered"],engine.store.messages_in_flight(key),engine.policy.max_messages_per_day)} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
                          f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
                 held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
-                if engine.policy.daily_cost_limit_usd:
-                    from .desk import cost_line
-                    lines.append(cost_line(engine.store,key,engine.policy.resolved_timezone(),engine.policy))
+                from .desk import cost_line
+                cost=cost_line(engine.store,key,engine.policy.resolved_timezone(),engine.policy)
+                if cost: lines.append(cost)
                 if held: lines.append(f'Held items: {held}')
                 if engine.settings_notice(): lines.append(engine.settings_notice())
                 if cache.ttl_for_session(engine.store,session)==(300,'hermes'):
