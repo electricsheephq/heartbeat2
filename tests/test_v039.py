@@ -327,3 +327,13 @@ def test_deferred_card_pricing_never_restores_a_consumed_card(engine):
         governor.pause(engine, w, 'noop')
         engine.store.set_meta('card:'+w.id, '')  # an owner turn shows and clears the card before pricing runs
     assert engine.store.get_meta('card:'+w.id) == ''
+
+
+def test_run_keeps_a_watchers_deadline_notice(engine, command):
+    e = engine
+    w = arm(e, 'kanban_completed', trigger_json={'kind': 'kanban_completed', 'task_id': 't1'}, deadline_at=e.clock.now()+600)
+    assert command('run '+w.id).startswith('Queued')
+    e.clock.advance(601)
+    e.times()
+    keys = [o.dedupe_key for o in e.store.list_occurrences(w.id)]
+    assert any(k.startswith('t:') for k in keys), keys

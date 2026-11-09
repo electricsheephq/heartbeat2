@@ -10,6 +10,7 @@ from dataclasses import fields, replace, asdict
 from datetime import datetime, timedelta
 import hashlib
 import json
+import logging
 from pathlib import Path
 import secrets
 import sqlite3
@@ -244,7 +245,8 @@ class Store:
                     callbacks, self._after_commit = self._after_commit, []
         for callback in callbacks:
             try: callback()
-            except Exception: pass  # Display-only work after a commit must never fail the committed caller.
+            except Exception:  # Display-only work after a commit must never fail the committed caller.
+                logging.getLogger('heartbeat2').warning('heartbeat2 after-commit callback failed', exc_info=True)
 
     def after_commit(self, callback):
         with self._lock:
