@@ -124,6 +124,8 @@ def test_idle_hint_offers_only_what_works(engine):
     plain = replace(arm(e, 'every', trigger_json={'kind': 'every', 'every': '2h'}), noop_streak=n)
     assert governor.hint(e, plain) == 'Consider a file|process|url|command watcher via pulse update, push next_check out, or cancel.'
     assert governor.hint(e, replace(plain, noop_streak=n - 1)) == ''
+    own = replace(plain, kind='self', trigger_json={'kind': 'self', 'own_time': True, 'builtin': True})
+    assert 'outcome=done' not in governor.hint(e, own) and 'owner sets how often' in governor.hint(e, own)
 
 
 def test_readme_lists_every_setting_and_the_role_commands():
