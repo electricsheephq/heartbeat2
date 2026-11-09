@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.10 — 2026-11-10
+
+- **Check-ins stay in messaging chats.** On CLI, TUI, Desktop and API sessions, the built-in check-in and own time could pile up (one per launch) until no new wake could be created. They're now made only in messaging chats, leftover ones are cancelled automatically, and built-ins no longer count toward the wake limits. A refused create now says how to free a slot (#147).
+
 ## 0.3.9 — 2026-11-10
 
 - **Try a wake now.** The owner can queue one turn of a recurring wake or role with `/pulse run <id>`, under every usual check (it counts as one of its fires), or preview any wake with `/pulse test <id>` without sending anything or calling a model. Watchers, one-time reminders, the quiet check-in and own time can be previewed; they still fire on their own (#50, #61).

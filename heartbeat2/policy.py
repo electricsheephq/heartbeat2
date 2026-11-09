@@ -45,6 +45,17 @@ NON_GATEWAY_PLATFORMS = frozenset({"cli", "tui", "desktop", "api_server", "cron"
 INJECTION_CONFIG = "plugins:\n  entries:\n    heartbeat2:\n      allow_gateway_injection: true"
 
 
+def deliverable_platform(platform) -> bool:
+    return platform in MESSAGING_PLATFORMS
+
+
+def cap_counts(store, session_key, exclude_id=None) -> tuple[int, int]:
+    """Settings-owned built-ins never consume user wake slots."""
+    wakes = [w for w in store.list_wakes() if w.id != exclude_id
+             and w.status in {'active', 'proposed'} and not w.trigger_json.get('builtin')]
+    return sum(w.session_key == session_key for w in wakes), len(wakes)
+
+
 def unknown_kind(kind):
     return Gate(False, "unknown_kind", f"unknown trigger kind '{kind}'; valid kinds: {', '.join(sorted(KINDS))}. "
                 'A one-time reminder is {"kind": "at", "at": "in 10m"}.')
@@ -245,10 +256,9 @@ class Policy:
                   else kind if kind in PROBE_KINDS else None)
         if family and not getattr(self, f"source_{family}"):
             return Gate(False, "source_disabled")
-        if active_count >= self.max_active:
-            return Gate(False, "max_active")
-        if global_active_count >= 50:
-            return Gate(False, "global_max_active")
+        cap = self.cap_gate(active_count, global_active_count)
+        if not cap.allowed:
+            return cap
         if created_in == "wake_turn":
             if not parent_role and depth > self.max_rearm_chain:
                 return Gate(False, "rearm_depth")
@@ -257,6 +267,15 @@ class Policy:
             if untrusted_payload and kind != "at":
                 return Gate(False, "untrusted_rearm")
         return Gate(True, status="proposed" if creator == "agent" and self.agent_can_create == "ask_first" else "active")
+
+    def cap_gate(self, active_count, global_active_count) -> Gate:
+        if active_count >= self.max_active:
+            return Gate(False, "max_active", f"This chat has reached its limit of {self.max_active} active or proposed wakes "
+                        "(the check-in and own time don't count). Cancel one with /pulse cancel <id> or pulse cancel.")
+        if global_active_count >= 50:
+            return Gate(False, "global_max_active", "This profile has reached its limit of 50 active or proposed wakes across its chats "
+                        "(check-ins and own time don't count). Cancel some with /pulse cancel <id> in their chats.")
+        return Gate(True)
 
     def mutation_gate(self, wake: Wake, *, action: str, session_key: str,
                       created_in: str, new_kind: str | None = None,

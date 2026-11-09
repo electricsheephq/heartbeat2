@@ -7,7 +7,7 @@ import re
 from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES
 from . import governor
 from . import cache
-from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested
+from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested, cap_counts
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible, filter_text
 
@@ -42,11 +42,11 @@ def quiet_until(engine, session_key, *, urgent=False, now=None):
 
 def _activation(engine, session, wake):
     if not session.enabled: raise ValueError('this chat is off; use /pulse on')
+    active_count, global_active_count = cap_counts(engine.store, session.session_key, exclude_id=wake.id)
     gate = engine.policy.creation_gate(session_key=session.session_key, platform=session.platform,
         chat_type=session.chat_type, allow_gateway_injection=engine.injection_allowed(),
         creator='user', kind=wake.kind,
-        active_count=sum(w.status in {'active','proposed'} and w.id != wake.id for w in engine.store.list_wakes(session.session_key)),
-        global_active_count=sum(w.status in {'active','proposed'} and w.id != wake.id for w in engine.store.list_wakes()))
+        active_count=active_count, global_active_count=global_active_count)
     if not gate.allowed: raise ValueError(gate.reason + ('\n'+gate.detail if gate.detail else ''))
 
 
