@@ -419,3 +419,20 @@ def test_proposed_watcher_receipt_keeps_its_filters(engine, task, board, whole):
     assert len(text) <= 240 and text.startswith(f'Not set yet: it is armed only after the owner sends /pulse ok {w.id}.')
     assert 'It would wait for kanban_completed events for task '+(task+' on board '+board if whole else task[:60]) in text
     assert text.endswith('.' if whole else '…')
+
+
+def test_preview_follows_dispatch_past_a_backed_off_occurrence(engine, command):
+    # The first waiting batch is in retry backoff; dispatch sends the second in the same tick, so the preview shows that one.
+    e = engine
+    w = arm(e, 'reaction', trigger_json={'kind': 'reaction'})
+    e.store.add_occurrence(w.id, 'e:first', payload=[{'message': 'first batch'}])
+    e.store.add_occurrence(w.id, 'e:second', payload=[{'message': 'second batch'}])
+    first = e.store.get_occurrence(w.id, 'e:first')
+    e.store.set_meta('not_before:'+first.id, str(e.clock.now()+600))
+    before = snapshot(e)
+    out = command('test '+w.id)
+    assert 'Would run now: yes' in out and 'second batch' in out and 'first batch' not in out
+    assert snapshot(e) == before
+    e.tick()
+    text, _ = e.ctx.calls[0]
+    assert 'second batch' in text and 'first batch' not in text

@@ -214,16 +214,17 @@ def _test(engine,w,session,cache_line,wake_cache=''):
     # Preview what dispatch would send next: a waiting occurrence (its payload and any retry backoff), else a plain
     # scheduled fire. Dispatch claims first, so the turn carries the next attempt and the dispatch cache line.
     waiting=[x for x in engine.store.list_occurrences(w.id) if x.state=='pending']
-    if waiting: o=replace(waiting[0],attempt=(waiting[0].attempt or 0)+1)
-    else:
-        key=('s:'+session.episode_id if w.kind=='owner_silent' and session is not None and session.episode_id else
-             f't:{engine.clock.now():.17g}')
-        o=Occurrence(w.id,key,attempt=1)
+    key=('s:'+session.episode_id if w.kind=='owner_silent' and session is not None and session.episode_id else
+         f't:{engine.clock.now():.17g}')
+    candidates=[replace(x,attempt=(x.attempt or 0)+1) for x in waiting] or [Occurrence(w.id,key,attempt=1)]
     try:
         with engine.store.atomic():
             # When HeartBeat is off or paused for the whole profile, tick() refuses before gate() and the claim barrier after it: nothing is sent.
-            reason,defer,until=(('plugin_off',True,None) if not engine.policy.enabled else
-                                ('paused_all',True,None) if engine.paused() else engine.gate(w,o,session))
+            off=(('plugin_off',True,None) if not engine.policy.enabled else ('paused_all',True,None) if engine.paused() else None)
+            # Dispatch walks waiting occurrences in order and sends the first that passes; if none passes, the first one's reason applies.
+            verdicts=[off or engine.gate(w,c,session) for c in candidates]
+            pick=next((n for n,v in enumerate(verdicts) if not v[0]),0)
+            o,(reason,defer,until)=candidates[pick],verdicts[pick]
             message_held=engine.message_hold_reason(w,session)
             text=engine.render_occurrence(w,replace(o,force_silent=bool(message_held)),session,
                                          message_held=message_held,cache_line=wake_cache,held_reports='')
