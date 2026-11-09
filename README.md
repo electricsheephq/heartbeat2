@@ -157,7 +157,7 @@ Install with the command at the top, add the `allow_gateway_injection` key shown
 A role shows its first results over a few hours, because it spreads its turns across the day. Start one once [Try it](#try-it) works:
 
 1. **Hand it a role.** In your DM, for example: "You're in charge of my reading list. Summarise anything new between my messages, a few turns a day." The agent sets up the role and sends a receipt with its rhythm, what it will and won't do, and its daily budget. You can also set one up yourself with `/pulse role self <charter>` or `/pulse role every 1d at 09:00 <charter>`.
-2. **Let it work.** A role without a fixed time spreads its turns across the day by its budget: at the default 6 turns, about one every four hours. Quiet hours and the message limits hold its messages, not its work.
+2. **Let it work.** A role without a fixed time starts with its turns spread across the day by its budget: at the default 6 turns, about one every four hours. Quiet hours and the message limits hold its messages, not its work.
 3. **Look at its desk.** `/pulse desk` shows each role's last result and next turn, and today's messages, turns and cost against your limits. The agent sees the same desk.
 4. **Adjust or stop it.** `/pulse budget <id> 2/day` sets a role's daily turns; the agent can go under your number but never over it, and only this command raises it. A new budget changes how many turns the role takes a day, not how often they come: to spread them out, ask the agent to change its rhythm. `/pulse pause <id>` or `/pulse cancel <id>` stops one role, and `/pulse off` stops everything in the chat.
 
@@ -332,7 +332,7 @@ The [roadmap tracker](https://github.com/electricsheephq/heartbeat2/issues/139) 
 - **A wake didn't fire.** `/pulse why <id>` lists its recent triggers, states and reasons, such as quiet hours, the unanswered mute, a daily cap or a busy chat. `/pulse test <id>` previews the checks without sending anything or calling a model.
 - **Arming is refused in the CLI, TUI or Desktop.** Wakes run in messaging-gateway chats only for now (see [known issues](#compatibility-and-known-issues)).
 - **A group chat is refused.** `dm_only` is on by default; turn it off in **Settings ▸ Plugins** to allow group and topic chats.
-- **The agent's messages stopped.** `/pulse desk` says why messages are held: quiet hours, the unanswered mute (after 2 unanswered messages by default) or the daily message cap. They come through when quiet hours end, when you write, or the next day.
+- **The agent's messages stopped.** `/pulse desk` says why messages are held: quiet hours, the unanswered mute (after 2 unanswered messages by default) or the daily message cap. Those messages aren't sent later on their own: on your next message, or on the agent's next turn that can send, it gets a short list of the held results and tells you what still matters.
 
 ### Reporting a bug
 
