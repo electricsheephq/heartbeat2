@@ -304,3 +304,20 @@ def test_recovery_turn_never_acknowledges_a_list_it_did_not_see(engine, restart)
     assert SUMMARY in again['context']
     e.intake.on_session_end(session_id='sid', turn_id='again', completed=True)
     assert not e.store.held_reports(KEY)
+
+
+def test_upgrade_does_not_bring_back_results_held_before_037(engine):
+    from heartbeat2.store import Store
+    e = engine
+    _, o = held_turn(e)
+    assert e.store.held_reports(KEY) == [o]
+    # Reopening a 0.3.7 database keeps what it holds.
+    Store(e.store.path, e.clock).close()
+    assert e.store.held_reports(KEY) == [o]
+    # A database from before 0.3.7 has no marker: its old held rows count as reported on upgrade.
+    with e.store.atomic():
+        e.store.connection.execute("DELETE FROM meta WHERE key='held_reports_from'")
+    Store(e.store.path, e.clock).close()
+    assert e.store.held_reports(KEY) == []
+    assert e.store.get_occurrence(o.wake_id, o.dedupe_key).held_reason == 'reported:quiet_hours'
+    assert e.store.get_meta('held_reports_from') == '0.3.7'

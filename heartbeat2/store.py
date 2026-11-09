@@ -192,6 +192,12 @@ class Store:
                             self.connection.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
                             if table=='occurrences' and name=='api_calls':
                                 self.connection.execute('UPDATE occurrences SET api_calls=1 WHERE tokens_in>0 OR tokens_out>0')
+                if self.get_meta('held_reports_from') is None:
+                    # Results held before 0.3.7 were never promised back: the report-back starts at the upgrade,
+                    # so an old backlog can't flood the owner's next replies.
+                    self.connection.execute("UPDATE occurrences SET held_reason = 'reported:' || substr(held_reason, 14) "
+                                            "WHERE state='done' AND held_reason LIKE 'message_held:%'")
+                    self.set_meta('held_reports_from', '0.3.7')
                 self.set_meta("schema_version", str(SCHEMA_VERSION))
         except BaseException:
             self.connection.close()
