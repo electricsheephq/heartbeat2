@@ -270,11 +270,11 @@ class Policy:
 
     def cap_gate(self, active_count, global_active_count) -> Gate:
         if active_count >= self.max_active:
-            return Gate(False, "max_active", f"This chat has {active_count} active or proposed wakes; the most allowed is {self.max_active}. "
-                        "Cancel one with /pulse cancel <id> or pulse cancel.")
+            return Gate(False, "max_active", f"This chat has reached its limit of {self.max_active} active or proposed wakes "
+                        "(the check-in and own time don't count). Cancel one with /pulse cancel <id> or pulse cancel.")
         if global_active_count >= 50:
-            return Gate(False, "global_max_active", f"This profile has {global_active_count} active or proposed wakes across its chats; the most allowed is 50. "
-                        "Cancel some with /pulse cancel <id> in their chats.")
+            return Gate(False, "global_max_active", "This profile has reached its limit of 50 active or proposed wakes across its chats "
+                        "(check-ins and own time don't count). Cancel some with /pulse cancel <id> in their chats.")
         return Gate(True)
 
     def mutation_gate(self, wake: Wake, *, action: str, session_key: str,

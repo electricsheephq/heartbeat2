@@ -173,7 +173,7 @@ def test_user_wake_caps_explain_recovery_and_log_safely(engine, caplog, scope, s
     assert result['error'] == reason
     assert result['detail'] and '/pulse cancel' in result['detail']
     limit = e.policy.max_active if scope == 'chat' else 50
-    assert f'has {limit} active or proposed wakes' in result['detail'] and f'the most allowed is {limit}' in result['detail']
+    assert f'reached its limit of {limit} active or proposed wakes' in result['detail'] and "don't count" in result['detail']
     records = [r for r in caplog.records if r.name == 'heartbeat2' and r.levelno == logging.WARNING]
     assert len(records) == 1 and reason in records[0].getMessage()
     assert hashlib.sha256(KEY.encode()).hexdigest()[:16] in records[0].getMessage()
