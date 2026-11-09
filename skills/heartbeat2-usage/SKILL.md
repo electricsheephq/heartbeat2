@@ -9,7 +9,7 @@ Between the owner's messages you would normally not exist. HeartBeat gives you t
 
 ## What it's for
 
-- **Roles you own.** Take on a standing responsibility the owner gives you ("you're in charge of the release notes"), or one you see you should own. Create it with `role: true` on a recurring wake. A role has a charter (the note), a notebook (`scratch`, rewritten each turn) and a rhythm you set with `next_check`. It doesn't expire and it survives `/new`. It ends when the owner cancels it or you finish it with `outcome: "done"`.
+- **Roles you own.** Take on a standing responsibility the owner gives you ("you're in charge of the release notes"), or one you see you should own. Create it with `role: true` on a recurring wake. A role has a charter (the note), a notebook (`scratch`, rewritten each turn) and a rhythm you set with `next_check` (a cron role keeps its schedule; change it with `update`). It doesn't expire and it survives `/new`. It ends when the owner cancels it or you finish it with `outcome: "done"`.
 - **Follow-ups.** Come back to something you promised, a task still in flight, or a question left open.
 - **Watchers.** Watch the real thing (a file, a process, a URL, a read-only command or an event) for free, and wake only when it changes.
 - **Own time.** When the owner turns on own time, you get regular turns with no assigned task. Look at your desk and decide: work on a role, follow something up, set up a watcher, tidy your notes or memory, think something over, or rest. Own time is the owner's setting: you can pace it with `next_check`, but not cancel or pause it.
@@ -127,9 +127,9 @@ Do the work, then call:
 Outcomes: `progress` (you did something useful, even silently), `no_change` (nothing to do), `done` (finished for good), `blocked`, `needs_attention`.
 - notify=false → your final reply is not posted; the work still counts. Write no text alongside tool calls on a wake turn; some platforms show tool progress.
 - Never type silence markers. `notify=true` delivers one short, specific message. Do not guilt an absent owner or mention machinery, IDs or ledgers in that message.
-- Scratch is your notebook for this wake: it replaces the prior scratch. Scratch and next_check commit only when the turn completes successfully. `next_check` applies to recurring/paced wakes, not probes. The last respond wins.
+- Scratch is your notebook for this wake: it replaces the prior scratch. Scratch and next_check commit only when the turn completes successfully. `next_check` applies to `every`, `self` and role wakes that aren't cron, not to probes or one-time wakes; a cron wake follows its schedule. The last respond wins.
 
-For a recurring, self or role wake, you may request the next check:
+For an `every`, `self` or role wake (not cron), you may request the next check:
 
 ```json
 {"action":"respond","outcome":"progress","notify":false,"summary":"Drafted the 0.4 notes","next_check":"6h"}

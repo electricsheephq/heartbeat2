@@ -141,7 +141,7 @@ Restart the messaging gateway and send `/pulse` in your DM. It shows:
 2. **Hand it a role.** In your DM, for example: "You're in charge of my reading list. Summarise anything new between my messages, a few turns a day." The agent sets up the role and sends a receipt with its rhythm, what it will and won't do, and its daily budget. You can also set one up yourself with `/pulse role self <charter>` or `/pulse role every 1d at 09:00 <charter>`.
 3. **Let it work.** A role without a fixed time spreads its turns across the day by its budget: at the default 6 turns, about one every four hours. Quiet hours and the message limits hold its messages, not its work.
 4. **Look at its desk.** `/pulse desk` shows each role's last result and next turn, and today's messages, turns and cost against your limits. The agent sees the same desk.
-5. **Adjust or stop it.** `/pulse budget <id> 2/day` sets a role's daily turns; the agent can go under your number but not over it unless you ask. `/pulse pause <id>` or `/pulse cancel <id>` stops one role, and `/pulse off` stops everything in the chat.
+5. **Adjust or stop it.** `/pulse budget <id> 2/day` sets a role's daily turns; the agent can go under your number but not over it unless you ask. A new budget changes how many turns the role takes a day, not how often they come: to spread them out, ask the agent to change its rhythm. `/pulse pause <id>` or `/pulse cancel <id>` stops one role, and `/pulse off` stops everything in the chat.
 
 Optional: set **Own time** (`own_time_hours`, for example 6) to give the agent regular turns with no assigned task. On Discord, WhatsApp or Matrix, set `display.platforms.<platform>.tool_progress: off` so silent turns don't post progress bubbles.
 

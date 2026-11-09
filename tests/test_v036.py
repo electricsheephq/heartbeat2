@@ -40,13 +40,15 @@ def test_desk_action_reads_the_desk_without_changing_anything(engine):
 
 
 def test_desk_action_inside_a_wake_turn_counts_its_own_slot(engine):
+    from dataclasses import replace
     e = engine
+    e.policy = replace(e.policy, max_messages_per_day=1)  # The turn holds the day's only slot: it must not read as held.
     role = _role(e)
     e.dispatch(pending(e, role))
     start(e)
     desk = e.tool.handle({'action': 'desk'}, session_id='sid')['desk']
     # The turn's own message slot is shown as in progress, and it is not told messages are held.
-    assert 'messages today 0/6 (+1 in progress)' in desk and 'Messages held now' not in desk
+    assert 'messages today 0/1 (+1 in progress)' in desk and 'Messages held now' not in desk
 
 
 def test_owner_set_budget_is_a_ceiling_the_agent_cannot_raise_unasked(engine, command):
@@ -124,6 +126,10 @@ def test_idle_hint_offers_only_what_works(engine):
     plain = replace(arm(e, 'every', trigger_json={'kind': 'every', 'every': '2h'}), noop_streak=n)
     assert governor.hint(e, plain) == 'Consider a file|process|url|command watcher via pulse update, push next_check out, or cancel.'
     assert governor.hint(e, replace(plain, noop_streak=n - 1)) == ''
+    probe = replace(plain, kind='file', trigger_json={'kind': 'file', 'path': '/x'})
+    assert governor.hint(e, probe) == 'Consider a file|process|url|command watcher via pulse update, or cancel.'
+    checkin = replace(plain, kind='owner_silent', trigger_json={'kind': 'owner_silent', 'builtin': True})
+    assert governor.hint(e, checkin) == ''
     own = replace(plain, kind='self', trigger_json={'kind': 'self', 'own_time': True, 'builtin': True})
     assert 'outcome=done' not in governor.hint(e, own) and 'owner sets how often' in governor.hint(e, own)
 
