@@ -4,7 +4,7 @@
 
 **Give your Hermes agent a working life between messages: wakes, watchers and roles, within daily turn and message caps.**
 
-▶ **[Watch the 90-second demo](https://x.com/ElectricSheepIO/status/2119811070089138455)**
+▶ **[Watch the demo](https://x.com/ElectricSheepIO/status/2119811070089138455)**
 
 [![Latest release](https://img.shields.io/github/v/release/electricsheephq/heartbeat2)](https://github.com/electricsheephq/heartbeat2/releases/latest) [![License: Apache-2.0](https://img.shields.io/github/license/electricsheephq/heartbeat2)](https://github.com/electricsheephq/heartbeat2/blob/main/LICENSE) [![Hermes ≥ 0.21.6](https://img.shields.io/badge/Hermes-%E2%89%A5%200.21.6-blue)](https://github.com/NousResearch/hermes-agent) [![CI](https://github.com/electricsheephq/heartbeat2/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/electricsheephq/heartbeat2/actions/workflows/ci.yml)
 
