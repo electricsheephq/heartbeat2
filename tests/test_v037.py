@@ -321,3 +321,36 @@ def test_upgrade_does_not_bring_back_results_held_before_037(engine):
     assert e.store.held_reports(KEY) == []
     assert e.store.get_occurrence(o.wake_id, o.dedupe_key).held_reason == 'reported:quiet_hours'
     assert e.store.get_meta('held_reports_from') == '0.3.7'
+
+
+def test_reports_wait_while_heartbeat_is_off_for_the_chat(engine):
+    e = engine
+    _, o = held_turn(e)
+    session(e, enabled=False)
+    e.clock.advance(1)
+    admit(e, mid='off', text='Hi.')
+    result = e.intake.pre_llm_call(session_id='sid', turn_id='off', user_message='Hi.', platform='telegram')
+    assert SUMMARY not in (result or {}).get('context', '')
+    assert not e.store.get_meta('owner_report:sid')
+    e.intake.on_session_end(session_id='sid', turn_id='off', completed=True)
+    assert e.store.held_reports(KEY) == [o]
+    session(e, enabled=True)
+    e.clock.advance(1)
+    admit(e, mid='on', text='Back on.')
+    result = e.intake.pre_llm_call(session_id='sid', turn_id='on', user_message='Back on.', platform='telegram')
+    assert SUMMARY in result['context']
+
+
+def test_history_pruning_keeps_results_still_held_for_the_owner(engine):
+    e = engine
+    w = arm(e, 'self', role=True)
+    held = recorded(e, w, 'held')
+    old = [recorded(e, w, f'old{n}', held_reason='', notify=False) for n in range(4)]
+    for n in range(4):
+        e.clock.advance(1)
+        recorded(e, w, f'new{n}', held_reason='', notify=False)
+    with e.store.atomic():
+        e.store.connection.execute('UPDATE occurrences SET claimed_at=?', (e.clock.now() - 3 * 86400,))
+    e.store.gc(ledger_days=30, keep_occurrences=4)
+    assert e.store.held_reports(KEY) == [e.store.get_occurrence(w.id, 'held')]
+    assert all(e.store.get_occurrence(w.id, o.dedupe_key) is None for o in old)

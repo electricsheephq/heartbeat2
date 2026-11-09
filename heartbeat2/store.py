@@ -583,7 +583,9 @@ class Store:
                     OVER (PARTITION BY wake_id) AS live FROM occurrences)
                 DELETE FROM occurrences WHERE rowid IN (SELECT rid FROM ranked
                     WHERE state IN ({placeholders}) AND rank>MAX(0,?-live)
-                      AND (claimed_at IS NULL OR claimed_at<?))""",
+                      AND (claimed_at IS NULL OR claimed_at<?)
+                      AND rid NOT IN (SELECT rowid FROM occurrences WHERE state='done'
+                          AND held_reason LIKE 'message_held:%' AND notify=1 AND delivered=0))""",
                 terminal * 3 + [keep_occurrences, now - 2 * 86400])
             self.connection.execute("DELETE FROM events WHERE consumed_at IS NOT NULL AND consumed_at<?", (now - 7 * 86400,))
             self.connection.execute("DELETE FROM ledger WHERE day<?", (ledger_cutoff,))

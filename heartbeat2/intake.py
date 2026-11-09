@@ -582,7 +582,10 @@ class Intake:
             s.set_meta('human_context:'+key,'')
             lines=[]
             from .desk import held_report_lines
-            reports,shown=held_report_lines(s,key)
+            owner_session=s.get_session(key)
+            # While HeartBeat is off or paused for this chat, held results stay pending: the owner's stop covers them too.
+            reports,shown=(held_report_lines(s,key) if e.policy.enabled and owner_session is not None
+                           and owner_session.enabled and not e.paused() else ([],[]))
             if reports:
                 lines.append("HeartBeat 2.0: while the owner's limits held your messages, your wake turns finished these and wanted to tell the owner. In this reply, tell them what still matters, briefly:")
                 lines+=reports
