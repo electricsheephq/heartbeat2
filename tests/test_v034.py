@@ -69,7 +69,7 @@ def test_a_turn_whose_messages_are_held_holds_no_message_slot(engine):
 def test_the_contract_asks_for_a_plain_sentence_summary(engine):
     e = engine
     e.dispatch(pending(e, _role(e)))
-    assert 'summary of what you did, written as a plain sentence because the owner reads it on their desk' in e.ctx.calls[-1][0]
+    assert 'summary of what you did, written as a plain sentence, since the owner sees role summaries on the desk' in e.ctx.calls[-1][0]
 
 
 def test_a_turn_held_by_the_message_limit_still_sees_the_limit_on_its_desk(engine):
