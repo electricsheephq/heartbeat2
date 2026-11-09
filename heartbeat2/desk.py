@@ -23,17 +23,18 @@ def _plain(text: str) -> str:
     return text.replace('`', "'")
 
 
-def held_report_lines(store, session_key, *, limit=5) -> tuple[list[str], float]:
+def held_report_lines(store, session_key, *, limit=5) -> tuple[list[str], list[tuple[str, str]]]:
     pending = store.held_reports(session_key)
+    shown = pending[:limit]
     lines = []
-    for o in pending[-limit:]:
+    for o in shown:
         w = store.get_wake(o.wake_id)
         title = _plain(_clip(_oneline(w.title or w.note), 60))
         summary = _plain(_clip(_oneline(o.summary), 160))
         lines.append(f'- {title} ({o.wake_id}): {summary}')
     if len(pending) > limit:
-        lines.append(f'- … {len(pending) - limit} more earlier')
-    return lines, max((o.ended_at for o in pending), default=0.0)
+        lines.append(f'- … {len(pending) - limit} more after these (they come back next time)')
+    return lines, [(o.wake_id, o.dedupe_key) for o in shown]
 
 
 def _rhythm(wake) -> str:

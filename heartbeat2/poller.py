@@ -653,10 +653,10 @@ class Poller:
             except ValueError: pass
         reports=''
         if (w.role or w.trigger_json.get('own_time')) and not message_held and not o.force_silent:
-            report_lines,through=held_report_lines(s,w.session_key)
+            report_lines,shown=held_report_lines(s,w.session_key)
             if report_lines:
                 reports='\n'.join(['Held for the owner (their limits held these earlier). If you message them this turn, include what still matters:', *report_lines])
-                s.set_meta('report_shown:'+o.id,str(through))
+                s.set_meta('report_shown:'+o.id,json.dumps(shown))
         text=render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-(0 if o.force_silent else 1),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,

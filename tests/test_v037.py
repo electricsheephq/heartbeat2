@@ -1,5 +1,6 @@
 """Held results return on existing turns; recently finished roles stay visible."""
 from dataclasses import replace
+import json
 
 import pytest
 
@@ -57,14 +58,34 @@ def test_owner_reply_receives_report_once(engine):
     result = e.intake.pre_llm_call(session_id='sid', turn_id='back',
                                   user_message="I'm back.", platform='telegram')
     assert OWNER_HEADER in result['context'] and SUMMARY in result['context']
+    assert e.store.held_reports(KEY) == [o]
+    assert json.loads(e.store.get_meta('owner_report:sid')) == [[o.wake_id, o.dedupe_key]]
+    e.intake.on_session_end(session_id='sid', turn_id='back', completed=True)
     assert not e.store.held_reports(KEY)
-    assert e.store.reported_through(KEY) == o.ended_at
+    assert e.store.get_occurrence(o.wake_id, o.dedupe_key).held_reason == 'reported:quiet_hours'
+    assert not e.store.get_meta('owner_report:sid')
     admit(e, mid='again', text='Anything else?')
     again = e.intake.pre_llm_call(session_id='sid', turn_id='again',
                                  user_message='Anything else?', platform='telegram')
     assert SUMMARY not in (again or {}).get('context', '')
     assert OWNER_HEADER not in (again or {}).get('context', '')
     assert not e.store.held_reports(KEY)
+
+
+@pytest.mark.parametrize('failure', [{'failed': True}, {'interrupted': True}, {'completed': False}])
+def test_failed_owner_reply_keeps_report_for_next_turn(engine, failure):
+    e = engine
+    _, o = held_turn(e)
+    for mid, ending in [('failed', failure), ('retry', {'completed': True})]:
+        e.clock.advance(1)
+        admit(e, mid=mid, text="I'm back.")
+        result = e.intake.pre_llm_call(session_id='sid', turn_id=mid,
+                                      user_message="I'm back.", platform='telegram')
+        assert OWNER_HEADER in result['context'] and SUMMARY in result['context']
+        assert e.store.held_reports(KEY) == [o]
+        e.intake.on_session_end(session_id='sid', turn_id=mid, **ending)
+        assert not e.store.get_meta('owner_report:sid')
+        assert bool(e.store.held_reports(KEY)) is (mid == 'failed')
 
 
 @pytest.mark.parametrize('kind', ['role', 'own_time'])
@@ -83,7 +104,7 @@ def test_sending_turn_reports_only_after_delivery(engine, kind):
         text = e.ctx.calls[-1][0]
         assert WAKE_HEADER in text and SUMMARY in text
         assert text.index('Your desk:') < text.index(WAKE_HEADER) < text.index('Recent outcomes:')
-        assert e.store.get_meta('report_shown:' + o.id) == str(held.ended_at)
+        assert json.loads(e.store.get_meta('report_shown:' + o.id)) == [[held.wake_id, held.dedupe_key]]
         start(e)
         assert end(e, 'progress', notify, summary=f'Follow-up {n}.') == (None if notify else '[SILENT]')
         assert not e.store.get_meta('report_shown:' + o.id)
@@ -127,7 +148,7 @@ def test_report_outcomes(engine, outcome):
     assert engine.store.held_reports(KEY) == [o]
 
 
-def test_reports_bounded_sorted_and_watermark_monotonic(engine):
+def test_reports_bounded_oldest_first_and_only_shown_acknowledged(engine):
     from heartbeat2.desk import held_report_lines
     e = engine
     w = arm(e, 'self', role=True, title='Release `notes`\nready')
@@ -136,14 +157,26 @@ def test_reports_bounded_sorted_and_watermark_monotonic(engine):
         e.clock.advance(1)
         items.append(recorded(e, w, str(n), summary=f'Result `{n}`\nready.'))
     assert e.store.held_reports(KEY) == items
-    lines, through = held_report_lines(e.store, KEY)
-    assert lines == [f"- Release 'notes' ready ({w.id}): Result '{n}' ready." for n in range(2, 7)] + ['- … 2 more earlier']
-    assert through == items[-1].ended_at
+    lines, shown = held_report_lines(e.store, KEY)
+    assert lines == [f"- Release 'notes' ready ({w.id}): Result '{n}' ready." for n in range(5)] + ['- … 2 more after these (they come back next time)']
+    assert shown == [(o.wake_id, o.dedupe_key) for o in items[:5]]
     assert 'Held for you: 7 results' in desk(e)
-    e.store.mark_reported(KEY, through)
-    e.store.mark_reported(KEY, through - 1)
-    assert e.store.reported_through(KEY) == through and not e.store.held_reports(KEY)
-    assert held_report_lines(e.store, KEY) == ([], 0.0)
+    for mid, expected in [('first', items[:5]), ('second', items[5:])]:
+        admit(e, mid=mid)
+        result = e.intake.pre_llm_call(session_id='sid', turn_id=mid,
+                                      user_message='hello', platform='telegram')
+        assert json.loads(e.store.get_meta('owner_report:sid')) == [[o.wake_id, o.dedupe_key] for o in expected]
+        for o in expected:
+            assert o.summary.replace('`', "'").replace('\n', ' ') in result['context']
+        e.intake.on_session_end(session_id='sid', turn_id=mid, completed=True)
+        if mid == 'first':
+            assert e.store.held_reports(KEY) == items[5:]
+            assert 'Held for you: 2 results' in desk(e)
+            lines, shown = held_report_lines(e.store, KEY)
+            assert lines == [f"- Release 'notes' ready ({w.id}): Result '{n}' ready." for n in range(5, 7)]
+            assert shown == [(o.wake_id, o.dedupe_key) for o in items[5:]]
+    assert not e.store.held_reports(KEY)
+    assert held_report_lines(e.store, KEY) == ([], [])
 
 
 @pytest.mark.parametrize('last_human', ['earlier', 'never'])
@@ -177,10 +210,49 @@ def test_finished_role_expires_after_24_hours(engine):
     assert f'done role {w.id}' not in desk(e)
 
 
-@pytest.mark.parametrize('value', [None, 'not a number'])
-def test_bad_reported_through(engine, value):
-    if value is not None: engine.store.set_meta('reported_through:' + KEY, value)
-    assert engine.store.reported_through(KEY) == 0.0
+@pytest.mark.parametrize('step_back', [0, -10])
+def test_reports_survive_equal_and_backward_finish_times(engine, step_back):
+    from heartbeat2.desk import held_report_lines
+    e = engine
+    w = arm(e, 'self', role=True)
+    first = recorded(e, w, 'first')
+    _, shown = held_report_lines(e.store, KEY)
+    e.store.mark_reported(shown)
+    e.clock.advance(step_back)
+    second = recorded(e, w, 'second')
+    assert second.ended_at <= first.ended_at
+    assert e.store.held_reports(KEY) == [second]
+    _, shown = held_report_lines(e.store, KEY)
+    assert shown == [(second.wake_id, second.dedupe_key)]
+    e.store.mark_reported(shown)
+    assert not e.store.held_reports(KEY)
+
+
+def test_mark_reported_touches_only_finished_still_held_reasons(engine):
+    e = engine
+    w = arm(e, 'self', role=True)
+    held = recorded(e, w, 'held')
+    reported = recorded(e, w, 'reported', held_reason='reported:quiet_hours')
+    other = recorded(e, w, 'other', held_reason='restart')
+    live = pending(e, w, 'live')
+    e.store.update_occurrence(w.id, live.dedupe_key, 'pending', held_reason='message_held:quiet_hours')
+    live = e.store.get_occurrence(w.id, live.dedupe_key)
+    pairs = [(o.wake_id, o.dedupe_key) for o in (held, reported, other, live)]
+    e.store.mark_reported(pairs)
+    assert e.store.get_occurrence(w.id, held.dedupe_key) == replace(held, held_reason='reported:quiet_hours')
+    for o in (reported, other, live):
+        assert e.store.get_occurrence(w.id, o.dedupe_key) == o
+    e.store.mark_reported(pairs)
+    assert e.store.get_occurrence(w.id, held.dedupe_key) == replace(held, held_reason='reported:quiet_hours')
+
+
+def test_mark_reported_is_atomic(engine):
+    e = engine
+    w = arm(e, 'self', role=True)
+    held = recorded(e, w, 'held')
+    with pytest.raises(ValueError):
+        e.store.mark_reported([(held.wake_id, held.dedupe_key), ('invalid',)])
+    assert e.store.get_occurrence(w.id, held.dedupe_key) == held
 
 
 def test_ceiling_above_a_lowered_profile_maximum(engine, monkeypatch):

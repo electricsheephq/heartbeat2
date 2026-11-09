@@ -247,22 +247,19 @@ class Store:
             self.connection.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                     (key, str(value)))
 
-    def reported_through(self, session_key: str) -> float:
-        try:
-            return float(self.get_meta('reported_through:' + session_key) or 0)
-        except ValueError:
-            return 0.0
-
-    def mark_reported(self, session_key: str, through: float):
+    def mark_reported(self, items: list[tuple[str, str]]):
         with self.atomic():
-            self.set_meta('reported_through:' + session_key, str(max(self.reported_through(session_key), through)))
+            for wake_id, dedupe_key in items:
+                self.connection.execute(
+                    "UPDATE occurrences SET held_reason = 'reported:' || substr(held_reason, 14) "
+                    "WHERE wake_id=? AND dedupe_key=? AND state='done' AND held_reason LIKE 'message_held:%'",
+                    (wake_id, dedupe_key))
 
     def held_reports(self, session_key: str) -> list[Occurrence]:
-        through = self.reported_through(session_key)
         return sorted((o for o in self.list_occurrences(session_key=session_key, state='done')
                        if o.held_reason.startswith('message_held:') and o.notify and not o.delivered
                        and o.summary.strip() and o.outcome in HELD_REPORT_OUTCOMES
-                       and o.ended_at is not None and o.ended_at > through), key=lambda o: o.ended_at)
+                       and o.ended_at is not None), key=lambda o: o.ended_at)
 
     def owner_budget(self, wake_id: str) -> int | None:
         """The role budget the owner set with /pulse budget: the agent may go under it, never over it unasked."""

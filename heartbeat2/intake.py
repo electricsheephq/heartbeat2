@@ -582,11 +582,11 @@ class Intake:
             s.set_meta('human_context:'+key,'')
             lines=[]
             from .desk import held_report_lines
-            reports,through=held_report_lines(s,key)
+            reports,shown=held_report_lines(s,key)
             if reports:
                 lines.append("HeartBeat 2.0: while the owner's limits held your messages, your wake turns finished these and wanted to tell the owner. In this reply, tell them what still matters, briefly:")
                 lines+=reports
-                s.mark_reported(key,through)
+                s.set_meta('owner_report:'+session_id,json.dumps(shown))
             count=int(s.get_meta('switched_notice:'+key) or 0)
             if count:
                 lines.append(f'{count} wakes armed in your previous conversation were stopped; /pulse list')
@@ -887,6 +887,14 @@ class Intake:
             if session and session.busy_epoch in (None,'',e.epoch):
                 s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             self.flights.pop(session_id,None)
+            shown=s.get_meta('owner_report:'+session_id)
+            if shown:
+                if f is None and not (failed or interrupted or completed is False):
+                    try:
+                        s.mark_reported(json.loads(shown))
+                    except (ValueError,TypeError):
+                        pass
+                s.set_meta('owner_report:'+session_id,'')
             if f is None or f.invalid: return None
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
             if o is None or o.state!='started' or o.attempt!=f.attempt: return None
@@ -905,11 +913,10 @@ class Intake:
             shown=s.get_meta('report_shown:'+o.id)
             if shown:
                 try:
-                    through=float(shown)
-                except ValueError:
+                    items=json.loads(shown)
+                    if delivered: s.mark_reported(items)
+                except (ValueError,TypeError):
                     pass
-                else:
-                    if delivered: s.mark_reported(key,through)
                 s.set_meta('report_shown:'+o.id,'')
             if f.scratch is not None:
                 s.cas_wake(w.id,w.status,expected_version=w.version,scratch=f.scratch)
