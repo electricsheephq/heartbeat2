@@ -206,7 +206,7 @@ class Tool:
                         results.append({'id':w.id,'error':gate.reason, **({'detail':gate.detail} if gate.detail else {})})
                         continue
                     clamps = {}
-                    owner_raise = False
+                    owner_lowered = False
                     if action in {'resume','update'}:
                         if not s.enabled:
                             return {'error':'session_off'}
@@ -241,13 +241,13 @@ class Tool:
                                     request = {**args, 'budget':{'turns_per_day':limit}}
                                     budget_clamps['budget.turns_per_day'] = f'{budget} → {limit} (wake_turn cannot raise budget)'
                             elif ceiling is not None and budget > ceiling:
-                                # A budget the owner set with /pulse budget is their limit: only their ask in this turn raises it.
-                                if args.get('owner_asked') is True and evidence:
-                                    owner_raise = True
-                                else:
-                                    request = {**args, 'budget':{'turns_per_day':ceiling}}
-                                    budget_clamps['budget.turns_per_day'] = (f'{budget} → {ceiling} (the owner set this budget; '
-                                                                            'raise it only when they ask, with owner_asked=true)')
+                                # A budget the owner set is their limit: only their own /pulse budget command raises it.
+                                request = {**args, 'budget':{'turns_per_day':ceiling}}
+                                budget_clamps['budget.turns_per_day'] = (f'{budget} → {ceiling} (the owner set this budget; to raise it, '
+                                                                        f'they send /pulse budget {w.id} {budget}/day)')
+                            elif args.get('owner_asked') is True and evidence and budget < (ceiling or self.engine.policy.role_budget(w)):
+                                # A lowering the owner asked for becomes their ceiling; it can only narrow, never widen.
+                                owner_lowered = True
                         result = self.reschedule(w) if action=='resume' else self.prepare(base,request,reschedule=fresh,reparse_deadline=fresh)
                         result.clamped.update(budget_clamps)
                         candidate, clamps = result.wake, result.clamped
@@ -301,7 +301,7 @@ class Tool:
                         e.cancel_occurrences(w.id,'paused' if action=='pause' else 'cancelled',preserve_started=True)
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
                     w=e.store.get_wake(w.id)
-                    if action == 'update' and owner_raise: e.store.set_owner_budget(w.id,w.budget_turns_per_day)
+                    if action == 'update' and owner_lowered: e.store.set_owner_budget(w.id,w.budget_turns_per_day)  # owner-asked lowering
                     item={'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':clamps,'cache':self.cache_result(w)}
                     if action in {'update','resume'}: item['receipt']=self.receipt(w,s)
                     results.append(item)

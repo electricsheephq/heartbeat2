@@ -290,7 +290,8 @@ def handle(raw_args, runtime):
                 with engine.store.atomic():
                     if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,budget_turns_per_day=budget):
                         raise ValueError('concurrent item change')
-                    engine.store.set_owner_budget(wake.id,budget)
+                    # Record the owner's own number: a temporarily lower profile maximum must not shrink their ceiling.
+                    engine.store.set_owner_budget(wake.id,max(1,int(match[2])))
                 return _item(engine,engine.store.get_wake(wake.id))
             if action in {'off','on'} and not rest:
                 if not engine.store.cas_session(key, {'enabled':session.enabled}, enabled=action=='on'):

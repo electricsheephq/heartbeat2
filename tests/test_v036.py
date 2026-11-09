@@ -59,8 +59,10 @@ def test_owner_set_budget_is_a_ceiling_the_agent_cannot_raise_unasked(engine, co
     # Outside a wake turn and without the owner's ask, a raise stops at the owner's number.
     result = _budget(e, role.id, 9)
     assert result.get('ok') and result['wake']['budget_turns_per_day'] == 3, result
-    assert 'the owner set this budget' in result['clamped']['budget.turns_per_day']
-    # owner_asked without owner-turn proof is not the owner's ask.
+    assert f'they send /pulse budget {role.id} 9/day' in result['clamped']['budget.turns_per_day']
+    # Even in the owner's own turn, owner_asked does not raise it: only their /pulse budget command does.
+    owner_turn(e)
+    assert _budget(e, role.id, 9, owner_asked=True)['wake']['budget_turns_per_day'] == 3
     assert _budget(e, role.id, 9, sid='other', owner_asked=True)['wake']['budget_turns_per_day'] == 3
     # Going under the owner's number, and back up to it, is the agent's own call.
     assert _budget(e, role.id, 2)['wake']['budget_turns_per_day'] == 2
@@ -69,17 +71,32 @@ def test_owner_set_budget_is_a_ceiling_the_agent_cannot_raise_unasked(engine, co
     assert e.store.owner_budget(role.id) == 3
 
 
-def test_owner_ask_in_their_turn_raises_the_ceiling(engine, command):
+def test_only_the_owner_command_raises_the_ceiling(engine, command):
+    from dataclasses import replace
     e = engine
     role = _role(e)
     command(f'budget {role.id} 3/day')
-    owner_turn(e)
-    result = _budget(e, role.id, 9, owner_asked=True)
-    assert result.get('ok') and result['wake']['budget_turns_per_day'] == 9, result
-    assert e.store.owner_budget(role.id) == 9
-    # The new number is the owner's limit now; profile maximum still applies above it.
+    assert 'today 0/9' in command(f'budget {role.id} 9/day') and e.store.owner_budget(role.id) == 9
     assert _budget(e, role.id, 12, sid='other')['wake']['budget_turns_per_day'] == 9
+    # The owner's own number is kept even while the profile maximum is lower.
+    e.policy = replace(e.policy, role_turns_per_day_max=5)
+    command(f'budget {role.id} 8/day')
+    assert e.store.owner_budget(role.id) == 8 and e.store.get_wake(role.id).budget_turns_per_day == 5
     assert e.store.owner_budget('missing') is None
+
+
+def test_a_lowering_the_owner_asked_for_becomes_the_ceiling(engine):
+    e = engine
+    role = _role(e)
+    owner_turn(e)
+    assert _budget(e, role.id, 2, owner_asked=True)['wake']['budget_turns_per_day'] == 2
+    assert e.store.owner_budget(role.id) == 2
+    # Later, unasked, the agent cannot restore the old number.
+    assert _budget(e, role.id, 6, sid='other')['wake']['budget_turns_per_day'] == 2
+    # A lowering without owner-turn proof is the agent's own: no ceiling.
+    other = _role(e)
+    assert _budget(e, other.id, 2, sid='other', owner_asked=True)['wake']['budget_turns_per_day'] == 2
+    assert e.store.owner_budget(other.id) is None
 
 
 def test_a_role_without_an_owner_budget_keeps_todays_rules(engine):

@@ -93,7 +93,7 @@ config_schema:
     type: int
     default: 12
     label: "Most turns a role may take per day"
-    description: "Caps every role budget. A budget you set with /pulse budget is a ceiling the agent can go under but not raise unless you ask. The chat's wake-turn limit still applies."
+    description: "Caps every role budget. A budget you set with /pulse budget, or a lowering you ask the agent for, is a ceiling the agent can go under but never raise. The chat's wake-turn limit still applies."
   max_children_per_wake_turn:
     type: int
     default: 3
