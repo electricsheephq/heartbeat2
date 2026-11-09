@@ -14,7 +14,7 @@ import os
 import random
 import uuid
 
-from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES, agent_authored
+from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages
 from .schedule import time_due, local_day, parse_duration, next_every
 from . import governor
@@ -453,8 +453,9 @@ class Poller:
 
     def cancel_non_gateway_builtins(self, *, own_time=False):
         for w in self.store.list_wakes():
+            # Only live built-ins: a paused one doesn't fire and keeps the owner's or governor's pause.
             if (not w.trigger_json.get('builtin') or bool(w.trigger_json.get('own_time')) != own_time
-                    or w.status in FINISHED_WAKE_STATUSES): continue
+                    or w.status not in {'active','proposed'}): continue
             session = self.store.get_session(w.session_key)
             if session is not None and not deliverable_platform(session.platform):
                 if self.store.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='non_gateway'):

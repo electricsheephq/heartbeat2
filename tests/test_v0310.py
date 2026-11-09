@@ -69,7 +69,7 @@ def test_builtins_only_created_for_deliverable_sessions_and_gate_agrees(engine, 
 
 
 @pytest.mark.parametrize('family', ['silence', 'own_time'])
-@pytest.mark.parametrize('status', ['active', 'paused', 'proposed'])
+@pytest.mark.parametrize('status', ['active', 'proposed'])
 def test_cleanup_cancels_pending_preserves_started_and_does_not_resurrect(engine, family, status):
     e = engine
     enable(e)
@@ -95,8 +95,10 @@ def test_cleanup_cancels_pending_preserves_started_and_does_not_resurrect(engine
     assert e.store.get_wake(missing.id).status == 'active'
     getattr(e, family)()
     assert e.store.get_wake(local.id) == cleaned
-    # A deliverable platform alone, without a human message there, doesn't bring it back.
-    e.store.upsert_session(replace(e.store.get_session(local_key), platform='telegram'))
+    # A session that never had a human message doesn't bring it back, even on a messaging platform.
+    old = e.store.get_session(local_key)
+    assert e.store.cas_session(local_key, {'platform': 'cli'}, platform='telegram')
+    assert e.store.get_session(local_key).platform == 'telegram' and old.last_human_at is None
     getattr(e, family)()
     assert e.store.get_wake(local.id) == cleaned
 
@@ -151,7 +153,7 @@ def test_cleanup_obeys_settings_then_cleans_when_enabled(engine, family):
     e.policy = replace(e.policy, source_silence=True)
     getattr(e, family)()
     assert e.store.get_wake(w.id).status_reason == 'non_gateway'
-    assert e.store.get_occurrence(w.id, o.dedupe_key).state == 'superseded'
+    assert e.store.get_occurrence(w.id, o.dedupe_key if family == 'silence' else 'new-pending').state == 'superseded'
 
 
 def test_fifty_gateway_builtins_do_not_block_create(engine):
@@ -170,7 +172,8 @@ def test_user_wake_caps_explain_recovery_and_log_safely(engine, caplog, scope, s
     reason = 'max_active' if scope == 'chat' else 'global_max_active'
     assert result['error'] == reason
     assert result['detail'] and '/pulse cancel' in result['detail']
-    assert str(e.policy.max_active if scope == 'chat' else 50) in result['detail']
+    limit = e.policy.max_active if scope == 'chat' else 50
+    assert f'has {limit} active or proposed wakes' in result['detail'] and f'the most allowed is {limit}' in result['detail']
     records = [r for r in caplog.records if r.name == 'heartbeat2' and r.levelno == logging.WARNING]
     assert len(records) == 1 and reason in records[0].getMessage()
     assert hashlib.sha256(KEY.encode()).hexdigest()[:16] in records[0].getMessage()
@@ -214,3 +217,36 @@ def test_resume_cap_refusal_has_matching_detail(engine, scope):
     refused = e.tool.handle({'action': 'resume', 'id': w.id}, session_id='sid')
     assert refused['error'] == 'max_active'
     assert refused['detail'] == create(e)['detail'] and '/pulse cancel' in refused['detail']
+
+
+@pytest.mark.parametrize('family', ['silence', 'own_time'])
+@pytest.mark.parametrize('reason', ['governor:noop', ''])
+def test_paused_builtin_keeps_its_pause_through_a_local_visit(engine, family, reason):
+    # A governor or owner pause must survive the chat being seen from a local client and then a messaging one.
+    e = engine
+    enable(e)
+    session(e, last_human_at=e.clock.now(), episode_id='ep1')
+    w = builtin(e, family, status='paused', status_reason=reason)
+    session(e, platform='cli')
+    getattr(e, family)()
+    assert e.store.get_wake(w.id) == w
+    session(e, platform='telegram')
+    getattr(e, family)()
+    after = e.store.get_wake(w.id)
+    assert (after.status, after.status_reason) == ('paused', reason)
+
+
+def test_issue_147_repro_leaked_cli_checkins_then_telegram_create(engine):
+    # The reported state: 57 check-ins left by CLI launches (one per session key), then a create in a Telegram DM.
+    e = engine
+    enable(e)
+    leaked = []
+    for i in range(57):
+        key = f'cli-launch-{i}'
+        e.store.upsert_session(Session(key, 'cli', 'dm', f'local-{i}', f'sid-{i}', e.clock.now(), e.clock.now(), f'ep-{i}'))
+        leaked.append(builtin(e, 'silence', key, platform='cli'))
+    result = create(e)
+    assert result.get('armed'), result
+    e.silence()
+    assert all((e.store.get_wake(w.id).status, e.store.get_wake(w.id).status_reason) == ('cancelled', 'non_gateway') for w in leaked)
+    assert not [w for w in e.store.list_wakes() if w.trigger_json.get('builtin') and w.platform == 'cli' and w.status == 'active']
