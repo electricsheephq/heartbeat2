@@ -10,6 +10,7 @@ from dataclasses import fields, replace, asdict
 from datetime import datetime, timedelta
 import hashlib
 import json
+import logging
 from pathlib import Path
 import secrets
 import sqlite3
@@ -145,6 +146,7 @@ class Store:
         self.path, self.clock = Path(path), clock
         self._lock = threading.RLock()
         self._savepoint = 0
+        self._after_commit = []
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(str(self.path), timeout=5, isolation_level=None,
                                           check_same_thread=False)
@@ -218,14 +220,17 @@ class Store:
     @contextmanager
     def atomic(self):
         """Compose table writes atomically; nested calls use rollback savepoints."""
+        callbacks = []
         with self._lock:
             nested = self.connection.in_transaction
+            checkpoint = len(self._after_commit)
             self._savepoint += 1
             name = f"pulse_{self._savepoint}"
             self.connection.execute(f"SAVEPOINT {name}" if nested else "BEGIN IMMEDIATE")
             try:
                 yield self
             except BaseException:
+                del self._after_commit[checkpoint:]
                 if nested:
                     self.connection.execute(f"ROLLBACK TO {name}")
                     self.connection.execute(f"RELEASE {name}")
@@ -236,7 +241,24 @@ class Store:
                 if nested:
                     self.connection.execute(f"RELEASE {name}")
                 else:
-                    self.connection.commit()
+                    try:
+                        self.connection.commit()
+                    except BaseException:
+                        # A failed commit leaves nothing committed: its after-commit work must never run later.
+                        del self._after_commit[checkpoint:]
+                        raise
+                    callbacks, self._after_commit = self._after_commit, []
+        for callback in callbacks:
+            try: callback()
+            except Exception:  # Display-only work after a commit must never fail the committed caller.
+                logging.getLogger('heartbeat2').warning('heartbeat2 after-commit callback failed', exc_info=True)
+
+    def after_commit(self, callback):
+        with self._lock:
+            if self.connection.in_transaction:
+                self._after_commit.append(callback)
+                return
+        callback()
 
     def _insert_record(self, table, record):
         data = asdict(record)

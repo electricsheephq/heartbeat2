@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.9 — 2026-11-10
+
+- **Try a wake now.** The owner can queue one turn of a recurring wake or role with `/pulse run <id>`, under every usual check (it counts as one of its fires), or preview any wake with `/pulse test <id>` without sending anything or calling a model. Watchers, one-time reminders, the quiet check-in and own time can be previewed; they still fire on their own (#50, #61).
+- **One cache line.** Owner additions and governor cards show the tool's same cache and pricing label, and a cold wake's cost appears once (#143).
+- **See the filters before approving.** Watcher proposals, receipts, list rows and why views name their task, board, message and emoji filters (#149).
+
 ## 0.3.8 — 2026-11-10
 
 - **Rest until the work is ready.** The agent can pause one wake with `pause_for: "12h"` and resume it on its own. An owner pause replaces that timer, and owner controls and governor pauses keep priority (#134).

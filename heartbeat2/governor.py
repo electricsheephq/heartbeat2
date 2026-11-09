@@ -4,6 +4,7 @@ The no-op digest idea follows Hermes hermes_cli/loops.py::_digest_response;
 all value and pause decisions here use structured occurrence fields.
 """
 from dataclasses import replace
+import logging
 from .model import RECURRING_KINDS, PROBE_KINDS
 from .schedule import local_day, next_cron, next_every, parse_duration
 
@@ -31,7 +32,21 @@ def pause(engine,wake,rule):
     if s.cas_wake(current.id,current.status,expected_version=current.version,
                   status='paused',status_reason=f'governor:{rule}'):
         cache_line=engine.tool.cache_result(current)
-        s.set_meta('card:'+current.id,rule+(' · '+cache_line if cache_line else ''))
+        written=rule+(' · '+cache_line if cache_line else '')
+        s.set_meta('card:'+current.id,written)
+        paused=s.get_wake(current.id)
+        def price_card():
+            # Display only: a failure keeps the unpriced card and never reaches the committed tick.
+            try:
+                label=engine.tool.cache_result(paused)
+                with s.atomic():
+                    latest=s.get_wake(paused.id)
+                    # An owner turn may have shown and cleared the card meanwhile: only replace the card this pause wrote.
+                    if latest.version==paused.version and latest.status=='paused' and s.get_meta('card:'+paused.id)==written:
+                        s.set_meta('card:'+paused.id,rule+(' · '+label if label else ''))
+            except Exception:
+                logging.getLogger('heartbeat2').warning('governor card pricing failed; the card stays unpriced', exc_info=True)
+        s.after_commit(price_card)
         for o in s.list_occurrences(current.id,state='started'):
             if o.outcome is None:
                 s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=o.attempt,force_silent=True)

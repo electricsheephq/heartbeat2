@@ -54,6 +54,8 @@ Only messaging-gateway conversations are supported: DMs by default, plus group a
 
 After arming, relay the `receipt`: timing, quiet-hour hold, mute and expiry. Never promise exact timing yourself. A proposed wake is "awaiting your OK", never "armed". The receipt is what to repeat.
 
+The owner can preview a wake with `/pulse test <id>` or fire a recurring one now with `/pulse run <id>`; these are owner commands, and the agent cannot run them.
+
 When the owner asks for a one-time reminder in their current message, set `owner_asked: true` on the `at` create; never set it for your own follow-ups. A granted owner-requested reminder says: "Counts as your own reminder: not muted or capped."
 - Owner-requested one-time reminders can be due up to `max_reminder_days` (default 365 days), with `max_lifetime_days` of grace after a long reminder's due time.
 - Recurring wakes, watchers and autonomous follow-ups use `max_lifetime_days`. Roles have no lifetime limit.

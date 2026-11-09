@@ -67,6 +67,18 @@ class Infeasible(ValueError):
     pass
 
 
+def filter_text(w):
+    t=w.trigger_json
+    text=''
+    if w.kind in {'kanban_completed','kanban_blocked','kanban_worker_exited'}:
+        if 'task_id' in t: text+=f' for task {t["task_id"]}'
+        if 'board' in t: text+=f' on board {t["board"]}'
+    if w.kind=='reaction':
+        if 'message_id' in t: text+=f' on message {t["message_id"]}'
+        if t.get('emojis'): text+=' for '+' '.join(t['emojis'])
+    return text
+
+
 class Tool:
     def __init__(self, engine, session_key_fn=current_session_key):
         self.engine, self.session_key_fn = engine, session_key_fn
@@ -386,7 +398,10 @@ class Tool:
                 if seconds>=size and seconds%size==0: return f'{seconds/size:g}{unit}'
             return f'{seconds:g}s'
         watcher=w.kind in PROBE_KINDS | EVENT_KINDS
-        if w.status=='proposed': parts=[f'Not set yet: it is armed only after the owner sends /pulse ok {w.id}.']
+        if w.status=='proposed':
+            parts=[f'Not set yet: it is armed only after the owner sends /pulse ok {w.id}.']
+            if watcher: parts.append(f'It would wait for {w.kind} events{filter_text(w)}.' if w.kind in EVENT_KINDS else
+                                     f'It would check {w.kind} every {duration(w.trigger_json["check_every"])}.')
         elif w.status=='paused': parts=['Paused.']
         elif w.kind=='at': parts=['Already due; awaiting its wake turn.' if w.next_due_at is None else
             'Due now; it fires on the next check.' if w.next_due_at<=e.clock.now() else f'Fires once at {local(w.next_due_at)}.']
@@ -397,10 +412,7 @@ class Tool:
             lead=(f'{first}, then every {duration(w.trigger_json["check_every"])}' if w.kind in PROBE_KINDS else
                   f'Waits for {w.kind} events' if watcher else
                   f'Waits for {duration(parse_duration(w.trigger_json.get("after",p.checkin_after_hours*3600)))} of owner silence')
-            if w.kind in {'kanban_completed','kanban_blocked','kanban_worker_exited'}:
-                if 'task_id' in w.trigger_json: lead+=f' for task {w.trigger_json["task_id"]}'
-                if 'board' in w.trigger_json: lead+=f' on board {w.trigger_json["board"]}'
-            if w.kind=='reaction' and 'message_id' in w.trigger_json: lead+=f' on message {w.trigger_json["message_id"]}'
+            lead+=filter_text(w)
             parts=[lead+(f'; if nothing happens by {local(w.deadline_at)}, it tells you once' if watcher and w.deadline_at is not None else '')+'.']
         if w.status not in {'proposed','paused'}:
             from .policy import owner_requested
@@ -430,6 +442,12 @@ class Tool:
         text=' '.join(parts)
         if len(text)>240: text=text.replace('Wakes are at least ','Wakes at least ').replace(' min apart, so it can land a few minutes late.',' min apart; may land a few minutes late.')
         if len(text)>240: text=' '.join(x for x in parts if not x.startswith('Wakes are at least '))
+        if len(text)>240 and w.status=='proposed' and watcher and len(parts)>2:
+            # Before approval the filters matter most: drop the other notes first.
+            text=' '.join(parts[:2])
+        if len(text)>240 and w.status=='proposed' and watcher and len(parts[0])<200:
+            # Keep the whole approval line and as much of the filters as fits, rather than cutting at the last sentence.
+            text=(parts[0]+' '+parts[1])[:239]+'…'
         if len(text)>240:
             text=text[:239]
             boundary=text.rfind('. ')
