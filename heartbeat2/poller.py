@@ -83,6 +83,13 @@ class Poller:
         errors=json.loads(self.store.get_meta('settings_error') or '[]')
         return '\n'.join(f'Setting ignored: {e["key"]} ({e["reason"]}); using {e["effective"]!r}' for e in errors)
 
+    def session_can_receive(self,s):
+        """Whether HeartBeat may speak into this chat now: the same session-level checks dispatch applies (#145 review)."""
+        now=self.clock.now()
+        return bool(self.policy.enabled and not self.paused() and self.injection_allowed() and s is not None and s.enabled
+                    and not (s.paused_until is not None and s.paused_until>now)
+                    and not (self.policy.dm_only and s.chat_type!='dm') and s.platform in MESSAGING_PLATFORMS)
+
     def injection_allowed(self):
         try:
             fn=getattr(self.ctx,'_gateway_injection_allowed',None)

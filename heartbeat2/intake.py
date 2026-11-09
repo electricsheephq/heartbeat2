@@ -588,9 +588,9 @@ class Intake:
             lines=[]
             from .desk import held_report_lines
             owner_session=s.get_session(key)
-            # While HeartBeat is off or paused for this chat, held results stay pending: the owner's stop covers them too.
-            reports,shown=(held_report_lines(s,key) if e.policy.enabled and owner_session is not None
-                           and owner_session.enabled and not e.paused() and e.injection_allowed() else ([],[]))
+            # While HeartBeat may not speak into this chat (off, estop, no injection consent, dm_only, not a gateway chat),
+            # held results stay pending: the owner's limits cover them too.
+            reports,shown=held_report_lines(s,key) if e.session_can_receive(owner_session) else ([],[])
             if reports:
                 lines.append("HeartBeat 2.0: while the owner's limits held your messages, your wake turns finished these and wanted to tell the owner. In this reply, tell them what still matters, briefly:")
                 lines+=reports

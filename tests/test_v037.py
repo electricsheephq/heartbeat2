@@ -346,6 +346,8 @@ def test_history_pruning_keeps_results_still_held_for_the_owner(engine):
     w = arm(e, 'self', role=True)
     held = recorded(e, w, 'held')
     old = [recorded(e, w, f'old{n}', held_reason='', notify=False) for n in range(4)]
+    old += [recorded(e, w, 'quiet-unsent', notify=False), recorded(e, w, 'delivered', delivered=True),
+            recorded(e, w, 'reported', held_reason='reported:quiet_hours')]
     for n in range(4):
         e.clock.advance(1)
         recorded(e, w, f'new{n}', held_reason='', notify=False)
@@ -383,3 +385,21 @@ def test_compressed_owner_reply_still_acknowledges_its_list(engine):
     e.intake.on_session_end(session_id='tip', turn_id='back', completed=True)
     assert not e.store.held_reports(KEY)
     assert not e.store.get_meta('owner_report:sid') and not e.store.get_meta('owner_report:tip')
+
+
+def test_reports_respect_dm_only_for_group_chats(engine):
+    e = engine
+    _, o = held_turn(e)
+    e.policy = replace(e.policy, dm_only=True)
+    e.clock.advance(1)
+    admit(e, mid='group', text='Hi all.')
+    session(e, chat_type='group')  # admit() records a DM; the chat is a group
+    result = e.intake.pre_llm_call(session_id='sid', turn_id='group', user_message='Hi all.', platform='telegram')
+    assert SUMMARY not in (result or {}).get('context', '')
+    assert e.store.held_reports(KEY) == [o]
+    e.policy = replace(e.policy, dm_only=False)
+    e.clock.advance(1)
+    admit(e, mid='group2', text='Hi again.')
+    session(e, chat_type='group')
+    result = e.intake.pre_llm_call(session_id='sid', turn_id='group2', user_message='Hi again.', platform='telegram')
+    assert SUMMARY in result['context']
