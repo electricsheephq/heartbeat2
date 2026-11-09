@@ -131,7 +131,7 @@ class Tool:
                 s = e.store.get_session(s.session_key)
                 flight = e.intake.flight_for(session_id, s.session_key)
                 evidence = self.owner_turn_evidence(session_id, flight)
-                created_in = 'wake_turn' if flight else 'human_turn'
+                created_in = 'wake_turn' if flight or e.intake.in_wake_turn(session_id, s.session_key) else 'human_turn'
                 if action == 'respond':
                     return self.respond(args, flight)
                 if action == 'list':
@@ -244,7 +244,7 @@ class Tool:
                         budget = args.get('budget',{}).get('turns_per_day')
                         if w.role and isinstance(budget,int) and not isinstance(budget,bool):
                             ceiling = e.store.owner_budget(w.id)
-                            if flight:
+                            if created_in == 'wake_turn':
                                 limit = e.policy.role_budget(w)
                                 if budget > limit:
                                     request = {**args, 'budget':{'turns_per_day':limit}}

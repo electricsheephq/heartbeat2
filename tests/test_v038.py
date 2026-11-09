@@ -231,6 +231,9 @@ def test_agent_resume_of_its_own_pause_and_timer_cleared(engine):
     plain = arm(engine, 'every', trigger_json={'kind': 'every', 'every': '2h'})
     assert pause(engine, plain.id).get('ok')
     assert engine.tool.handle(dict(action='resume', id=plain.id), session_id='sid').get('ok')
+    gone = timed(engine)
+    assert engine.tool.handle(dict(action='cancel', id=gone.id), session_id='sid').get('ok')
+    assert not engine.store.get_meta('resume_after:' + gone.id)
 
 
 @pytest.mark.parametrize('field', ['task_id', 'board'])
@@ -251,3 +254,19 @@ def test_kanban_filters_refused_on_update_of_other_kinds(engine, field):
     assert result.get('error') == 'invalid_request', result
     assert 'task_id and board apply to kanban triggers' in result['detail']
     assert engine.store.get_wake(w.id) == w
+
+
+@pytest.mark.parametrize('target', ['one', 'all'])
+def test_owner_pause_of_the_running_wake_holds_for_the_rest_of_its_turn(engine, command, target):
+    w = arm(engine, 'self', role=True, title='Running role')
+    engine.dispatch(pending(engine, w))
+    start(engine)
+    assert not command('pause ' + w.id).startswith('Error:')
+    assert engine.store.get_wake(w.id).status_reason == 'command'
+    result = engine.tool.handle(dict(action='resume', id=w.id if target == 'one' else 'all'), session_id='sid')
+    error = result.get('error') if target == 'one' else result['results'][0].get('error')
+    assert error == 'needs_owner', result
+    assert engine.store.get_wake(w.id).status == 'paused'
+    # Its budget can't rise from this turn either.
+    raised = engine.tool.handle(dict(action='update', id=w.id, budget={'turns_per_day': 12}), session_id='sid')
+    assert 'wake_turn cannot raise budget' in str(raised.get('clamped', raised)), raised

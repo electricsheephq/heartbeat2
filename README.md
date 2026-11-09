@@ -173,7 +173,7 @@ pulse tool results name the ignored setting.
 `/pulse` is a control panel, not conversation. Using it never counts as replying to the agent. Anything else you send counts as a reply, including a reaction or an edit on platforms that report them: it resets the unanswered mute and cancels wakes armed to stop when you reply. A reaction or edit counts only when its chat maps to one HeartBeat session; in a chat shared by several sessions (for example DM threads or topics) it is ignored. The other exceptions are listed under known issues: a message queued while the agent is busy on Signal or SimpleX, and a Codex app-server steer.
 
 **Your agent** gets one tool, `pulse` (`create · list · desk · update · pause · resume · cancel · respond · off`), and the bundled `heartbeat2-usage` skill. `desk` lets it read its desk at any point in a turn, the same view as `/pulse desk`. The skill teaches it to:
-- rest one wake with `action: pause`, its `id` and `pause_for: "12h"` when it knows when to return; its timer never resumes a wake you paused or a chat you turned off, and a wake you paused with `/pulse pause` resumes only on your word;
+- rest one wake with `action: pause`, its `id` and `pause_for: "12h"` when it knows when to return; its timer never resumes a wake you paused or a chat you turned off, and it can resume a wake you paused with `/pulse pause` only during your own turn, never from its wake turns;
 - take on roles and keep working on them, follow up on what it started, and use its own time well;
 - treat your budgets as the rules it works inside, and message you only when it's worth your attention;
 - prefer a watcher to a timer whenever a deterministic check can tell "changed";
