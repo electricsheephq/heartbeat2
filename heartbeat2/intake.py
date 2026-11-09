@@ -312,6 +312,11 @@ class Intake:
             with s.atomic():
                 session=s.get_session(key)
                 s.cas_session(key,{'current_session_id':old},current_session_id=sid)
+                # The owner-turn list moves with its turn, so the compressed reply can still acknowledge it.
+                batch=s.get_meta('owner_report:'+old)
+                if batch:
+                    s.set_meta('owner_report:'+sid,batch)
+                    s.set_meta('owner_report:'+old,'')
                 for w in s.list_wakes(key):
                     if w.armed_session_id==old:
                         s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=sid)
@@ -585,7 +590,7 @@ class Intake:
             owner_session=s.get_session(key)
             # While HeartBeat is off or paused for this chat, held results stay pending: the owner's stop covers them too.
             reports,shown=(held_report_lines(s,key) if e.policy.enabled and owner_session is not None
-                           and owner_session.enabled and not e.paused() else ([],[]))
+                           and owner_session.enabled and not e.paused() and e.injection_allowed() else ([],[]))
             if reports:
                 lines.append("HeartBeat 2.0: while the owner's limits held your messages, your wake turns finished these and wanted to tell the owner. In this reply, tell them what still matters, briefly:")
                 lines+=reports

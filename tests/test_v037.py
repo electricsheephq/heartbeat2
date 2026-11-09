@@ -354,3 +354,32 @@ def test_history_pruning_keeps_results_still_held_for_the_owner(engine):
     e.store.gc(ledger_days=30, keep_occurrences=4)
     assert e.store.held_reports(KEY) == [e.store.get_occurrence(w.id, 'held')]
     assert all(e.store.get_occurrence(w.id, o.dedupe_key) is None for o in old)
+
+
+def test_reports_wait_while_injection_consent_is_revoked(engine):
+    e = engine
+    _, o = held_turn(e)
+    e.ctx.allowed = False
+    e.clock.advance(1)
+    admit(e, mid='revoked', text='Hi.')
+    result = e.intake.pre_llm_call(session_id='sid', turn_id='revoked', user_message='Hi.', platform='telegram')
+    assert SUMMARY not in (result or {}).get('context', '')
+    assert e.store.held_reports(KEY) == [o]
+    e.ctx.allowed = True
+    e.clock.advance(1)
+    admit(e, mid='granted', text='Hi again.')
+    result = e.intake.pre_llm_call(session_id='sid', turn_id='granted', user_message='Hi again.', platform='telegram')
+    assert SUMMARY in result['context']
+
+
+def test_compressed_owner_reply_still_acknowledges_its_list(engine):
+    e = engine
+    _, o = held_turn(e)
+    e.clock.advance(1)
+    admit(e, mid='back', text="I'm back.")
+    result = e.intake.pre_llm_call(session_id='sid', turn_id='back', user_message="I'm back.", platform='telegram')
+    assert SUMMARY in result['context']
+    e.compression_tip = lambda sid: 'tip' if sid == 'sid' else sid
+    e.intake.on_session_end(session_id='tip', turn_id='back', completed=True)
+    assert not e.store.held_reports(KEY)
+    assert not e.store.get_meta('owner_report:sid') and not e.store.get_meta('owner_report:tip')
