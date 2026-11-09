@@ -12,7 +12,7 @@ from test_engine import KEY, arm, end, engine, pending, session, start
 
 CONTRACT = [
     'Contract: this turn is yours to act on. Do the work the note describes, then call pulse(action="respond", outcome=…, notify=true|false, summary=…); notify is required.',
-    '- outcome: progress when you did something useful, even silently (always include a summary of what you did; silent progress without one counts as idle); no_change when there was nothing to do; done when the work is finished for good; blocked or needs_attention when you need the owner.',
+    '- outcome: progress when you did something useful, even silently (always include a summary of what you did, written as a plain sentence because the owner reads it on their desk; silent progress without one counts as idle); no_change when there was nothing to do; done when the work is finished for good; blocked or needs_attention when you need the owner.',
     '- notify=true → your reply is delivered to the owner: one short, specific, warm message that leads with the result or the question. No guilt about silence, no mention of this mechanism, ids or ledgers.',
     '- notify=false → your final reply is not posted; the work still counts. Write no text alongside tool calls on a wake turn; some platforms show tool progress.',
     '- If the chat shows the note\'s subject was settled after this wake was armed, end it silently: outcome="done", notify=false.',
