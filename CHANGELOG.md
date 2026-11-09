@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.11 — 2026-11-10
+
+- **A README that starts with the point.** The first screen now has the one-line pitch, the 90-second demo, the install line and a three-step first result (a reminder five minutes out) ahead of the slower role path. Stale lines are fixed: Desktop and TUI wakes wait on Hermes core, group and topic delivery has passed a live forum-topic test, and the roadmap points at the current milestones. The silence notes now include Hermes's model-fallback notice, and there is a troubleshooting list plus links to releases, changelog, contributing and license. Documentation only; no code changes.
+
 ## 0.3.10 — 2026-11-10
 
 - **Check-ins stay in messaging chats.** On CLI, TUI, Desktop and API sessions, the built-in check-in and own time could pile up (one per launch) until no new wake could be created. They're now made only in messaging chats, leftover ones are cancelled automatically, and built-ins no longer count toward the wake limits. A refused create now says how to free a slot (#147).
