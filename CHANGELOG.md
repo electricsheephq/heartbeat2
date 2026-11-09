@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4 — 2026-11-09
+
+- **A message still being written counts as in progress, not sent.** While a wake turn is running it holds one of the day's message slots. The desk and `/pulse status` used to count that slot as a message already sent. They now read, for example, `messages today 2/6 (+1 in progress)`. The desk inside the running turn's own wake text no longer tells the agent its messages are held when that turn is the one using the day's last message. Message caps are unchanged.
+- **Summaries in plain words.** The wake contract now asks for the turn's summary as a plain sentence, because the owner reads it on their desk.
+
 ## 0.3.3 — 2026-11-09
 
 - **Cron rhythms keep their asterisks on the desk.** A cron role's rhythm is now shown as inline code, for example cron `0 10 * * 1,4`, so chat markdown such as Telegram's no longer reads `* *` as bold markers and drops them.
