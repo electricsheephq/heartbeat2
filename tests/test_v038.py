@@ -276,7 +276,8 @@ def test_history_pruning_keeps_only_results_the_owner_can_still_get(engine):
     from test_v037 import recorded
     w = arm(engine, 'self', role=True)
     kept = recorded(engine, w, 'kept')
-    never = [recorded(engine, w, 'no_change', outcome='no_change'), recorded(engine, w, 'blank', summary=' \n\t')]
+    never = [recorded(engine, w, 'no_change', outcome='no_change'), recorded(engine, w, 'blank', summary=' \n\t'),
+             recorded(engine, w, 'nbsp', summary='\u00a0\u3000'), recorded(engine, w, 'vtff', summary='\v\f\u2028')]
     for n in range(4):
         engine.clock.advance(1)
         recorded(engine, w, f'new{n}', held_reason='', notify=False)

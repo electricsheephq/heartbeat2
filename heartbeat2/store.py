@@ -24,6 +24,8 @@ from .schedule import local_day
 
 SCHEMA_VERSION = 1
 HELD_REPORT_OUTCOMES = frozenset({'progress', 'done', 'needs_attention', 'blocked'})
+# The characters str.strip() removes, so SQL trim() agrees with Python on what a blank summary is.
+_WHITESPACE = ''.join(chr(c) for c in range(0x3001) if chr(c).isspace())
 CACHE_FIELDS = {'cache_read_tokens','cache_write_tokens','warm_wakes','cold_wakes','cost_microusd','unpriced_calls'}
 LEDGER_FIELDS = frozenset({"fires", "gated_skips", "governor_skips", "model_turns",
     "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals", "checks", "no_verdict"} | CACHE_FIELDS)
@@ -590,8 +592,8 @@ class Store:
                       AND rid NOT IN (SELECT rowid FROM occurrences WHERE state='done'
                           AND held_reason LIKE 'message_held:%' AND notify=1 AND delivered=0
                           AND ended_at IS NOT NULL AND outcome IN ({held_outcomes})
-                          AND trim(summary, ' '||char(9)||char(10)||char(13)) <> ''))""",
-                terminal * 3 + [keep_occurrences, now - 2 * 86400] + held)
+                          AND trim(summary, ?) <> ''))""",
+                terminal * 3 + [keep_occurrences, now - 2 * 86400] + held + [_WHITESPACE])
             self.connection.execute("DELETE FROM events WHERE consumed_at IS NOT NULL AND consumed_at<?", (now - 7 * 86400,))
             self.connection.execute("DELETE FROM ledger WHERE day<?", (ledger_cutoff,))
             self.connection.execute("DELETE FROM meta WHERE key LIKE 'agent_spend:%' AND substr(key,-10)<?", (ledger_cutoff,))
