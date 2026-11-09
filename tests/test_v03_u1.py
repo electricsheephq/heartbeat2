@@ -25,9 +25,9 @@ def assert_held_turn(e, w, reason, label, *, notify=False):
     assert o.state == 'claimed' and o.force_silent
     assert o.held_reason == 'message_held:' + reason
     held_line = (f'Messages are held right now ({label}). Your work still counts; '
-                 "if the owner should hear about this, respond with notify=true and a plain-sentence summary: nothing is sent now, "
-                 "but HeartBeat keeps the summary and hands it back on the owner's next message or your next turn that can send. "
-                 "Keep it in your notes too.")
+                 "if the owner should hear about this, respond with notify=true, an outcome other than no_change, and a "
+                 "plain-sentence summary: nothing is sent now, but HeartBeat keeps the summary and hands it back on the owner's "
+                 "next message or a later role or own-time turn that can send. Keep it in your notes too.")
     assert held_line in e.ctx.calls[-1][0]
     # A held turn reserves no message slot, so the count it shows is never off by one.
     delivered = e.store.daily_counts(KEY, e.policy.resolved_timezone())['delivered']
