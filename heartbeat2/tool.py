@@ -17,7 +17,7 @@ def obj(properties):
 STR = {'type': 'string'}
 BOOL = {'type': 'boolean'}
 PARAMETERS = obj({
-    'action': {'type': 'string', 'enum': ['create', 'list', 'update', 'pause', 'resume', 'cancel', 'respond', 'off']},
+    'action': {'type': 'string', 'enum': ['create', 'list', 'desk', 'update', 'pause', 'resume', 'cancel', 'respond', 'off']},
     'id': STR, 'title': STR, 'note': STR, 'reason': STR,
     'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','check_every','deadline','cwd')},
                     'fire_on': {'type':'string','enum':['change','success','failure','json']},
@@ -32,7 +32,7 @@ PARAMETERS = obj({
 })
 PARAMETERS['required'] = ['action']
 DESCRIPTION = ('Your own time in this chat. Use create to arm a wake/watcher (note and trigger.kind required), or a role '
-               '(role=true on every/cron/self) for a standing responsibility you own: no expiry, a turns-per-day budget, a desk view; list to inspect; '
+               '(role=true on every/cron/self) for a standing responsibility you own: no expiry, a turns-per-day budget, a desk view; list to inspect; desk to read your desk now (your roles, what is due, held messages, turns, messages and cost left today); '
                'update to change instructions or trigger; pause to suspend; resume to restart a paused wake; '
                'cancel to end it; off to stop checks for this chat. During a wake turn, use respond to set '
                'outcome and notify, optionally scratch/next_check; outcome=progress with notify=false and a summary is real work, never counted as idle. Bounds and clamps are reported. Never type silence markers. '
@@ -127,6 +127,12 @@ class Tool:
                     return self.respond(args, flight)
                 if action == 'list':
                     return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w)} for w in e.store.list_wakes(s.session_key)]}
+                if action == 'desk':
+                    from .desk import render_desk
+                    turn = (e.store.get_occurrence(flight.wake_id, flight.dedupe_key)
+                            if flight is not None and not flight.invalid else None)
+                    return {'ok':True,'desk':render_desk(e,s,clock=e.clock,timezone=e.policy.resolved_timezone(),
+                                                         policy=e.policy,turn=turn)}
                 if action == 'off':
                     e.store.cas_session(s.session_key, {'enabled':s.enabled}, enabled=False)
                     return {'ok':True,'enabled':False}
@@ -200,6 +206,7 @@ class Tool:
                         results.append({'id':w.id,'error':gate.reason, **({'detail':gate.detail} if gate.detail else {})})
                         continue
                     clamps = {}
+                    owner_lowered = False
                     if action in {'resume','update'}:
                         if not s.enabled:
                             return {'error':'session_off'}
@@ -226,11 +233,21 @@ class Tool:
                         budget_clamps = {}
                         request = args
                         budget = args.get('budget',{}).get('turns_per_day')
-                        if w.role and flight and isinstance(budget,int) and not isinstance(budget,bool):
-                            limit = e.policy.role_budget(w)
-                            if budget > limit:
-                                request = {**args, 'budget':{'turns_per_day':limit}}
-                                budget_clamps['budget.turns_per_day'] = f'{budget} → {limit} (wake_turn cannot raise budget)'
+                        if w.role and isinstance(budget,int) and not isinstance(budget,bool):
+                            ceiling = e.store.owner_budget(w.id)
+                            if flight:
+                                limit = e.policy.role_budget(w)
+                                if budget > limit:
+                                    request = {**args, 'budget':{'turns_per_day':limit}}
+                                    budget_clamps['budget.turns_per_day'] = f'{budget} → {limit} (wake_turn cannot raise budget)'
+                            elif ceiling is not None and budget > ceiling:
+                                # A budget the owner set is their limit: only their own /pulse budget command raises it.
+                                request = {**args, 'budget':{'turns_per_day':ceiling}}
+                                budget_clamps['budget.turns_per_day'] = (f'{budget} → {ceiling} (the owner set this budget; to raise it, '
+                                                                        f'they send /pulse budget {w.id} {budget}/day)')
+                            elif args.get('owner_asked') is True and evidence and budget < (ceiling or self.engine.policy.role_budget(w)):
+                                # A lowering the owner asked for becomes their ceiling; it can only narrow, never widen.
+                                owner_lowered = True
                         result = self.reschedule(w) if action=='resume' else self.prepare(base,request,reschedule=fresh,reparse_deadline=fresh)
                         result.clamped.update(budget_clamps)
                         candidate, clamps = result.wake, result.clamped
@@ -284,6 +301,7 @@ class Tool:
                         e.cancel_occurrences(w.id,'paused' if action=='pause' else 'cancelled',preserve_started=True)
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
                     w=e.store.get_wake(w.id)
+                    if action == 'update' and owner_lowered: e.store.set_owner_budget(w.id,w.budget_turns_per_day)  # owner-asked lowering
                     item={'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':clamps,'cache':self.cache_result(w)}
                     if action in {'update','resume'}: item['receipt']=self.receipt(w,s)
                     results.append(item)
@@ -555,6 +573,9 @@ class Tool:
             w=e.store.get_wake(o.wake_id)
             if w.kind not in RECURRING_KINDS:
                 clamps['next_check']='next_check ignored: not recurring'
+            elif w.kind == 'cron':
+                # The governor schedules cron from its expression; accepting a pace here would be a silent no-op.
+                clamps['next_check']='next_check ignored: a cron wake follows its schedule; update the trigger to change it'
             else:
                 requested=parse_duration(args['next_check'])
                 bounded=max(requested,w.pacing_min_s or e.policy.interval_floor(w))

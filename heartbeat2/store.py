@@ -246,6 +246,17 @@ class Store:
             self.connection.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                     (key, str(value)))
 
+    def owner_budget(self, wake_id: str) -> int | None:
+        """The role budget the owner set with /pulse budget: the agent may go under it, never over it unasked."""
+        value = self.get_meta('owner_budget:' + wake_id)
+        try:
+            return int(value) if value else None
+        except ValueError:
+            return None
+
+    def set_owner_budget(self, wake_id: str, budget: int):
+        self.set_meta('owner_budget:' + wake_id, str(int(budget)))
+
     def marker_secret(self) -> str:
         secret = self.get_meta('marker_secret')
         if secret is not None: return secret

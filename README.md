@@ -135,6 +135,16 @@ Restart the messaging gateway and send `/pulse` in your DM. It shows:
 - your local time and quiet hours;
 - today's wakes, messages, cache counts and estimated cost (or token splits).
 
+### Your first hour
+
+1. **Check it can start turns.** After the restart, `/pulse` should say injection is allowed. If it shows a YAML snippet instead, the key above isn't set yet.
+2. **Hand it a role.** In your DM, for example: "You're in charge of my reading list. Summarise anything new between my messages, a few turns a day." The agent sets up the role and sends a receipt with its rhythm, what it will and won't do, and its daily budget. You can also set one up yourself with `/pulse role self <charter>` or `/pulse role every 1d at 09:00 <charter>`.
+3. **Let it work.** A role without a fixed time spreads its turns across the day by its budget: at the default 6 turns, about one every four hours. Quiet hours and the message limits hold its messages, not its work.
+4. **Look at its desk.** `/pulse desk` shows each role's last result and next turn, and today's messages, turns and cost against your limits. The agent sees the same desk.
+5. **Adjust or stop it.** `/pulse budget <id> 2/day` sets a role's daily turns; the agent can go under your number but never over it, and only this command raises it. A new budget changes how many turns the role takes a day, not how often they come: to spread them out, ask the agent to change its rhythm. `/pulse pause <id>` or `/pulse cancel <id>` stops one role, and `/pulse off` stops everything in the chat.
+
+Optional: set **Own time** (`own_time_hours`, for example 6) to give the agent regular turns with no assigned task. On Discord, WhatsApp or Matrix, set `display.platforms.<platform>.tool_progress: off` so silent turns don't post progress bubbles.
+
 All other settings are in **Settings ▸ Plugins** in Hermes Desktop or in `config.yaml`.
 At start a rejected setting falls back to its default; on a live change it keeps
 its last good value, and your other changes still apply. `/pulse status` and
@@ -149,6 +159,9 @@ pulse tool results name the ignored setting.
 | `/pulse add in 2h check the deploy` | A one-off wake |
 | `/pulse add every 1d at 09:00 plan my day` | A recurring wake at a fixed time |
 | `/pulse add when silent 24h ask how the trip went` | Once per silence of that length |
+| `/pulse role self <charter>` · `/pulse role every 1d at 09:00 <charter>` | Hand the agent a role: a standing responsibility with a notebook and a daily turn budget. `self` lets the agent pace it. |
+| `/pulse desk` | The agent's desk: each role's rhythm, last result and next turn; today's messages, turns and cost against your limits; and why messages are held, if they are |
+| `/pulse budget <id> 3/day` | Set a role's daily turns. The agent can go under your number but never over it; only this command raises it. |
 | `/pulse list` · `/pulse why <id>` | Active, proposed and paused items plus the 10 most recently created finished ones; `/pulse list all` shows everything. Why lists the last 10 trigger keys, states, reasons, matched/created and held-since times, and delivered yes/no |
 | `/pulse ledger [7d]` | Totals over the range: fires, checks, model turns, messages, replies, cache/cost and token splits |
 | `/pulse pause <id\|all> [for 3d]` · `resume` · `cancel` | Control one item or all of them |
@@ -159,7 +172,7 @@ pulse tool results name the ignored setting.
 
 `/pulse` is a control panel, not conversation. Using it never counts as replying to the agent. Anything else you send counts as a reply, including a reaction or an edit on platforms that report them: it resets the unanswered mute and cancels wakes armed to stop when you reply. A reaction or edit counts only when its chat maps to one HeartBeat session; in a chat shared by several sessions (for example DM threads or topics) it is ignored. The other exceptions are listed under known issues: a message queued while the agent is busy on Signal or SimpleX, and a Codex app-server steer.
 
-**Your agent** gets one tool, `pulse` (`create · list · update · pause · resume · cancel · respond · off`), and the bundled `heartbeat2-usage` skill. The skill teaches it to:
+**Your agent** gets one tool, `pulse` (`create · list · desk · update · pause · resume · cancel · respond · off`), and the bundled `heartbeat2-usage` skill. `desk` lets it read its desk at any point in a turn, the same view as `/pulse desk`. The skill teaches it to:
 - take on roles and keep working on them, follow up on what it started, and use its own time well;
 - treat your budgets as the rules it works inside, and message you only when it's worth your attention;
 - prefer a watcher to a timer whenever a deterministic check can tell "changed";
@@ -196,6 +209,11 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Urgent wakes ignore quiet hours | `quiet_hours_urgent` | off | Let wakes marked urgent through quiet hours. |
 | Wake turns per day | `max_model_wakes_per_day` | 24 | Per chat, local day. Each wake turn is a full model turn. |
 | Wake messages per day | `max_messages_per_day` | 6 | Per chat, local day. |
+| Own time (hours between turns) | `own_time_hours` | 0 | 0 = off. The agent gets a turn of its own this often to work on its roles, follow things up, reflect or rest. Each is a full model turn; quiet hours hold its messages, not its work. |
+| Daily cost limit for the agent's own turns (USD) | `daily_cost_limit_usd` | 0 | 0 = none. Once today's priced cost of turns the agent started reaches this, its own turns stop until tomorrow. Your own reminders still fire. Unpriced routes are not counted; `/pulse status` shows them. |
+| Turns per role per day (default) | `role_turns_per_day_default` | 6 | A role's budget when none is set for it. Each turn is a full model turn. |
+| Most turns a role may take per day | `role_turns_per_day_max` | 12 | Caps every role budget. A budget you set with `/pulse budget`, or a lowering you ask the agent for, is a ceiling the agent can go under but never raise. The chat's wake-turn limit still applies. |
+| Follow-ups a role may arm per turn | `max_children_per_wake_turn` | 3 | How many wakes or watchers one role turn may create. Other wake turns may create one. |
 | Unanswered messages before mute | `max_unanswered` | 2 | Wakes you armed, and one-time reminders you ask for in chat, always fire; agent watchers wait for your reply; other one-time agent reminders are dropped. The agent's recurring work and roles keep running silently, with their messages held until you reply. An agent edit revokes the exemption (for a chat reminder, so does an agent resume), except a watcher-only conversion you requested with `/pulse watch`. |
 | Shortest repeat (minutes) | `min_interval_minutes` | 15 | Floor for every recurring time wake. |
 | Shortest agent timer without a watcher (minutes) | `agent_ungated_floor_minutes` | 55 | Floor for recurring timers the agent arms without a watcher. |

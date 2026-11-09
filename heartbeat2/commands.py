@@ -287,8 +287,11 @@ def handle(raw_args, runtime):
                 if wake is None or wake.session_key != key: raise ValueError('unknown item in this chat')
                 if not wake.role: raise ValueError('budget applies to roles')
                 budget = max(1,min(int(match[2]),engine.policy.role_turns_per_day_max))
-                if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,budget_turns_per_day=budget):
-                    raise ValueError('concurrent item change')
+                with engine.store.atomic():
+                    if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,budget_turns_per_day=budget):
+                        raise ValueError('concurrent item change')
+                    # Record the owner's own number: a temporarily lower profile maximum must not shrink their ceiling.
+                    engine.store.set_owner_budget(wake.id,max(1,int(match[2])))
                 return _item(engine,engine.store.get_wake(wake.id))
             if action in {'off','on'} and not rest:
                 if not engine.store.cas_session(key, {'enabled':session.enabled}, enabled=action=='on'):
