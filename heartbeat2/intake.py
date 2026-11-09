@@ -586,7 +586,8 @@ class Intake:
             if reports:
                 lines.append("HeartBeat 2.0: while the owner's limits held your messages, your wake turns finished these and wanted to tell the owner. In this reply, tell them what still matters, briefly:")
                 lines+=reports
-                s.set_meta('owner_report:'+session_id,json.dumps(shown))
+                # Bound to this turn and process: a recovery turn after a crash never saw the list, so it can't acknowledge it.
+                s.set_meta('owner_report:'+session_id,json.dumps({'turn':turn_id,'epoch':e.epoch,'items':shown}))
             count=int(s.get_meta('switched_notice:'+key) or 0)
             if count:
                 lines.append(f'{count} wakes armed in your previous conversation were stopped; /pulse list')
@@ -891,8 +892,10 @@ class Intake:
             if shown:
                 if f is None and not (failed or interrupted or completed is False):
                     try:
-                        s.mark_reported(json.loads(shown))
-                    except (ValueError,TypeError):
+                        batch=json.loads(shown)
+                        if batch['epoch']==e.epoch and batch['turn']==turn_id:
+                            s.mark_reported(batch['items'])
+                    except (ValueError,TypeError,KeyError):
                         pass
                 s.set_meta('owner_report:'+session_id,'')
             if f is None or f.invalid: return None

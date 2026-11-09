@@ -59,7 +59,7 @@ def test_owner_reply_receives_report_once(engine):
                                   user_message="I'm back.", platform='telegram')
     assert OWNER_HEADER in result['context'] and SUMMARY in result['context']
     assert e.store.held_reports(KEY) == [o]
-    assert json.loads(e.store.get_meta('owner_report:sid')) == [[o.wake_id, o.dedupe_key]]
+    assert json.loads(e.store.get_meta('owner_report:sid')) == {'turn':'back', 'epoch':e.epoch, 'items':[[o.wake_id, o.dedupe_key]]}
     e.intake.on_session_end(session_id='sid', turn_id='back', completed=True)
     assert not e.store.held_reports(KEY)
     assert e.store.get_occurrence(o.wake_id, o.dedupe_key).held_reason == 'reported:quiet_hours'
@@ -165,7 +165,7 @@ def test_reports_bounded_oldest_first_and_only_shown_acknowledged(engine):
         admit(e, mid=mid)
         result = e.intake.pre_llm_call(session_id='sid', turn_id=mid,
                                       user_message='hello', platform='telegram')
-        assert json.loads(e.store.get_meta('owner_report:sid')) == [[o.wake_id, o.dedupe_key] for o in expected]
+        assert json.loads(e.store.get_meta('owner_report:sid'))['items'] == [[o.wake_id, o.dedupe_key] for o in expected]
         for o in expected:
             assert o.summary.replace('`', "'").replace('\n', ' ') in result['context']
         e.intake.on_session_end(session_id='sid', turn_id=mid, completed=True)
@@ -274,3 +274,33 @@ def test_ceiling_above_a_lowered_profile_maximum(engine, monkeypatch):
     owner_turn(e)
     e.tool.handle(dict(action='update', id=role.id, budget={'turns_per_day': 6}, owner_asked=True), session_id='sid')
     assert e.store.owner_budget(role.id) == 6
+
+
+@pytest.mark.parametrize('restart', [False, True])
+def test_recovery_turn_never_acknowledges_a_list_it_did_not_see(engine, restart):
+    e = engine
+    _, o = held_turn(e)
+    e.clock.advance(1)
+    admit(e, mid='back', text="I'm back.")
+    result = e.intake.pre_llm_call(session_id='sid', turn_id='back',
+                                  user_message="I'm back.", platform='telegram')
+    assert SUMMARY in result['context']
+    if restart:
+        # The owner turn's process died; the stored list belongs to the old process.
+        batch = json.loads(e.store.get_meta('owner_report:sid'))
+        e.store.set_meta('owner_report:sid', json.dumps({**batch, 'epoch':'old-process'}))
+        turn = 'back'
+    else:
+        # A recovery turn in the same process: no owner context, so no list.
+        turn = 'recovery'
+        assert e.intake.pre_llm_call(session_id='sid', turn_id=turn, user_message='',
+                                     platform='telegram') is None
+    e.intake.on_session_end(session_id='sid', turn_id=turn, completed=True)
+    assert e.store.held_reports(KEY) == [o]
+    assert not e.store.get_meta('owner_report:sid')
+    e.clock.advance(1)
+    admit(e, mid='again', text='Hello?')
+    again = e.intake.pre_llm_call(session_id='sid', turn_id='again', user_message='Hello?', platform='telegram')
+    assert SUMMARY in again['context']
+    e.intake.on_session_end(session_id='sid', turn_id='again', completed=True)
+    assert not e.store.held_reports(KEY)
