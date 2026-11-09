@@ -209,7 +209,7 @@ def test_desk_command_is_chat_local_and_status_cost(engine, monkeypatch):
     assert commands.handle('desk', runtime) == desk(e)
     assert 'LOCAL' in commands.handle('desk', runtime) and 'FOREIGN' not in commands.handle('desk', runtime)
     assert 'desk' in commands.HELP
-    assert 'agent spend today $0.42 of $2.00' in commands.handle('status', runtime)
+    assert 'agent spend today $0.42 of $2.00 · 1 unpriced calls not counted' in commands.handle('status', runtime)
 
 
 @pytest.mark.parametrize('kind,changes', [('every', {}), ('self', {'role': True}),
