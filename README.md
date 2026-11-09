@@ -2,7 +2,37 @@
 
 # HeartBeat 2.0
 
-**Give your Hermes agent a working life between your messages.** Put it in charge of something and it keeps working on it on its own time: in the same chat, on the same model, with everything it already knows, inside the budgets you set. It can watch a build, a log, a process or a URL and speak up only when something changed. When there's nothing worth saying, it keeps working quietly or rests.
+**Give your Hermes agent a working life between messages: wakes, watchers and roles, within daily turn and message caps.**
+
+▶ **[Watch the demo](https://x.com/ElectricSheepIO/status/2119811070089138455)**
+
+[![Latest release](https://img.shields.io/github/v/release/electricsheephq/heartbeat2)](https://github.com/electricsheephq/heartbeat2/releases/latest) [![License: Apache-2.0](https://img.shields.io/github/license/electricsheephq/heartbeat2)](https://github.com/electricsheephq/heartbeat2/blob/main/LICENSE) [![Hermes ≥ 0.21.6](https://img.shields.io/badge/Hermes-%E2%89%A5%200.21.6-blue)](https://github.com/NousResearch/hermes-agent) [![CI](https://github.com/electricsheephq/heartbeat2/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/electricsheephq/heartbeat2/actions/workflows/ci.yml)
+
+```bash
+hermes plugins install electricsheephq/heartbeat2 --enable
+```
+
+It needs Hermes ≥ 0.21.6 with a messaging gateway (Telegram, Discord, Slack, WhatsApp and the other gateway platforms) on macOS or Linux, with Python ≥ 3.11. No API keys, and nothing to install beyond what Hermes already ships. Next, allow it to start turns and try it:
+
+## Try it
+
+1. **Allow it to start turns.** Add this Hermes core key to your profile's `config.yaml` (it is kept outside the plugin's own settings on purpose), restart the messaging gateway, and send `/pulse` in your DM. It should say injection is allowed; if not, it shows the exact YAML to add.
+   ```yaml
+   plugins:
+     entries:
+       heartbeat2:
+         allow_gateway_injection: true
+   ```
+2. **Ask for something soon.** In the same DM, write: "Remind me in 5 minutes to stretch." The agent arms a one-time reminder and replies with a one-line receipt saying when it will really fire.
+3. **It writes first.** Five minutes later the reminder arrives in that chat, from the agent, with no message from you in between. `/pulse list` and `/pulse why <id>` show what happened. During quiet hours (22:00–08:00 by default) a reminder waits until they end.
+
+Next, hand it a role and watch its desk ([Your first role](#your-first-role)), or have it watch something without a timer ([What it feels like](#what-it-feels-like)).
+
+**Contents:** [What it does](#what-it-does) · [See it work](#see-it-work) · [What it feels like](#what-it-feels-like) · [Why "2.0"](#why-20) · [How it works](#how-it-works) · [Setup](#setup) · [Using it](#using-it) · [Settings](#settings) · [Guardrails](#guardrails-briefly) · [Cost](#cost) · [Security and privacy](#security-and-privacy) · [Roadmap](#roadmap) · [Known issues](#compatibility-and-known-issues) · [Troubleshooting](#troubleshooting) · [How it compares](#how-it-compares) · [Development](#development) · [Links](#links)
+
+## What it does
+
+Put your agent in charge of something and it keeps working on it on its own time: in the same chat, on the same model, with everything it already knows, inside the budgets you set. It can watch a build, a log, a process or a URL and speak up only when something changed. When there's nothing worth saying, it keeps working quietly or rests.
 
 - **Roles it owns.** "You're in charge of the release notes." A role is a standing responsibility with a charter, a notebook the agent keeps between turns, and a rhythm the agent sets itself. It doesn't expire on a timer. You can hand one over, or the agent can take one on and tell you.
 - **Its own time.** Turn on own time and the agent gets regular turns with no assigned task. It looks at its desk (its roles, what's due, what it noticed, what budget is left) and decides: work on a role, follow something up, set up a watcher, tidy its notes or memory, or rest.
@@ -113,35 +143,23 @@ Every scenario and its hard bars are in [bench/README.md](bench/README.md); the 
 
 One poller per profile runs inside the messaging gateway that serves that profile and ticks every 5 seconds. Hermes loads every profile's plugins when a gateway starts; a gateway that does not serve a profile leaves that profile's schedule alone and delivers nothing for it. A file lock guarantees only one poller even when several Hermes processes share the profile. Every fire is a durable claim with an attempt marker. An accepted turn that never starts is tried three times, and a refused injection backs off and is tried five times, before it is marked dead. A turn that started but never finished (a crash or restart) is recorded as interrupted. Hermes may auto-resume that wake turn, sometimes before heartbeat2's restart recovery has run; heartbeat2 keeps the replay silent either way, never counts it as a fire or delivery, and counts it as a model turn toward the daily cap.
 
-## Install
+## Setup
 Requires **Hermes ≥ 0.21.6** and Python ≥ 3.11 on macOS or Linux. HeartBeat 2.0 delivers into **messaging-gateway DMs** (and group or topic chats when `dm_only` is off): Telegram, Discord, Slack, WhatsApp and the other gateway platforms.
 
-```bash
-hermes plugins install electricsheephq/heartbeat2 --enable
-```
-
-Then allow the plugin to start turns in your conversations. This is a Hermes core key, deliberately kept outside the plugin's own settings:
-
-```yaml
-plugins:
-  entries:
-    heartbeat2:
-      allow_gateway_injection: true
-```
-
-Restart the messaging gateway and send `/pulse` in your DM. It shows:
+Install with the command at the top, add the `allow_gateway_injection` key shown in [Try it](#try-it), and restart the messaging gateway. Then send `/pulse` in your DM. It shows:
 - whether the scheduler is running;
 - whether injection is allowed, with the exact YAML if it isn't;
 - your local time and quiet hours;
 - today's wakes, messages, cache counts and estimated cost (or token splits).
 
-### Your first hour
+### Your first role
 
-1. **Check it can start turns.** After the restart, `/pulse` should say injection is allowed. If it shows a YAML snippet instead, the key above isn't set yet.
-2. **Hand it a role.** In your DM, for example: "You're in charge of my reading list. Summarise anything new between my messages, a few turns a day." The agent sets up the role and sends a receipt with its rhythm, what it will and won't do, and its daily budget. You can also set one up yourself with `/pulse role self <charter>` or `/pulse role every 1d at 09:00 <charter>`.
-3. **Let it work.** A role without a fixed time spreads its turns across the day by its budget: at the default 6 turns, about one every four hours. Quiet hours and the message limits hold its messages, not its work.
-4. **Look at its desk.** `/pulse desk` shows each role's last result and next turn, and today's messages, turns and cost against your limits. The agent sees the same desk.
-5. **Adjust or stop it.** `/pulse budget <id> 2/day` sets a role's daily turns; the agent can go under your number but never over it, and only this command raises it. A new budget changes how many turns the role takes a day, not how often they come: to spread them out, ask the agent to change its rhythm. `/pulse pause <id>` or `/pulse cancel <id>` stops one role, and `/pulse off` stops everything in the chat.
+A role shows its first results over a few hours, because it spreads its turns across the day. Start one once [Try it](#try-it) works:
+
+1. **Hand it a role.** In your DM, for example: "You're in charge of my reading list. Summarise anything new between my messages, a few turns a day." The agent sets up the role and sends a receipt with its rhythm, what it will and won't do, and its daily budget. You can also set one up yourself with `/pulse role self <charter>` or `/pulse role every 1d at 09:00 <charter>`.
+2. **Let it work.** A role without a fixed time starts with its turns spread across the day by its budget: at the default 6 turns, about one every four hours. Quiet hours and the message limits hold its messages, not its work.
+3. **Look at its desk.** `/pulse desk` shows each role's last result and next turn, and today's messages, turns and cost against your limits. The agent sees the same desk.
+4. **Adjust or stop it.** `/pulse budget <id> 2/day` sets a role's daily turns; the agent can go under your number but never over it, and only this command raises it. A new budget changes how many turns the role takes a day, not how often they come: to spread them out, ask the agent to change its rhythm. `/pulse pause <id>` or `/pulse cancel <id>` stops one role, and `/pulse off` stops everything in the chat.
 
 Optional: set **Own time** (`own_time_hours`, for example 6) to give the agent regular turns with no assigned task. On Discord, WhatsApp or Matrix, set `display.platforms.<platform>.tool_progress: off` so silent turns don't post progress bubbles.
 
@@ -282,18 +300,22 @@ Command watchers:
 
 The argv guard is not a sandbox: only allow programs you trust to be read-only. URL watchers refuse credentials in the URL and send no cookies, auth headers or proxy settings. Wake turns keep the conversation's normal tools and permissions. Full threat model and limits: [SECURITY.md](SECURITY.md).
 
-The default command allowlist still permits `gh -R HOST/...` and `git ls-remote <url>` to reach any host the machine can reach; v0.1.1 does not change this exception.
+The default command allowlist still permits `gh -R HOST/...` and `git ls-remote <url>` to reach any host the machine can reach; the current release keeps this exception.
 
 ## Roadmap
 
-- [v0.2: measured follow-ups, promise → useful message in an isolated rig](https://github.com/electricsheephq/heartbeat2/milestone/2)
-- [v0.3: more triggers + learning](https://github.com/electricsheephq/heartbeat2/milestone/3)
+The [roadmap tracker](https://github.com/electricsheephq/heartbeat2/issues/139) lists each milestone and what it covers.
+
+- [v0.4: work continues while you're away](https://github.com/electricsheephq/heartbeat2/milestone/12)
+- [v0.5: beyond developer tools](https://github.com/electricsheephq/heartbeat2/milestone/13)
+- [Backlog: maintenance intake](https://github.com/electricsheephq/heartbeat2/milestone/8)
 - [Research / blocked](https://github.com/electricsheephq/heartbeat2/milestone/6)
 
 ## Compatibility and known issues
-- **Delivery is to messaging-gateway chats:** DMs by default, plus group and topic chats when `dm_only` is off. Group and topic delivery is not yet tested live ([#98](https://github.com/electricsheephq/heartbeat2/issues/98)). It refuses to arm wakes from the CLI, TUI, Desktop, the API server or cron: a CLI wake would interrupt your turn, and TUI/Desktop have no silence filter for injected turns yet. Desktop and TUI wakes are planned for v0.3 ([#8](https://github.com/electricsheephq/heartbeat2/issues/8)), once Hermes core supports them.
-- **A wake turn that fails at the provider** (quota, auth, outage) shows Hermes's own failure notice in the chat. The plugin cannot suppress it ([NousResearch/hermes-agent#136749](https://github.com/NousResearch/hermes-agent/issues/136749)). HeartBeat 2.0 settles that wake once Hermes ends the turn (some provider errors leave it open until the agent timeout, [#27](https://github.com/electricsheephq/heartbeat2/issues/27)), then holds every pending wake back (5 min → 15 min → 1 h → 4 h) until a model call on the profile succeeds again. A wake already in flight when the error hits can still show one more notice. A long outage therefore costs about one notice per backoff step, not one per wake.
+- **Delivery is to messaging-gateway chats:** DMs by default, plus group and topic chats when `dm_only` is off. Group and topic delivery has passed one live test, in a Telegram forum topic ([#98](https://github.com/electricsheephq/heartbeat2/issues/98)). It refuses to arm wakes from the CLI, TUI, Desktop, the API server or cron: a CLI wake would interrupt your turn, and TUI/Desktop have no silence filter for injected turns yet. Desktop and TUI wakes are not scheduled yet: they wait on Hermes core support for silent injected turns there ([#8](https://github.com/electricsheephq/heartbeat2/issues/8), in Research / blocked).
+- **A wake turn that fails at the provider** (quota, auth, outage) shows Hermes's own failure notice in the chat. The plugin cannot suppress it ([NousResearch/hermes-agent#136749](https://github.com/NousResearch/hermes-agent/issues/136749)). HeartBeat 2.0 settles that wake once Hermes ends the turn (some provider errors leave it open until the agent timeout, [#27](https://github.com/electricsheephq/heartbeat2/issues/27), blocked upstream by [NousResearch/hermes-agent#137357](https://github.com/NousResearch/hermes-agent/issues/137357)), then holds every pending wake back (5 min → 15 min → 1 h → 4 h) until a model call on the profile succeeds again. A wake already in flight when the error hits can still show one more notice. A long outage therefore costs about one notice per backoff step, not one per wake.
 - **Silence covers the final reply.** `notify=false` keeps the agent's reply out of the chat. On platforms that show tool progress by default (Discord; WhatsApp and Matrix show new tools), each wake turn still posts a progress bubble. Telegram and Slack hide tool progress by default. To keep wakes fully silent there, set `display.platforms.<platform>.tool_progress: off`. A quiet-injection option is requested upstream ([NousResearch/hermes-agent#136825](https://github.com/NousResearch/hermes-agent/issues/136825)).
+- **Model-fallback notice.** When Hermes falls back to another model during a wake turn, its fallback notice is posted to the chat, even for a wake that stays silent ([NousResearch/hermes-agent#137738](https://github.com/NousResearch/hermes-agent/issues/137738)). The plugin cannot suppress it.
 - **Messages sent while the agent is busy.** On Signal/SimpleX, a message that waits in Hermes' queue while a turn is running (a photo, or any message when `busy_input_mode` is `queue`) reaches the agent without a message id, so HeartBeat 2.0 does not count it as your reply. The unanswered mute and the silence check-in treat you as silent until your next message. Text you send mid-turn in the default mode is counted. With the Codex app-server runtime, its native steer (text you send into a running wake turn) is not detected, so a wake that decides to stay silent can leave that steer unanswered.
 - **`/pulse` while the agent is mid-turn.** Hermes currently drops a plugin's slash command sent while the agent is running a turn: no reply, and it is not retried ([NousResearch/hermes-agent#131051](https://github.com/NousResearch/hermes-agent/issues/131051)). A `/pulse` command normally answers within seconds. If it doesn't, the agent was mid-turn (possibly a silent wake turn that posts nothing). Wait a minute and send the same command again, with its arguments (for example `/pulse off`, not bare `/pulse`). Then check its reply or `/pulse status`.
 - **Memory providers see wake text as a user turn** ([NousResearch/hermes-agent#130622](https://github.com/NousResearch/hermes-agent/issues/130622)). An external memory provider may store a wake's instructions as if you had written them.
@@ -303,6 +325,14 @@ The default command allowlist still permits `gh -R HOST/...` and `git ls-remote 
 - **Proposals (`agent_can_create: ask_first`).** A reminder the agent arms stays a proposal until you send `/pulse ok <id>`, and its receipt says "Not set yet". The reminder keeps the time you asked for: confirming late does not restart the delay. In the live benchmark, the model sometimes describes the delay as starting at confirmation (1 of 6 replies on GLM 5.3). The receipt is the source of truth.
 - **Notes, scratch, summaries and event payloads are stored in plaintext** in `<profile>/plugin-data/heartbeat2/pulse.db`. Don't watch credential files.
 - **Live proof so far:** one profile (Telegram DM, GLM model) covered a delivered follow-up, a silent verdict and survival across a gateway restart. A live-model journey smoke in an isolated rig ([round 6](https://github.com/electricsheephq/heartbeat2/issues/11#issuecomment-6241146575): GLM 5.3, pinned Hermes, loopback Bot API, 3 tries per journey) armed reminders from the owner's own words and delivered them on time in 3 of 3 tries for relative and clock-time reminders. In that run, no wake was armed on a reply or stop turn, and nothing was delivered after a stop. It measures one model on a stand-in Bot API, not a reliability rate. The deterministic benchmark suite simulates the engine; it does not measure live delivery.
+
+## Troubleshooting
+- **`/pulse` shows a YAML snippet.** The consent key isn't set yet: add it (see [Try it](#try-it)) and restart the messaging gateway.
+- **`/pulse` doesn't answer.** The agent was probably mid-turn: Hermes drops a plugin command sent during a turn. Wait a minute and send the same command again.
+- **A wake didn't fire.** `/pulse why <id>` lists its recent triggers, states and reasons, such as quiet hours, the unanswered mute, a daily cap or a busy chat. `/pulse test <id>` previews the checks without sending anything or calling a model.
+- **Arming is refused in the CLI, TUI or Desktop.** Wakes run in messaging-gateway chats only for now (see [known issues](#compatibility-and-known-issues)).
+- **A group chat is refused.** `dm_only` is on by default; turn it off in **Settings ▸ Plugins** to allow group and topic chats.
+- **The agent's messages stopped.** `/pulse desk` says why messages are held: quiet hours, the unanswered mute (after 2 unanswered messages by default) or the daily message cap. Those messages aren't sent later on their own: on your next message, or on the agent's next turn that can send, it gets a short list of the held results and tells you what still matters.
 
 ### Reporting a bug
 
@@ -337,8 +367,10 @@ python -m bench.run --baseline --gate --out bench-out  # simulation benchmark + 
 
 CI runs the unit tests on Ubuntu and macOS with Python 3.11, 3.13 and 3.14. It also runs the real-loader integration test against Hermes v0.21.6 and a pinned main commit. A mutant test applies known-bad changes to a temporary copy of the engine (replayed slots, claim CAS off, flock off, estop off, raw transform, cancel-on-reply off and more), and checks that the benchmark gate fails for each one. That keeps the gate from becoming a tautology.
 
+## Links
+[Releases](https://github.com/electricsheephq/heartbeat2/releases) · [Changelog](https://github.com/electricsheephq/heartbeat2/blob/main/CHANGELOG.md) · [Contributing](https://github.com/electricsheephq/heartbeat2/blob/main/CONTRIBUTING.md) · [Security policy](https://github.com/electricsheephq/heartbeat2/blob/main/SECURITY.md) · [License (Apache-2.0)](https://github.com/electricsheephq/heartbeat2/blob/main/LICENSE) · [Report a bug](https://github.com/electricsheephq/heartbeat2/issues/new?template=bug_report.yml)
+
 Credits: claim, refund and coalescing semantics follow Hermes core `/heartbeat`. Fingerprinting follows Hermes' cron monitor, and estop and busy ordering follow the gateway. OpenClaw's public issue reports shaped the benchmark scenarios.
 
 Built for [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Electric Sheep. Apache-2.0.
 
-Known issues: provider-exhaustion settlement (#27) remains blocked by [NousResearch/hermes-agent#137357](https://github.com/NousResearch/hermes-agent/issues/137357).
