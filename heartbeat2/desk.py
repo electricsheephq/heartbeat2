@@ -23,6 +23,20 @@ def _plain(text: str) -> str:
     return text.replace('`', "'")
 
 
+def held_report_lines(store, session_key, *, limit=5) -> tuple[list[str], list[tuple[str, str]]]:
+    pending = store.held_reports(session_key)
+    shown = pending[:limit]
+    lines = []
+    for o in shown:
+        w = store.get_wake(o.wake_id)
+        title = _plain(_clip(_oneline(w.title or w.note), 60))
+        summary = _plain(_clip(_oneline(o.summary), 160))
+        lines.append(f'- {title} ({o.wake_id}): {summary}')
+    if len(pending) > limit:
+        lines.append(f'- … {len(pending) - limit} more after these (they come back next time)')
+    return lines, [(o.wake_id, o.dedupe_key) for o in shown]
+
+
 def _rhythm(wake) -> str:
     """The role's rhythm as the owner set it: every 2m, every 1d at 09:00, cron …, or self-paced."""
     trigger = wake.trigger_json if isinstance(wake.trigger_json, dict) else {}
@@ -60,6 +74,15 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
         title = _plain(_clip(_oneline(w.title or w.note), 80))
         rows.append(f'- role {w.id} {title} · {_rhythm(w)} · last: {summary} · '
                     f'{due} · today {today}/{budget}')
+    for w in store.list_wakes(key, status='done'):
+        if not w.role: continue
+        history = [o for o in store.list_occurrences(w.id, state='done') if o.ended_at is not None]
+        last = max(history, key=lambda o: o.ended_at) if history else None
+        if last is None or now - last.ended_at > 86400: continue
+        if session.last_human_at is not None and last.ended_at <= session.last_human_at: continue
+        title = _plain(_clip(_oneline(w.title or w.note), 80))
+        summary = _plain(_clip(_oneline(last.summary or last.outcome or last.state), 80))
+        rows.append(f'- done role {w.id} {title} · finished {_time(view, last.ended_at, compact=True)} · last: {summary}')
     other = [w for w in wakes if not w.role and w.status == 'active']
     due = [(t, w) for w in other for t in (w.next_due_at, w.deadline_at) if t is not None]
     next_due = min(due, key=lambda pair: pair[0]) if due else None
@@ -76,6 +99,12 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
     tail.append(f'- Owner last wrote {age} · unanswered {session.unanswered_count} · '
                 f'messages today {messages_count(counts["delivered"], in_flight, policy.max_messages_per_day)} · '
                 f'turns today {counts["model_turns"]}/{policy.max_model_wakes_per_day}' + (' · '+cost if cost else ''))
+    reports = store.held_reports(key)
+    if reports:
+        newest = store.get_wake(reports[-1].wake_id)
+        title = _plain(_clip(_oneline(newest.title or newest.note), 40))
+        tail.append(f'- Held for you: {len(reports)} result' + ('s' if len(reports) != 1 else '') +
+                    f' your wake turns wanted to send (newest: {title})')
     held = ('quiet hours' if quiet_until(view,key) is not None else
             "the owner hasn't replied yet" if session.unanswered_count >= policy.max_unanswered else
             "today's message limit" if counts['delivered'] - own >= policy.max_messages_per_day else '')

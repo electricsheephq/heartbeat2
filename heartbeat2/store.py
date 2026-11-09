@@ -23,6 +23,7 @@ from .model import (Wake, Occurrence, Session, KINDS, WAKE_STATUSES,
 from .schedule import local_day
 
 SCHEMA_VERSION = 1
+HELD_REPORT_OUTCOMES = frozenset({'progress', 'done', 'needs_attention', 'blocked'})
 CACHE_FIELDS = {'cache_read_tokens','cache_write_tokens','warm_wakes','cold_wakes','cost_microusd','unpriced_calls'}
 LEDGER_FIELDS = frozenset({"fires", "gated_skips", "governor_skips", "model_turns",
     "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals", "checks", "no_verdict"} | CACHE_FIELDS)
@@ -191,6 +192,12 @@ class Store:
                             self.connection.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
                             if table=='occurrences' and name=='api_calls':
                                 self.connection.execute('UPDATE occurrences SET api_calls=1 WHERE tokens_in>0 OR tokens_out>0')
+                if self.get_meta('held_reports_from') is None:
+                    # Results held before 0.3.7 were never promised back: the report-back starts at the upgrade,
+                    # so an old backlog can't flood the owner's next replies.
+                    self.connection.execute("UPDATE occurrences SET held_reason = 'reported:' || substr(held_reason, 14) "
+                                            "WHERE state='done' AND held_reason LIKE 'message_held:%'")
+                    self.set_meta('held_reports_from', '0.3.7')
                 self.set_meta("schema_version", str(SCHEMA_VERSION))
         except BaseException:
             self.connection.close()
@@ -245,6 +252,20 @@ class Store:
         with self.atomic():
             self.connection.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                     (key, str(value)))
+
+    def mark_reported(self, items: list[tuple[str, str]]):
+        with self.atomic():
+            for wake_id, dedupe_key in items:
+                self.connection.execute(
+                    "UPDATE occurrences SET held_reason = 'reported:' || substr(held_reason, 14) "
+                    "WHERE wake_id=? AND dedupe_key=? AND state='done' AND held_reason LIKE 'message_held:%'",
+                    (wake_id, dedupe_key))
+
+    def held_reports(self, session_key: str) -> list[Occurrence]:
+        return sorted((o for o in self.list_occurrences(session_key=session_key, state='done')
+                       if o.held_reason.startswith('message_held:') and o.notify and not o.delivered
+                       and o.summary.strip() and o.outcome in HELD_REPORT_OUTCOMES
+                       and o.ended_at is not None), key=lambda o: o.ended_at)
 
     def owner_budget(self, wake_id: str) -> int | None:
         """The role budget the owner set with /pulse budget: the agent may go under it, never over it unasked."""
@@ -562,7 +583,9 @@ class Store:
                     OVER (PARTITION BY wake_id) AS live FROM occurrences)
                 DELETE FROM occurrences WHERE rowid IN (SELECT rid FROM ranked
                     WHERE state IN ({placeholders}) AND rank>MAX(0,?-live)
-                      AND (claimed_at IS NULL OR claimed_at<?))""",
+                      AND (claimed_at IS NULL OR claimed_at<?)
+                      AND rid NOT IN (SELECT rowid FROM occurrences WHERE state='done'
+                          AND held_reason LIKE 'message_held:%' AND notify=1 AND delivered=0))""",
                 terminal * 3 + [keep_occurrences, now - 2 * 86400])
             self.connection.execute("DELETE FROM events WHERE consumed_at IS NOT NULL AND consumed_at<?", (now - 7 * 86400,))
             self.connection.execute("DELETE FROM ledger WHERE day<?", (ledger_cutoff,))

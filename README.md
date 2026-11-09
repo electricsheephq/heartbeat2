@@ -33,7 +33,7 @@ A second real run on the same profile shows roles and the desk (the reply-quote 
 
 ![The agent's receipt for two of its three new roles, with rhythms, limits, a one-turn-a-day budget and the facts it still needs](docs/media/see-it-work-4-roles.png)
 
-**5. Its desk.** `/pulse desk` shows the view the agent gets at the start of every role turn: each role's rhythm, last result and next turn, the day's messages and turns against your limits, and why messages are held right now. (A long desk lists the most recently updated roles and counts the rest.) Here it is quiet hours: the roles' turns still run, but their replies are held, not sent or queued. The agent keeps what you should hear in its notes for when you're back.
+**5. Its desk.** `/pulse desk` shows the view the agent gets at the start of every role turn: each role's rhythm, last result and next turn, the day's messages and turns against your limits, and why messages are held right now. (A long desk lists the most recently updated roles and counts the rest.) Here it is quiet hours: the roles' turns still run, but their replies aren't sent. When you're back, the agent gets a short list of what it wanted to tell you and passes on what still matters.
 
 ![The desk listing three roles with their cron or interval rhythms and next turns, today's message and turn counts, and messages held for quiet hours](docs/media/see-it-work-5-desk.png)
 
@@ -160,7 +160,7 @@ pulse tool results name the ignored setting.
 | `/pulse add every 1d at 09:00 plan my day` | A recurring wake at a fixed time |
 | `/pulse add when silent 24h ask how the trip went` | Once per silence of that length |
 | `/pulse role self <charter>` · `/pulse role every 1d at 09:00 <charter>` | Hand the agent a role: a standing responsibility with a notebook and a daily turn budget. `self` lets the agent pace it. |
-| `/pulse desk` | The agent's desk: each role's rhythm, last result and next turn; today's messages, turns and cost against your limits; and why messages are held, if they are |
+| `/pulse desk` | The agent's desk: each role's rhythm, last result and next turn; today's messages, turns and cost against your limits; and why messages are held, if they are. Finished roles stay on it until you've written in the chat (for up to 24 hours), and it counts results held for you. |
 | `/pulse budget <id> 3/day` | Set a role's daily turns. The agent can go under your number but never over it; only this command raises it. |
 | `/pulse list` · `/pulse why <id>` | Active, proposed and paused items plus the 10 most recently created finished ones; `/pulse list all` shows everything. Why lists the last 10 trigger keys, states, reasons, matched/created and held-since times, and delivered yes/no |
 | `/pulse ledger [7d]` | Totals over the range: fires, checks, model turns, messages, replies, cache/cost and token splits |

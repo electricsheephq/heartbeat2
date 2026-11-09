@@ -312,6 +312,11 @@ class Intake:
             with s.atomic():
                 session=s.get_session(key)
                 s.cas_session(key,{'current_session_id':old},current_session_id=sid)
+                # The owner-turn list moves with its turn, so the compressed reply can still acknowledge it.
+                batch=s.get_meta('owner_report:'+old)
+                if batch:
+                    s.set_meta('owner_report:'+sid,batch)
+                    s.set_meta('owner_report:'+old,'')
                 for w in s.list_wakes(key):
                     if w.armed_session_id==old:
                         s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=sid)
@@ -581,6 +586,16 @@ class Intake:
             if not s.get_meta('human_context:'+key): return None
             s.set_meta('human_context:'+key,'')
             lines=[]
+            from .desk import held_report_lines
+            owner_session=s.get_session(key)
+            # While HeartBeat may not speak into this chat (off, estop, no injection consent, dm_only, not a gateway chat),
+            # held results stay pending: the owner's limits cover them too.
+            reports,shown=held_report_lines(s,key) if e.session_can_receive(owner_session) else ([],[])
+            if reports:
+                lines.append("HeartBeat 2.0: while the owner's limits held your messages, your wake turns finished these and wanted to tell the owner. In this reply, tell them what still matters, briefly:")
+                lines+=reports
+                # Bound to this turn and process: a recovery turn after a crash never saw the list, so it can't acknowledge it.
+                s.set_meta('owner_report:'+session_id,json.dumps({'turn':turn_id,'epoch':e.epoch,'items':shown}))
             count=int(s.get_meta('switched_notice:'+key) or 0)
             if count:
                 lines.append(f'{count} wakes armed in your previous conversation were stopped; /pulse list')
@@ -881,6 +896,16 @@ class Intake:
             if session and session.busy_epoch in (None,'',e.epoch):
                 s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             self.flights.pop(session_id,None)
+            shown=s.get_meta('owner_report:'+session_id)
+            if shown:
+                if f is None and not (failed or interrupted or completed is False):
+                    try:
+                        batch=json.loads(shown)
+                        if batch['epoch']==e.epoch and batch['turn']==turn_id:
+                            s.mark_reported(batch['items'])
+                    except (ValueError,TypeError,KeyError):
+                        pass
+                s.set_meta('owner_report:'+session_id,'')
             if f is None or f.invalid: return None
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
             if o is None or o.state!='started' or o.attempt!=f.attempt: return None
@@ -896,6 +921,14 @@ class Intake:
             silenced=o.force_silent or not o.notify or not e.policy.enabled or not session.enabled or e.paused()
             delivered=bool(o.notify and not silenced and not f.owner_replied)
             if not s.finish(o.wake_id,o.dedupe_key,attempt=o.attempt,outcome=o.outcome or 'unreported',delivered=delivered,force_silent=silenced): return None
+            shown=s.get_meta('report_shown:'+o.id)
+            if shown:
+                try:
+                    items=json.loads(shown)
+                    if delivered: s.mark_reported(items)
+                except (ValueError,TypeError):
+                    pass
+                s.set_meta('report_shown:'+o.id,'')
             if f.scratch is not None:
                 s.cas_wake(w.id,w.status,expected_version=w.version,scratch=f.scratch)
             if delivered and session:
