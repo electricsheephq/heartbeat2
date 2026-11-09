@@ -1,7 +1,7 @@
 """A bounded, read-only view of this chat's responsibilities and budgets."""
 from types import SimpleNamespace
 
-from .commands import _clip, _oneline, _time, quiet_until
+from .commands import _clip, _oneline, _time, messages_count, quiet_until
 from .policy import is_watcher
 from .schedule import quiet_end, zone
 from .wake_text import _age
@@ -37,7 +37,7 @@ def _rhythm(wake) -> str:
     return wake.kind
 
 
-def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=len) -> str:
+def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=len, turn=None) -> str:
     store = getattr(engine_or_store, 'store', engine_or_store)
     now, key = clock.now(), session.session_key
     # The existing command formatters/override resolver need only these read seams.
@@ -68,14 +68,17 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
             (f'{_time(view,next_due[0],compact=True)} ({_clip(_oneline(next_due[1].title or next_due[1].note),40)})'
              if next_due else 'none')]
     counts = store.daily_counts(key, zone(timezone))
+    in_flight = store.messages_in_flight(key)
+    # Inside a wake's own text, its own reserved slot is not a held message: its cap check ran before it was claimed.
+    own = int(turn is not None and turn.state in {'claimed', 'started'} and not turn.force_silent)
     age = _age(now-session.last_human_at) + ' ago' if session.last_human_at is not None else 'unknown'
     cost = cost_line(store,key,zone(timezone),policy)
     tail.append(f'- Owner last wrote {age} · unanswered {session.unanswered_count} · '
-                f'messages today {counts["delivered"]}/{policy.max_messages_per_day} · '
+                f'messages today {messages_count(counts["delivered"], in_flight, policy.max_messages_per_day)} · '
                 f'turns today {counts["model_turns"]}/{policy.max_model_wakes_per_day}' + (' · '+cost if cost else ''))
     held = ('quiet hours' if quiet_until(view,key) is not None else
             "the owner hasn't replied yet" if session.unanswered_count >= policy.max_unanswered else
-            "today's message limit" if counts['delivered'] >= policy.max_messages_per_day else '')
+            "today's message limit" if counts['delivered'] - own >= policy.max_messages_per_day else '')
     if held: tail.append('- Messages held now: '+held)
     omitted = 0
     while True:

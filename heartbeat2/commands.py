@@ -20,6 +20,12 @@ HELP = ('/pulse status | desk | list [all] | ledger [7d] | why <id> | add in 2h 
         'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
 
 
+def messages_count(delivered, in_flight, cap):
+    """Messages sent today against the cap. A running wake turn holds a slot until it ends; show it as in progress, not sent."""
+    sent = max(0, delivered - in_flight)
+    return f'{sent}/{cap}' + (f' (+{in_flight} in progress)' if in_flight else '')
+
+
 def quiet_until(engine, session_key, *, urgent=False, now=None):
     if urgent and engine.policy.quiet_hours_urgent: return None
     now = engine.clock.now() if now is None else now
@@ -240,7 +246,7 @@ def handle(raw_args, runtime):
                          + (f' ({status["reason"]})' if status.get('reason') else ''),
                          f'allow_gateway_injection: {str(engine.injection_allowed()).lower()}',
                          f'Local time: {_time(engine,engine.clock.now())} · quiet: {quiet_label}',
-                         f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {daily["delivered"]}/{engine.policy.max_messages_per_day} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
+                         f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {messages_count(daily["delivered"],engine.store.messages_in_flight(key),engine.policy.max_messages_per_day)} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
                          f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
                 held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
                 if engine.policy.daily_cost_limit_usd:

@@ -342,6 +342,11 @@ class Store:
                 'SELECT count(*) FROM occurrences WHERE wake_id=? AND claimed_at>=? AND claimed_at<?',
                 (wake_id, day.timestamp(), (day + timedelta(days=1)).timestamp())).fetchone()[0]
 
+    def messages_in_flight(self, key):
+        """Wake turns still running that hold a message slot: daily_counts counts them as delivered until they finish."""
+        return sum(1 for o in self.list_occurrences(session_key=key)
+                   if o.state in {'claimed', 'started'} and not o.force_silent)
+
     def daily_counts(self, key, timezone):
         totals = {'model_turns': 0, 'delivered': 0}
         day = local_day(self.clock.now(), timezone)

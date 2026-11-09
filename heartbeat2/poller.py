@@ -657,7 +657,7 @@ class Poller:
              after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
              cache_line=cache_line,marker_tag=tag,
              desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
-                              measure=lambda text: len(escape_text(text)))
+                              measure=lambda text: len(escape_text(text)),turn=o)
                   if w.role or w.trigger_json.get('own_time') else '')
         if not self.eligible():
             # Lost the home after claiming: give the claim back unsent, as it was.

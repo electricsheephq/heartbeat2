@@ -11,7 +11,7 @@ from test_v03_fix1 import command, own
 
 
 CONTRACT = ('- outcome: progress when you did something useful, even silently '
-            '(always include a summary of what you did; silent progress without one counts as idle); '
+            '(always include a summary of what you did, written as a plain sentence, since the owner sees role summaries on the desk; silent progress without one counts as idle); '
             'no_change when there was nothing to do; done when the work is finished for good; '
             'blocked or needs_attention when you need the owner.')
 
