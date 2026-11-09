@@ -181,3 +181,24 @@ def test_finished_role_expires_after_24_hours(engine):
 def test_bad_reported_through(engine, value):
     if value is not None: engine.store.set_meta('reported_through:' + KEY, value)
     assert engine.store.reported_through(KEY) == 0.0
+
+
+def test_ceiling_above_a_lowered_profile_maximum(engine, monkeypatch):
+    """#141: the clamp note names the number applied, and an owner-asked lowering records the owner's number."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from heartbeat2 import commands
+    from test_v0113 import owner_turn
+    e = engine
+    monkeypatch.setattr(commands, 'session_env', lambda n: KEY if n == 'HERMES_SESSION_KEY' else '')
+    role = arm(e, 'every', role=True, title='Notes', trigger_json={'kind': 'every', 'every': '2h'})
+    e.policy = replace(e.policy, role_turns_per_day_max=5)
+    commands.handle(f'budget {role.id} 8/day', SimpleNamespace(get_engine=lambda: e))
+    assert e.store.owner_budget(role.id) == 8
+    result = e.tool.handle(dict(action='update', id=role.id, budget={'turns_per_day': 9}), session_id='other')
+    assert result['wake']['budget_turns_per_day'] == 5
+    assert 'role_turns_per_day_max' in result['clamped']['budget.turns_per_day']
+    assert '/pulse budget' not in result['clamped']['budget.turns_per_day']
+    owner_turn(e)
+    e.tool.handle(dict(action='update', id=role.id, budget={'turns_per_day': 6}, owner_asked=True), session_id='sid')
+    assert e.store.owner_budget(role.id) == 6

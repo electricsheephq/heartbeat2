@@ -240,7 +240,8 @@ class Tool:
                                 if budget > limit:
                                     request = {**args, 'budget':{'turns_per_day':limit}}
                                     budget_clamps['budget.turns_per_day'] = f'{budget} → {limit} (wake_turn cannot raise budget)'
-                            elif ceiling is not None and budget > ceiling:
+                            elif ceiling is not None and budget > ceiling and ceiling < e.policy.role_turns_per_day_max:
+                                # A ceiling at or above the profile maximum is enforced by that maximum's own clamp and note.
                                 # A budget the owner set is their limit: only their own /pulse budget command raises it.
                                 request = {**args, 'budget':{'turns_per_day':ceiling}}
                                 budget_clamps['budget.turns_per_day'] = (f'{budget} → {ceiling} (the owner set this budget; to raise it, '
@@ -301,7 +302,7 @@ class Tool:
                         e.cancel_occurrences(w.id,'paused' if action=='pause' else 'cancelled',preserve_started=True)
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
                     w=e.store.get_wake(w.id)
-                    if action == 'update' and owner_lowered: e.store.set_owner_budget(w.id,w.budget_turns_per_day)  # owner-asked lowering
+                    if action == 'update' and owner_lowered: e.store.set_owner_budget(w.id,max(1,budget))  # the number the owner asked for
                     item={'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':clamps,'cache':self.cache_result(w)}
                     if action in {'update','resume'}: item['receipt']=self.receipt(w,s)
                     results.append(item)

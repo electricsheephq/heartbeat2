@@ -4,6 +4,7 @@
 
 - **Held results come back.** When your limits hold the agent's messages, HeartBeat keeps the summaries it wanted to send. On your next message, or its next role or own-time turn that can send, the agent gets a short list and passes on what still matters. There is no extra message or turn, and your limits stay the same.
 - **Finished roles stay on the desk.** A role's final result stays visible until you've written in the chat, for up to 24 hours.
+- **Role ceilings above a lowered profile maximum.** When a budget you set is above `role_turns_per_day_max`, the clamp note now names the maximum actually applied. A lowering you ask the agent for records your number, not the capped one (#141).
 
 ## 0.3.6 — 2026-11-09
 

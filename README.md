@@ -151,8 +151,6 @@ its last good value, and your other changes still apply. `/pulse status` and
 pulse tool results name the ignored setting.
 
 ## Using it
-
-Finished roles stay on the desk until you've written in the chat, for up to 24 hours.
 **You**, in the chat:
 
 | Command | What it does |
@@ -162,7 +160,7 @@ Finished roles stay on the desk until you've written in the chat, for up to 24 h
 | `/pulse add every 1d at 09:00 plan my day` | A recurring wake at a fixed time |
 | `/pulse add when silent 24h ask how the trip went` | Once per silence of that length |
 | `/pulse role self <charter>` · `/pulse role every 1d at 09:00 <charter>` | Hand the agent a role: a standing responsibility with a notebook and a daily turn budget. `self` lets the agent pace it. |
-| `/pulse desk` | The agent's desk: each role's rhythm, last result and next turn; today's messages, turns and cost against your limits; and why messages are held, if they are |
+| `/pulse desk` | The agent's desk: each role's rhythm, last result and next turn; today's messages, turns and cost against your limits; and why messages are held, if they are. Finished roles stay on it until you've written in the chat (for up to 24 hours), and it counts results held for you. |
 | `/pulse budget <id> 3/day` | Set a role's daily turns. The agent can go under your number but never over it; only this command raises it. |
 | `/pulse list` · `/pulse why <id>` | Active, proposed and paused items plus the 10 most recently created finished ones; `/pulse list all` shows everything. Why lists the last 10 trigger keys, states, reasons, matched/created and held-since times, and delivered yes/no |
 | `/pulse ledger [7d]` | Totals over the range: fires, checks, model turns, messages, replies, cache/cost and token splits |
