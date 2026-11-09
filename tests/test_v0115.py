@@ -33,10 +33,10 @@ def test_update_rejects_event_without_changing_wake(engine):
     assert engine.store.get_wake(w.id) == w
 
 
-def test_trigger_schema_drops_event_without_adding_filters():
+def test_trigger_schema_drops_event_and_adds_kanban_filters():
     fields = PARAMETERS['properties']['trigger']['properties']
     assert 'event' not in fields
-    assert 'task_id' not in fields and 'board' not in fields
+    assert fields['task_id']['type'] == fields['board']['type'] == 'string'
 
 
 @pytest.mark.parametrize('status', ['active','paused','proposed'])

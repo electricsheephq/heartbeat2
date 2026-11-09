@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.8 — 2026-11-11
+
+- **Rest until the work is ready.** The agent can pause one wake with `pause_for: "12h"` and resume it on its own. An owner pause replaces that timer, and owner controls and governor pauses keep priority (#134).
+- **Watch one task or board.** Kanban watchers accept `task_id` and `board` filters and name them in their receipts (#135).
+- **Priced spend, checked before a turn.** The daily cost setting now explains that it stops new agent turns once today's priced spend reaches the limit, cannot cap a turn already running, and does not count unpriced calls. Status and desk label those calls as not counted (#136).
+
 ## 0.3.7 — 2026-11-10
 
 - **Held results come back.** When your limits hold the agent's messages, HeartBeat keeps the summaries it wanted to send. On your next message, or its next role or own-time turn that can send, the agent gets a short list and passes on what still matters. It shows up to five at a time, oldest first; the rest come back next time. A result counts as passed on only once your reply finishes or the agent's message is sent, so a failed, interrupted or restarted turn leaves it waiting. It starts with this version: results held under earlier versions don't come back. There is no extra message or turn, and your limits stay the same.

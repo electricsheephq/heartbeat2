@@ -64,7 +64,7 @@ def test_settings_and_manifest():
     assert schema['daily_cost_limit_usd']['type'] in {'float', 'number'}
     assert schema['daily_cost_limit_usd']['min'] == 0
     assert schema['own_time_hours']['label'] == 'Own time (hours between turns)'
-    assert schema['daily_cost_limit_usd']['label'] == "Daily cost limit for the agent's own turns (USD)"
+    assert schema['daily_cost_limit_usd']['label'] == "Daily priced-spend limit for the agent's own turns (USD)"
 
 
 @pytest.mark.parametrize('setting,value', [('own_time_hours', 169), ('own_time_hours', -1),
@@ -177,7 +177,7 @@ def test_desk_records_counts_local_times_and_bound(engine, monkeypatch):
     assert f'- role {paused.id}' in out and 'paused · command' in out
     assert '- Other: 1 wakes, 1 watchers · next due 12:02 (Next item)' in out
     assert 'Owner last wrote 3h 10m ago · unanswered 1 · messages today 2/6 · turns today 5/24' in out
-    assert 'cost today $0.42 of $2.00 · 2 unpriced' in out
+    assert 'cost today $0.42 of $2.00 · 2 unpriced calls not counted' in out
     assert 'Messages held now:' not in out
     e.store.set_meta('quiet:' + KEY, '{"range":"00:00-23:59"}')
     assert 'Messages held now: quiet hours' in desk(e)
@@ -243,7 +243,7 @@ def test_cost_uses_local_day_and_excludes_owner_and_unpriced(engine):
     for n, extra in enumerate([{'creator': 'user'}, {'owner_requested': True}]):
         owner = arm(e, 'at', **extra)
         priced(e, owner, 1000000, key=f'owner:{n}')
-    assert 'cost today $0.10 of $0.50 · 4 unpriced' in desk(e)
+    assert 'cost today $0.10 of $0.50 · 4 unpriced calls not counted' in desk(e)
     e.dispatch(pending(e, w, 'allowed'))
     assert len(e.ctx.calls) == 1
 
