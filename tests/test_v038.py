@@ -318,6 +318,20 @@ def test_reaction_message_filter_matches_only_that_message(engine):
     assert len(engine.store.list_occurrences(w.id)) == 1
 
 
+@pytest.mark.parametrize('stored,sent,fires', [('None', None, False), ('None', 'missing', False),
+                                               (' 90 ', '90', True), ('90', ' 90', True), ('90', 90, True)])
+def test_reaction_message_filter_edges(engine, stored, sent, fires):
+    result = engine.tool.handle(dict(action='create', note='Reaction.',
+                                    trigger={'kind': 'reaction', 'message_id': stored}), session_id='sid')
+    assert result.get('ok'), result
+    w = engine.store.get_wake(result['wake']['id'])
+    payload = {'chat_id': 'unit', 'emojis': ['yes']}
+    if sent != 'missing': payload['message_id'] = sent
+    engine.intake.gateway_platform_event(platform='telegram', event_type='reaction', payload=payload)
+    engine.events()
+    assert bool(engine.store.list_occurrences(w.id)) is fires
+
+
 def test_reaction_without_message_filter_still_matches_any_message(engine):
     result = engine.tool.handle(dict(action='create', note='Any reaction.',
                                     trigger={'kind': 'reaction', 'emojis': ['yes']}), session_id='sid')

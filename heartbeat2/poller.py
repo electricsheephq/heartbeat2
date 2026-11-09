@@ -325,7 +325,9 @@ class Poller:
         filters=w.trigger_json
         if w.kind=='reaction' and filters.get('emojis') and not set(filters['emojis']) & set(payload.get('emojis',[])): return
         if any(filters.get(k) is not None and payload.get(k)!=filters[k] for k in ('task_id','board')): return
-        if w.kind=='reaction' and filters.get('message_id') is not None and str(payload.get('message_id'))!=filters['message_id']: return
+        if w.kind=='reaction' and filters.get('message_id') is not None:
+            mid=payload.get('message_id')
+            if mid is None or str(mid).strip()!=str(filters['message_id']).strip(): return
         if w.kind=='api_error':
             last=float(s.get_meta('api_cooldown:'+w.id) or 0)
             if last and self.clock.now()-last<1800: return
