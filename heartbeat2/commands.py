@@ -191,11 +191,11 @@ def _add(engine, session, text, *, role=False):
             trigger, note = {'kind':'owner_silent','after':match['duration']}, match['note']
     if role and trigger['kind'] not in {'every','self'}:
         raise ValueError('role_needs_recurring')
-    wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command', role=role,
-        platform=session.platform, chat_type=session.chat_type, chat_id=session.chat_id,
-        armed_session_id=session.current_session_id, title=_clip(note,80))
     with engine.store.atomic():
         session=engine.store.get_session(session.session_key)
+        wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command', role=role,
+            platform=session.platform, chat_type=session.chat_type, chat_id=session.chat_id,
+            armed_session_id=session.current_session_id, title=_clip(note,80))
         _activation(engine,session,wake)
         result = engine.tool.prepare(wake, {'trigger':trigger})
         created = engine.store.create_wake(result.wake)
@@ -210,14 +210,15 @@ class _DryRun(Exception):
     pass
 
 
-def _test(engine,w,session,cache_line):
-    o=Occurrence(w.id,f'r:{engine.clock.now():.17g}',payload_json=[{'message':'The owner asked to run this now (/pulse run).'}])
+def _test(engine,w,session,cache_line,wake_cache=''):
+    # Dispatch claims first, so the turn it sends carries attempt 1 and the dispatch cache line.
+    o=Occurrence(w.id,f'r:{engine.clock.now():.17g}',payload_json=[{'message':'The owner asked to run this now (/pulse run).'}],attempt=1)
     try:
         with engine.store.atomic():
             reason,defer,until=engine.gate(w,o,session)
             message_held=engine.message_hold_reason(w,session)
             text=engine.render_occurrence(w,replace(o,force_silent=bool(message_held)),session,
-                                         message_held=message_held,cache_line=cache_line,held_reports='')
+                                         message_held=message_held,cache_line=wake_cache,held_reports='')
             raise _DryRun
     except _DryRun: pass
     reasons={'quiet_hours':'quiet hours','busy':'chat is busy','daily_model_cap':'daily model cap',
@@ -229,7 +230,7 @@ def _test(engine,w,session,cache_line):
         (' until '+_time(engine,until) if until is not None else '')+
         (' (held; it would wait)' if defer else ' (it would be skipped)') if reason else 'yes')
     next_fire=(_time(engine,w.next_due_at) if w.kind in TIME_KINDS else f'on {w.kind} events' if w.kind in EVENT_KINDS else
-               f'every {w.trigger_json["check_every"]}' if w.kind in PROBE_KINDS else 'on owner silence')
+               'every '+cache.minutes(float(w.trigger_json["check_every"])) if w.kind in PROBE_KINDS else 'on owner silence')
     return '\n'.join([f'Test {w.id} (dry run: nothing sent, no model call)',verdict,'Next: '+next_fire,
                       *([cache_line] if cache_line else []),'Wake text:',_clip(text,1500)])
 
@@ -239,17 +240,12 @@ def handle(raw_args, runtime):
     if not key or key == 'default': return 'Error: /pulse needs the invoking gateway session.'
     try:
         engine = runtime.get_engine()
+        engine.refresh()  # Never inside a transaction: refresh takes the policy lock before the store lock.
         action, _, rest = (raw_args or 'status').strip().partition(' ')
         rest = rest.strip()
-        if action in {'run','test'}:
-            try:
-                with engine.store.atomic():
-                    engine.refresh()
-                    raise _DryRun
-            except _DryRun: pass
-        else: engine.refresh()
         preview=engine.store.get_wake(rest) if action=='test' else None
         cache_line=engine.tool.cache_result(preview) if preview and preview.session_key==key else ''
+        wake_cache=engine.cache_line(preview) if preview and preview.session_key==key else ''
         with engine.store.atomic():
             session = engine.store.get_session(key)
             bound={name:session_env('HERMES_SESSION_'+name.upper()) for name in ('platform','chat_type','chat_id')}
@@ -269,10 +265,12 @@ def handle(raw_args, runtime):
                 wake=engine.store.get_wake(rest)
                 if wake is None or wake.session_key!=key: return 'Error: unknown item in this chat.'
                 if wake.status in FINISHED_STATUSES: raise ValueError('it has finished')
-                if action=='test': return _test(engine,wake,session,cache_line)
+                if action=='test': return _test(engine,wake,session,cache_line,wake_cache)
                 if wake.status=='proposed': raise ValueError(f'approve it first with /pulse ok {wake.id}')
                 if wake.status=='paused': raise ValueError(f'resume it first with /pulse resume {wake.id}')
                 if wake.kind=='at': raise ValueError(f'a one-time reminder fires once at its time; preview it with /pulse test {wake.id}')
+                if wake.kind=='owner_silent' or wake.trigger_json.get('builtin'):
+                    raise ValueError(f'this one fires on its own when its time comes; preview it with /pulse test {wake.id}')
                 occurrences=engine.store.list_occurrences(wake.id)
                 if any(o.state in {'claimed','started'} for o in occurrences): return f'{wake.id} is running now.'
                 if any(o.state=='pending' for o in occurrences): return f'Already queued: {wake.id} runs on the next check.'

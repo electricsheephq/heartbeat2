@@ -242,7 +242,9 @@ class Store:
                 else:
                     self.connection.commit()
                     callbacks, self._after_commit = self._after_commit, []
-        for callback in callbacks: callback()
+        for callback in callbacks:
+            try: callback()
+            except Exception: pass  # Display-only work after a commit must never fail the committed caller.
 
     def after_commit(self, callback):
         with self._lock:

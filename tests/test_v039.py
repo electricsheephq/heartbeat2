@@ -146,25 +146,23 @@ def test_preview_quiet_hours_is_held(engine, command):
     assert snapshot(e) == before
 
 
-def test_preview_rolls_back_gate_and_refresh_metadata(engine, command):
+def test_preview_rolls_back_gate_metadata(engine, command):
+    # gate() cleans a stale provider trial; the dry run must roll that back. Settings refresh runs before
+    # any transaction, as for every /pulse command (inside one it would invert the policy/store lock order).
     e = engine
     w = arm(e, 'every')
     health = {'until': e.clock.now()-1, 'trial': 'gone/r:0'}
     e.store.set_meta('provider_health', json.dumps(health))
-    def refresh():
-        e.store.set_meta('preview_refresh', 'temporary refresh notice')
     before = snapshot(e)
-    # Keep refresh policy well formed while making its metadata write observable.
-    e.refresh_policy = lambda: (refresh(), e.policy)[1]
     out = command('test '+w.id)
     assert 'Would run now: yes' in out
     assert snapshot(e) == before
 
 
 @pytest.mark.parametrize('kind,trigger,next_label', [
-    ('file', {'check_every': 60, 'path': 'not-read'}, 'every 60'),
-    ('url', {'check_every': 90, 'url': 'https://example.invalid'}, 'every 90'),
-    ('command', {'check_every': 120, 'command': ['false']}, 'every 120'),
+    ('file', {'check_every': 60, 'path': 'not-read'}, 'every 1m'),
+    ('url', {'check_every': 90, 'url': 'https://example.invalid'}, 'every 1.5m'),
+    ('command', {'check_every': 120, 'command': ['false']}, 'every 2m'),
     ('reaction', {}, 'on reaction events'),
 ])
 def test_preview_never_runs_watchers(engine, command, monkeypatch, kind, trigger, next_label):
@@ -290,3 +288,24 @@ def test_unfiltered_owner_views_keep_existing_text(engine, command):
     assert e.tool.receipt(w, e.store.get_session(KEY)) == 'Waits for reaction events. Wakes are at least 10 min apart, so it can land a few minutes late.'
     assert 'Filters:' not in command('why '+w.id)
     assert 'reaction · next ' in command('list')
+
+
+@pytest.mark.parametrize('kind,trigger', [('owner_silent', {'kind': 'owner_silent', 'after': '24h'}),
+                                          ('every', {'kind': 'every', 'every': '6h', 'builtin': True})])
+def test_run_refuses_wakes_that_fire_on_their_own(engine, command, kind, trigger):
+    e = engine
+    w = arm(e, kind, trigger_json=trigger)
+    before = snapshot(e)
+    out = command('run '+w.id)
+    assert out.startswith('Error:') and 'fires on its own' in out and '/pulse test '+w.id in out
+    assert snapshot(e) == before and not e.store.list_occurrences(w.id)
+
+
+@pytest.mark.parametrize('verb', ['run', 'test', 'list'])
+def test_refresh_runs_outside_any_transaction(engine, command, verb):
+    # Refresh takes the runtime policy lock and then the store lock; inside a transaction that order inverts (deadlock).
+    w = arm(engine, 'every')
+    seen, original = [], engine.refresh
+    engine.refresh = lambda: (seen.append(engine.store.connection.in_transaction), original())[1]
+    command(f'{verb} {w.id}' if verb != 'list' else 'list')
+    assert seen and not any(seen)
