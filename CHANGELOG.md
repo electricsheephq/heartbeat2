@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.8 — 2026-11-11
+## 0.3.8 — 2026-11-10
 
 - **Rest until the work is ready.** The agent can pause one wake with `pause_for: "12h"` and resume it on its own. An owner pause replaces that timer, and owner controls and governor pauses keep priority (#134).
 - **Watch one task or board.** Kanban watchers accept `task_id` and `board` filters and name them in their receipts (#135).
