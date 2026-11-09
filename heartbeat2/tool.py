@@ -442,7 +442,7 @@ class Tool:
         text=' '.join(parts)
         if len(text)>240: text=text.replace('Wakes are at least ','Wakes at least ').replace(' min apart, so it can land a few minutes late.',' min apart; may land a few minutes late.')
         if len(text)>240: text=' '.join(x for x in parts if not x.startswith('Wakes are at least '))
-        if len(text)>240:
+        if len(text)>240 and w.status!='proposed':  # A proposal shows its whole filters before approval.
             text=text[:239]
             boundary=text.rfind('. ')
             text=(text[:boundary+1] if boundary>=0 else text)+'…'

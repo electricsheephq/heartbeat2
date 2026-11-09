@@ -130,7 +130,8 @@ def test_preview_is_read_only_for_nonfinished_wakes(engine, command, kind, statu
     before = snapshot(e)
     out = command('test '+w.id)
     assert out.startswith(f'Test {w.id} (dry run: nothing sent, no model call)\n')
-    assert ('Would run now: yes' if status == 'active' else 'Would run now: no — wake is '+('paused' if kind == 'reaction' else 'not active')) in out
+    label = 'Would run on a match now: ' if kind == 'reaction' else 'Would run now: '
+    assert label+('yes' if status == 'active' else 'no — wake is '+('paused' if kind == 'reaction' else 'not active')) in out
     assert 'Wake text:\n' in out
     assert ('Next: '+commands._time(e,w.next_due_at) if kind != 'reaction' else 'Next: on reaction events') in out
     assert snapshot(e) == before and not e.ctx.calls
@@ -345,3 +346,73 @@ def test_run_refuses_watchers(engine, command, kind, trigger):
     e.clock.advance(601)
     e.times()
     assert [o.dedupe_key[:2] for o in e.store.list_occurrences(w.id)] == ['t:']
+
+
+@pytest.mark.parametrize('kind', ['at', 'every'])
+def test_preview_shows_the_scheduled_fire_not_a_run_request(engine, command, kind):
+    w = arm(engine, kind, next_due_at=engine.clock.now()+3600)
+    out = command('test '+w.id)
+    assert '/pulse run' not in out and 'Would run now: yes' in out
+
+
+def test_preview_uses_the_waiting_occurrence_and_its_retry_backoff(engine, command):
+    e = engine
+    w = arm(e, 'every', next_due_at=e.clock.now()+3600)
+    assert command('run '+w.id).startswith('Queued ')
+    o, = e.store.list_occurrences(w.id)
+    e.store.set_meta('not_before:'+o.id, str(e.clock.now()+600))
+    before = snapshot(e)
+    out = command('test '+w.id)
+    assert 'Would run now: no — waiting to retry a failed delivery (held; it would wait)' in out
+    assert 'The owner asked to run this now (/pulse run).' in out
+    assert snapshot(e) == before
+
+
+@pytest.mark.parametrize('kind,trigger', [('reaction', {}), ('command', {'check_every': 60, 'command': ['true']})])
+def test_preview_watcher_verdict_is_conditional_on_a_match(engine, command, kind, trigger):
+    w = arm(engine, kind, trigger_json=trigger)
+    out = command('test '+w.id)
+    assert 'Would run on a match now: yes' in out and 'Would run now:' not in out
+
+
+def test_failed_commit_drops_queued_after_commit_work(engine):
+    s, ran = engine.store, []
+    real = s.connection
+    class Failing:
+        def __getattr__(self, name): return getattr(real, name)
+        def commit(self): raise RuntimeError('disk full')
+    s.connection = Failing()
+    try:
+        with pytest.raises(RuntimeError):
+            with s.atomic():
+                s.set_meta('probe', '1')
+                s.after_commit(lambda: ran.append('stale'))
+    finally:
+        s.connection = real
+        if real.in_transaction: real.rollback()
+    with s.atomic():
+        s.set_meta('probe', '2')
+    assert ran == []
+
+
+def test_deferred_card_pricing_failure_is_logged(engine, caplog):
+    w = arm(engine, 'command', next_due_at=engine.clock.now()+7200)
+    calls = []
+    def price(wake):
+        calls.append(wake.id)
+        if len(calls) > 1: raise RuntimeError('pricing unavailable')
+        return ''
+    engine.tool.cache_result = price
+    with caplog.at_level('WARNING', logger='heartbeat2'):
+        with engine.store.atomic():
+            governor.pause(engine, w, 'noop')
+    assert engine.store.get_wake(w.id).status == 'paused' and engine.store.get_meta('card:'+w.id) == 'noop'
+    assert any('card pricing failed' in r.getMessage() for r in caplog.records)
+
+
+def test_proposed_watcher_receipt_keeps_long_filters(engine):
+    e = engine
+    task = 'task-'+'x'*150
+    w = arm(e, 'kanban_completed', status='proposed', trigger_json={'kind': 'kanban_completed', 'task_id': task, 'board': 'board-'+'y'*60})
+    text = e.tool.receipt(w, e.store.get_session(KEY))
+    assert 'for task '+task in text and 'on board board-' in text and text.startswith('Not set yet:')

@@ -4,6 +4,7 @@ The no-op digest idea follows Hermes hermes_cli/loops.py::_digest_response;
 all value and pause decisions here use structured occurrence fields.
 """
 from dataclasses import replace
+import logging
 from .model import RECURRING_KINDS, PROBE_KINDS
 from .schedule import local_day, next_cron, next_every, parse_duration
 
@@ -44,7 +45,7 @@ def pause(engine,wake,rule):
                     if latest.version==paused.version and latest.status=='paused' and s.get_meta('card:'+paused.id)==written:
                         s.set_meta('card:'+paused.id,rule+(' · '+label if label else ''))
             except Exception:
-                pass
+                logging.getLogger('heartbeat2').warning('governor card pricing failed; the card stays unpriced', exc_info=True)
         s.after_commit(price_card)
         for o in s.list_occurrences(current.id,state='started'):
             if o.outcome is None:

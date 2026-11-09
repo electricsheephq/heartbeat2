@@ -241,7 +241,12 @@ class Store:
                 if nested:
                     self.connection.execute(f"RELEASE {name}")
                 else:
-                    self.connection.commit()
+                    try:
+                        self.connection.commit()
+                    except BaseException:
+                        # A failed commit leaves nothing committed: its after-commit work must never run later.
+                        del self._after_commit[checkpoint:]
+                        raise
                     callbacks, self._after_commit = self._after_commit, []
         for callback in callbacks:
             try: callback()

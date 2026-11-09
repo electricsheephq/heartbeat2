@@ -211,8 +211,14 @@ class _DryRun(Exception):
 
 
 def _test(engine,w,session,cache_line,wake_cache=''):
-    # Dispatch claims first, so the turn it sends carries attempt 1 and the dispatch cache line.
-    o=Occurrence(w.id,f'r:{engine.clock.now():.17g}',payload_json=[{'message':'The owner asked to run this now (/pulse run).'}],attempt=1)
+    # Preview what dispatch would send next: a waiting occurrence (its payload and any retry backoff), else a plain
+    # scheduled fire. Dispatch claims first, so the turn carries the next attempt and the dispatch cache line.
+    waiting=[x for x in engine.store.list_occurrences(w.id) if x.state=='pending']
+    if waiting: o=replace(waiting[0],attempt=(waiting[0].attempt or 0)+1)
+    else:
+        key=('s:'+session.episode_id if w.kind=='owner_silent' and session is not None and session.episode_id else
+             f't:{engine.clock.now():.17g}')
+        o=Occurrence(w.id,key,attempt=1)
     try:
         with engine.store.atomic():
             # When HeartBeat is off or paused for the whole profile, tick() refuses before gate() and the claim barrier after it: nothing is sent.
@@ -228,8 +234,11 @@ def _test(engine,w,session,cache_line,wake_cache=''):
         'session_off':'this chat is off','session_paused':'this chat is paused','injection_disabled':'gateway injection is disabled',
         'wake_inactive':'wake is not active','held_paused':'wake is paused','wake_spacing':'wake spacing',
         'in_flight':'another wake is running','provider_unavailable':'provider unavailable','dm_only':'DMs only',
-        'plugin_off':'HeartBeat 2.0 is off in settings','paused_all':'HeartBeat 2.0 is paused'}
-    verdict='Would run now: '+('no — '+reasons.get(reason,reason)+
+        'plugin_off':'HeartBeat 2.0 is off in settings','paused_all':'HeartBeat 2.0 is paused',
+        'not_before':'waiting to retry a failed delivery','checkin_not_due':'the owner has not been quiet long enough'}
+    # A watcher with nothing waiting runs only when what it watches changes; its probe isn't run here.
+    label='Would run on a match now: ' if w.kind in PROBE_KINDS|EVENT_KINDS and not waiting else 'Would run now: '
+    verdict=label+('no — '+reasons.get(reason,reason)+
         (' until '+_time(engine,until) if until is not None else '')+
         (' (held; it would wait)' if defer else ' (it would be skipped)') if reason else 'yes')
     next_fire=(_time(engine,w.next_due_at) if w.kind in TIME_KINDS else f'on {w.kind} events' if w.kind in EVENT_KINDS else
