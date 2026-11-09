@@ -19,7 +19,7 @@ BOOL = {'type': 'boolean'}
 PARAMETERS = obj({
     'action': {'type': 'string', 'enum': ['create', 'list', 'desk', 'update', 'pause', 'resume', 'cancel', 'respond', 'off']},
     'id': STR, 'title': STR, 'note': STR, 'reason': STR, 'pause_for': STR,
-    'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','check_every','deadline','cwd','task_id','board')},
+    'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','check_every','deadline','cwd','task_id','board','message_id')},
                     'fire_on': {'type':'string','enum':['change','success','failure','json']},
                     'pid': {'type':'integer'}, 'command': {'type':'array','items':STR},
                     'emojis': {'type':'array','items':STR}}),
@@ -400,6 +400,7 @@ class Tool:
             if w.kind in {'kanban_completed','kanban_blocked','kanban_worker_exited'}:
                 if 'task_id' in w.trigger_json: lead+=f' for task {w.trigger_json["task_id"]}'
                 if 'board' in w.trigger_json: lead+=f' on board {w.trigger_json["board"]}'
+            if w.kind=='reaction' and 'message_id' in w.trigger_json: lead+=f' on message {w.trigger_json["message_id"]}'
             parts=[lead+(f'; if nothing happens by {local(w.deadline_at)}, it tells you once' if watcher and w.deadline_at is not None else '')+'.']
         if w.status not in {'proposed','paused'}:
             from .policy import owner_requested
@@ -470,6 +471,11 @@ class Tool:
                 raise ValueError('task_id and board apply to kanban triggers')
             if any(not isinstance(trigger[k],str) or not trigger[k].strip() for k in ('task_id','board') if k in trigger):
                 raise ValueError('task_id and board must be non-empty strings')
+        if 'message_id' in trigger:
+            if kind!='reaction':
+                raise ValueError('message_id applies to reaction triggers')
+            if not isinstance(trigger['message_id'],str) or not trigger['message_id'].strip():
+                raise ValueError('message_id must be a non-empty string')
         if 'deadline' in args.get('trigger',{}) and kind not in PROBE_KINDS | EVENT_KINDS:
             raise ValueError('deadline works only for watchers (file, process, url, command and event kinds)')
         if kind in {'file','url'} and 'pattern' in trigger:

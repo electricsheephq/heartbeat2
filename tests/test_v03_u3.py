@@ -177,7 +177,7 @@ def test_desk_records_counts_local_times_and_bound(engine, monkeypatch):
     assert f'- role {paused.id}' in out and 'paused · command' in out
     assert '- Other: 1 wakes, 1 watchers · next due 12:02 (Next item)' in out
     assert 'Owner last wrote 3h 10m ago · unanswered 1 · messages today 2/6 · turns today 5/24' in out
-    assert 'cost today $0.42 of $2.00 · 2 unpriced calls not counted' in out
+    assert 'agent spend today $0.42 of $2.00 · 2 unpriced calls not counted' in out
     assert 'Messages held now:' not in out
     e.store.set_meta('quiet:' + KEY, '{"range":"00:00-23:59"}')
     assert 'Messages held now: quiet hours' in desk(e)
@@ -209,7 +209,7 @@ def test_desk_command_is_chat_local_and_status_cost(engine, monkeypatch):
     assert commands.handle('desk', runtime) == desk(e)
     assert 'LOCAL' in commands.handle('desk', runtime) and 'FOREIGN' not in commands.handle('desk', runtime)
     assert 'desk' in commands.HELP
-    assert 'cost today $0.42 of $2.00' in commands.handle('status', runtime)
+    assert 'agent spend today $0.42 of $2.00' in commands.handle('status', runtime)
 
 
 @pytest.mark.parametrize('kind,changes', [('every', {}), ('self', {'role': True}),
@@ -243,7 +243,7 @@ def test_cost_uses_local_day_and_excludes_owner_and_unpriced(engine):
     for n, extra in enumerate([{'creator': 'user'}, {'owner_requested': True}]):
         owner = arm(e, 'at', **extra)
         priced(e, owner, 1000000, key=f'owner:{n}')
-    assert 'cost today $0.10 of $0.50 · 4 unpriced calls not counted' in desk(e)
+    assert 'agent spend today $0.10 of $0.50 · 4 unpriced calls not counted' in desk(e)
     e.dispatch(pending(e, w, 'allowed'))
     assert len(e.ctx.calls) == 1
 

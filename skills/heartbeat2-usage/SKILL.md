@@ -113,7 +113,7 @@ Wake on a Telegram reaction in this conversation:
 {"action":"create","title":"Draft approved","note":"The owner reacted to the draft. Confirm what the reaction means before any protected action.","trigger":{"kind":"reaction","emojis":["👍","✅"],"deadline":"in 2d"},"until":{"max_fires":1,"expires":"in 3d"}}
 ```
 
-- A reaction watcher filters chat and emoji, not a particular message ID.
+- A reaction watcher filters chat and emoji. To watch one message, add `"message_id"` (the platform's message id, as a string); leave it out when you don't know the id, because a wrong id never fires.
 - A probe/event deadline fires once if no trigger occurrence has been produced: "deadline passed — nothing happened". Silence is never proof of success.
 - `kanban_completed` and `kanban_blocked` watchers only see tasks whose worker runs in this profile.
 

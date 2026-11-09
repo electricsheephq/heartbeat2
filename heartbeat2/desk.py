@@ -11,7 +11,7 @@ def cost_line(store, key, timezone, policy):
     counts = store.agent_cost_today(key, timezone)
     text = ''
     if policy.daily_cost_limit_usd or counts['cost_microusd']:
-        text = f'cost today ${counts["cost_microusd"]/1e6:.2f}'
+        text = f'agent spend today ${counts["cost_microusd"]/1e6:.2f}'
         if policy.daily_cost_limit_usd: text += f' of ${policy.daily_cost_limit_usd:.2f}'
     if counts['unpriced_calls']:
         text += (' · ' if text else '') + f'{counts["unpriced_calls"]} unpriced calls not counted'

@@ -194,7 +194,7 @@ Watchers available to the agent:
 | Hermes events | A kanban task completes or blocks, a worker exits, a subagent finishes, the API errors, or someone reacts to or edits a message |
 
 Hermes events are selected by `trigger.kind`: `kanban_completed`, `kanban_blocked`, `kanban_worker_exited`, `subagent_done`, `api_error`, `reaction` (with an optional `emojis` filter) and `message_edited`.
-Kanban watchers can target one task with `trigger.task_id`, one board with `trigger.board`, or both.
+Kanban watchers can target one task with `trigger.task_id`, one board with `trigger.board`, or both. Reaction watchers can target one message with `trigger.message_id`.
 
 Only probe and event watchers can carry a `deadline`: it is a one-time "nothing happened" fallback, and the watcher keeps going until it expires. Quiet hours can hold that fallback wake.
 

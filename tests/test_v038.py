@@ -291,7 +291,67 @@ def test_history_pruning_keeps_only_results_the_owner_can_still_get(engine):
 
 def test_status_shows_unpriced_calls_without_a_limit(engine, command):
     assert engine.policy.daily_cost_limit_usd == 0
-    assert 'cost today' not in command('status') and 'unpriced' not in command('status')
+    assert 'spend today' not in command('status') and 'unpriced' not in command('status')
     w = arm(engine, 'self', role=True, title='Release notes')
     priced(engine, w, 0, unpriced=3)
     assert '3 unpriced calls not counted' in command('status')
+
+
+def react(e, message_id, emoji='yes'):
+    e.intake.gateway_platform_event(platform='telegram', event_type='reaction',
+                                    payload={'chat_id': 'unit', 'message_id': message_id, 'emojis': [emoji]})
+    e.events()
+
+
+def test_reaction_message_filter_matches_only_that_message(engine):
+    result = engine.tool.handle(dict(action='create', note='The owner reacted to the draft.',
+                                    trigger={'kind': 'reaction', 'emojis': ['yes'], 'message_id': '90'}), session_id='sid')
+    assert result.get('ok'), result
+    w = engine.store.get_wake(result['wake']['id'])
+    assert w.trigger_json['message_id'] == '90' and ' on message 90' in result['receipt']
+    react(engine, '91')
+    react(engine, None)
+    assert not engine.store.list_occurrences(w.id)
+    react(engine, '90', emoji='no')
+    assert not engine.store.list_occurrences(w.id)
+    react(engine, '90')
+    assert len(engine.store.list_occurrences(w.id)) == 1
+
+
+def test_reaction_without_message_filter_still_matches_any_message(engine):
+    result = engine.tool.handle(dict(action='create', note='Any reaction.',
+                                    trigger={'kind': 'reaction', 'emojis': ['yes']}), session_id='sid')
+    w = engine.store.get_wake(result['wake']['id'])
+    assert ' on message' not in result['receipt']
+    react(engine, '17')
+    assert len(engine.store.list_occurrences(w.id)) == 1
+
+
+@pytest.mark.parametrize('kind', ['file', 'kanban_completed'])
+def test_message_filter_refused_on_other_kinds(engine, kind):
+    result = engine.tool.handle(dict(action='create', note='Check.',
+                                    trigger={'kind': kind, 'path': 'task.txt', 'message_id': '90'}), session_id='sid')
+    assert result.get('error') == 'invalid_request', result
+    assert 'message_id applies to reaction triggers' in result['detail']
+    assert not engine.store.list_wakes(KEY)
+    w = arm(engine, 'every', trigger_json={'kind': 'every', 'every': '2h'})
+    result = engine.tool.handle(dict(action='update', id=w.id,
+                                    trigger={'kind': 'every', 'every': '2h', 'message_id': '90'}), session_id='sid')
+    assert result.get('error') == 'invalid_request' and 'message_id applies' in result['detail'], result
+    assert engine.store.get_wake(w.id) == w
+
+
+@pytest.mark.parametrize('value', ['', '  ', 90])
+def test_message_filter_refuses_empty_or_non_string(engine, value):
+    result = engine.tool.handle(dict(action='create', note='Check.',
+                                    trigger={'kind': 'reaction', 'message_id': value}), session_id='sid')
+    assert result.get('error') == 'invalid_request', result
+    assert 'message_id' in result['detail'], result
+    assert not engine.store.list_wakes(KEY)
+
+
+def test_status_names_agent_spend_apart_from_the_day_total(engine, command):
+    w = arm(engine, 'self', role=True, title='Release notes')
+    priced(engine, w, 420000)
+    out = command('status')
+    assert 'agent spend today $0.42' in out and '\ncost today' not in out
