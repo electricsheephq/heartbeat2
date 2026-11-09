@@ -44,7 +44,10 @@ Results include a `cache` line. Choose intervals it marks warm, respecting floor
   - Bounds: at least 5 minutes AND the configured owner floor; at most 4 hours / 24 fires.
   - It ends on notify=true or after three consecutive no_change outcomes. Prefer a watcher when possible.
 
-Only messaging-gateway conversations are supported: DMs by default, plus group and topic chats when `dm_only` is off.
+Messaging-gateway conversations are supported: DMs by default, plus group and topic chats when `dm_only` is off.
+Live API voice conversations are also supported when a profile-local voice bridge is installed.
+Ordinary API sessions remain unsupported. Voice wakes wait while the device is busy or
+disconnected and retain their normal expiry and catch-up limits.
 - The tool chooses this session; never supply a destination or model.
 - If the injection consent YAML is missing, show the returned YAML.
 - Respect reported clamps, and never write plugin settings to widen bounds. Proposed items need `/pulse ok`.

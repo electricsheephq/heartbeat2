@@ -324,6 +324,9 @@ class Intake:
 
     def _key(self,sid='',key=''):
         if key and key!='default': return key
+        from .voice import current
+        target = current(self.engine)
+        if target: return 'heartbeat2:voice:' + target[0]
         current=self.engine.tool.session_key_fn()
         if current and current!='default': return current
         return self.bindings.get(sid,'')
@@ -480,6 +483,12 @@ class Intake:
                     self.count(key,pending.get('mid'),identity.platform)
                 s.set_meta(stamp,'')
         parsed=marker(user_message,secret=s.get_meta('marker_secret'),require_tag=(identity.chat_type != 'dm'))
+        if not parsed and identity.platform == 'api_server':
+            from .voice import hub
+            transport = hub(e)
+            if transport and transport.owner_message(identity.chat_id, user_message):
+                owner_seen = True
+                self.human(key, platform, dedupe=['voice:' + key + ':' + turn_id])
         if not parsed:
             row=conversation_history[-1] if conversation_history else None
             if isinstance(row,dict) and row.get('role')=='user' and not row.get('display_kind'):

@@ -114,6 +114,11 @@ Every scenario and its hard bars are in [bench/README.md](bench/README.md); the 
 One poller per profile runs inside the messaging gateway that serves that profile and ticks every 5 seconds. Hermes loads every profile's plugins when a gateway starts; a gateway that does not serve a profile leaves that profile's schedule alone and delivers nothing for it. A file lock guarantees only one poller even when several Hermes processes share the profile. Every fire is a durable claim with an attempt marker. An accepted turn that never starts is tried three times, and a refused injection backs off and is tried five times, before it is marked dead. A turn that started but never finished (a crash or restart) is recorded as interrupted. Hermes may auto-resume that wake turn, sometimes before heartbeat2's restart recovery has run; heartbeat2 keeps the replay silent either way, never counts it as a fire or delivery, and counts it as a model turn toward the daily cap.
 
 ## Install
+
+Optional live API voice conversations are supported through a profile-local transport
+bridge. This requires a compatible voice plugin; installing HeartBeat alone does not
+enable arbitrary API sessions. See [the voice bridge contract](docs/voice-bridge.md).
+
 Requires **Hermes ≥ 0.21.6** and Python ≥ 3.11 on macOS or Linux. HeartBeat 2.0 delivers into **messaging-gateway DMs** (and group or topic chats when `dm_only` is off): Telegram, Discord, Slack, WhatsApp and the other gateway platforms.
 
 ```bash
