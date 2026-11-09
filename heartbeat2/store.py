@@ -23,6 +23,7 @@ from .model import (Wake, Occurrence, Session, KINDS, WAKE_STATUSES,
 from .schedule import local_day
 
 SCHEMA_VERSION = 1
+HELD_REPORT_OUTCOMES = frozenset({'progress', 'done', 'needs_attention', 'blocked'})
 CACHE_FIELDS = {'cache_read_tokens','cache_write_tokens','warm_wakes','cold_wakes','cost_microusd','unpriced_calls'}
 LEDGER_FIELDS = frozenset({"fires", "gated_skips", "governor_skips", "model_turns",
     "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals", "checks", "no_verdict"} | CACHE_FIELDS)
@@ -245,6 +246,23 @@ class Store:
         with self.atomic():
             self.connection.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                     (key, str(value)))
+
+    def reported_through(self, session_key: str) -> float:
+        try:
+            return float(self.get_meta('reported_through:' + session_key) or 0)
+        except ValueError:
+            return 0.0
+
+    def mark_reported(self, session_key: str, through: float):
+        with self.atomic():
+            self.set_meta('reported_through:' + session_key, str(max(self.reported_through(session_key), through)))
+
+    def held_reports(self, session_key: str) -> list[Occurrence]:
+        through = self.reported_through(session_key)
+        return sorted((o for o in self.list_occurrences(session_key=session_key, state='done')
+                       if o.held_reason.startswith('message_held:') and o.notify and not o.delivered
+                       and o.summary.strip() and o.outcome in HELD_REPORT_OUTCOMES
+                       and o.ended_at is not None and o.ended_at > through), key=lambda o: o.ended_at)
 
     def owner_budget(self, wake_id: str) -> int | None:
         """The role budget the owner set with /pulse budget: the agent may go under it, never over it unasked."""

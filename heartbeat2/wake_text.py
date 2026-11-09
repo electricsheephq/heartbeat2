@@ -41,7 +41,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
                 max_messages: int = 6, payload=None, governor_hint: str = "",
                 late_by_s: float | None = None, trigger_summary: str = "", after_restart: bool = False,
                 held_by: str = "", message_held: str = "", cache_line: str = "", marker_tag: str | None = None,
-                desk: str = "") -> str:
+                desk: str = "", held_reports: str = "") -> str:
     now = clock.now()
     local = datetime.fromtimestamp(now, zone(timezone))
     label = "role" if wake.role else "wake" if wake.kind in TIME_KINDS else "watcher"
@@ -65,6 +65,8 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
         lines.append(f"Scratch: {escape_text(wake.scratch)}")
     if desk and (wake.role or wake.trigger_json.get('own_time')):
         lines.append(escape_text(desk))
+    if held_reports:
+        lines.append(escape_text(held_reports))
     if occurrence.held_since is not None:
         since=datetime.fromtimestamp(occurrence.held_since,zone(timezone))
         reason={'held_unanswered':"you hadn't replied",'held_daily_cap':'daily cap','held_paused':'wake was paused'}.get(occurrence.held_reason,'held')
@@ -94,7 +96,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
                     'daily_message_cap':"today's message limit"}
     if message_held in message_labels:
         lines.append(f'Messages are held right now ({message_labels[message_held]}). Your work still counts; '
-                     "keep anything the owner should hear in your notes and tell them when they're back.")
+                     "if the owner should hear about this, respond with notify=true and a plain-sentence summary: nothing is sent now, but HeartBeat keeps the summary and hands it back on the owner's next message or your next turn that can send. Keep it in your notes too.")
     if not session.first_notice_sent or wake.trigger_json.get('builtin'):
         lines.append('If you notify, end with one line saying they can say "stop checking in" or use /pulse off.')
     if cache_line: lines.append(escape_text(cache_line))

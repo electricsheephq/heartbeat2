@@ -581,6 +581,12 @@ class Intake:
             if not s.get_meta('human_context:'+key): return None
             s.set_meta('human_context:'+key,'')
             lines=[]
+            from .desk import held_report_lines
+            reports,through=held_report_lines(s,key)
+            if reports:
+                lines.append("HeartBeat 2.0: while the owner's limits held your messages, your wake turns finished these and wanted to tell the owner. In this reply, tell them what still matters, briefly:")
+                lines+=reports
+                s.mark_reported(key,through)
             count=int(s.get_meta('switched_notice:'+key) or 0)
             if count:
                 lines.append(f'{count} wakes armed in your previous conversation were stopped; /pulse list')
@@ -896,6 +902,15 @@ class Intake:
             silenced=o.force_silent or not o.notify or not e.policy.enabled or not session.enabled or e.paused()
             delivered=bool(o.notify and not silenced and not f.owner_replied)
             if not s.finish(o.wake_id,o.dedupe_key,attempt=o.attempt,outcome=o.outcome or 'unreported',delivered=delivered,force_silent=silenced): return None
+            shown=s.get_meta('report_shown:'+o.id)
+            if shown:
+                try:
+                    through=float(shown)
+                except ValueError:
+                    pass
+                else:
+                    if delivered: s.mark_reported(key,through)
+                s.set_meta('report_shown:'+o.id,'')
             if f.scratch is not None:
                 s.cas_wake(w.id,w.status,expected_version=w.version,scratch=f.scratch)
             if delivered and session:

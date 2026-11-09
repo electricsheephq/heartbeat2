@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.7 — 2026-11-10
+
+- **Held results come back.** When your limits hold the agent's messages, HeartBeat keeps the summaries it wanted to send. On your next message, or its next role or own-time turn that can send, the agent gets a short list and passes on what still matters. There is no extra message or turn, and your limits stay the same.
+- **Finished roles stay on the desk.** A role's final result stays visible until you've written in the chat, for up to 24 hours.
+
 ## 0.3.6 — 2026-11-09
 
 - **The agent can read its desk.** The `pulse` tool has a new read-only `desk` action. The agent can check its roles, what's due, whether messages are held, and the turns, messages and cost left today at any point in a turn, not only at the start of a role or own-time turn. It returns the same view as `/pulse desk` and changes nothing.
