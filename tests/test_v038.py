@@ -198,3 +198,56 @@ def test_schema_and_cost_wording():
     assert fields['task_id']['type'] == fields['board']['type'] == 'string'
     store = SimpleNamespace(agent_cost_today=lambda *args: {'cost_microusd': 0, 'unpriced_calls': 2})
     assert cost_line(store, KEY, 'UTC', SimpleNamespace(daily_cost_limit_usd=0)) == '2 unpriced calls not counted'
+
+
+def test_agent_cannot_resume_an_owner_pause_from_a_wake_turn(engine, command):
+    w = arm(engine, 'every', trigger_json={'kind': 'every', 'every': '2h'})
+    assert not command('pause ' + w.id).startswith('Error:')
+    other = arm(engine, 'self', role=True, title='Other role')
+    engine.dispatch(pending(engine, other))
+    start(engine)
+    result = engine.tool.handle(dict(action='resume', id=w.id), session_id='sid')
+    assert result.get('error') == 'needs_owner', result
+    assert '/pulse resume' in result['detail']
+    assert engine.store.get_wake(w.id).status == 'paused'
+    # The agent's own pause still resumes from a wake turn.
+    mine = arm(engine, 'every', trigger_json={'kind': 'every', 'every': '2h'}, status='paused', status_reason='agent')
+    assert engine.tool.handle(dict(action='resume', id=mine.id), session_id='sid').get('ok')
+
+
+def test_agent_resumes_an_owner_pause_in_the_owner_turn(engine, command):
+    w = arm(engine, 'every', trigger_json={'kind': 'every', 'every': '2h'})
+    assert not command('pause ' + w.id).startswith('Error:')
+    result = engine.tool.handle(dict(action='resume', id=w.id), session_id='sid')
+    assert result.get('ok'), result
+    assert engine.store.get_wake(w.id).status == 'active'
+
+
+def test_agent_resume_of_its_own_pause_and_timer_cleared(engine):
+    w = timed(engine)
+    result = engine.tool.handle(dict(action='resume', id=w.id), session_id='sid')
+    assert result.get('ok'), result
+    assert not engine.store.get_meta('resume_after:' + w.id)
+    plain = arm(engine, 'every', trigger_json={'kind': 'every', 'every': '2h'})
+    assert pause(engine, plain.id).get('ok')
+    assert engine.tool.handle(dict(action='resume', id=plain.id), session_id='sid').get('ok')
+
+
+@pytest.mark.parametrize('field', ['task_id', 'board'])
+@pytest.mark.parametrize('value', ['', '   '])
+def test_kanban_filters_refuse_empty_values(engine, field, value):
+    result = engine.tool.handle(dict(action='create', note='Check.',
+                                    trigger={'kind': 'kanban_completed', field: value}), session_id='sid')
+    assert result.get('error') == 'invalid_request', result
+    assert 'non-empty strings' in result['detail']
+    assert not engine.store.list_wakes(KEY)
+
+
+@pytest.mark.parametrize('field', ['task_id', 'board'])
+def test_kanban_filters_refused_on_update_of_other_kinds(engine, field):
+    w = arm(engine, 'every', trigger_json={'kind': 'every', 'every': '2h'})
+    result = engine.tool.handle(dict(action='update', id=w.id,
+                                    trigger={'kind': 'every', 'every': '2h', field: 't1'}), session_id='sid')
+    assert result.get('error') == 'invalid_request', result
+    assert 'task_id and board apply to kanban triggers' in result['detail']
+    assert engine.store.get_wake(w.id) == w

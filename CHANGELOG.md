@@ -5,6 +5,7 @@
 - **Rest until the work is ready.** The agent can pause one wake with `pause_for: "12h"` and resume it on its own. An owner pause replaces that timer, and owner controls and governor pauses keep priority (#134).
 - **Watch one task or board.** Kanban watchers accept `task_id` and `board` filters and name them in their receipts (#135).
 - **Priced spend, checked before a turn.** The daily cost setting now explains that it stops new agent turns once today's priced spend reaches the limit, cannot cap a turn already running, and does not count unpriced calls. Status and desk label those calls as not counted (#136).
+- **Your pause holds.** A wake you paused with `/pulse pause` resumes only when you say so: the agent can resume it during your turn, when you ask, but no longer from one of its own wake turns. Kanban filters must not be empty.
 
 ## 0.3.7 — 2026-11-10
 

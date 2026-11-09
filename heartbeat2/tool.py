@@ -312,6 +312,8 @@ class Tool:
                         e.cancel_occurrences(w.id,'paused' if action=='pause' else 'cancelled',preserve_started=True)
                     if action == 'pause':
                         e.store.set_meta('resume_after:'+w.id,str(e.clock.now()+pause_seconds) if pause_seconds is not None else '')
+                    elif action in {'resume','cancel'}:
+                        e.store.set_meta('resume_after:'+w.id,'')
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
                     w=e.store.get_wake(w.id)
                     if action == 'update' and owner_lowered: e.store.set_owner_budget(w.id,max(1,budget))  # the number the owner asked for
@@ -466,8 +468,8 @@ class Tool:
         if any(k in trigger for k in ('task_id','board')):
             if kind not in {'kanban_completed','kanban_blocked','kanban_worker_exited'}:
                 raise ValueError('task_id and board apply to kanban triggers')
-            if any(not isinstance(trigger[k],str) for k in ('task_id','board') if k in trigger):
-                raise ValueError('task_id and board must be strings')
+            if any(not isinstance(trigger[k],str) or not trigger[k].strip() for k in ('task_id','board') if k in trigger):
+                raise ValueError('task_id and board must be non-empty strings')
         if 'deadline' in args.get('trigger',{}) and kind not in PROBE_KINDS | EVENT_KINDS:
             raise ValueError('deadline works only for watchers (file, process, url, command and event kinds)')
         if kind in {'file','url'} and 'pattern' in trigger:
