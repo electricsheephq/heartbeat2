@@ -309,3 +309,21 @@ def test_refresh_runs_outside_any_transaction(engine, command, verb):
     engine.refresh = lambda: (seen.append(engine.store.connection.in_transaction), original())[1]
     command(f'{verb} {w.id}' if verb != 'list' else 'list')
     assert seen and not any(seen)
+
+
+@pytest.mark.parametrize('setup,words', [('off', 'HeartBeat 2.0 is off in settings'), ('paused', 'HeartBeat 2.0 is paused')])
+def test_preview_reports_profile_off_or_paused(engine, command, setup, words):
+    w = arm(engine, 'every')
+    if setup == 'off': engine.policy = replace(engine.policy, enabled=False)
+    else: engine.paused = lambda: True
+    out = command('test '+w.id)
+    assert 'Would run now: no — '+words in out and '(held; it would wait)' in out
+
+
+def test_deferred_card_pricing_never_restores_a_consumed_card(engine):
+    from heartbeat2 import governor
+    w = arm(engine, 'command', next_due_at=engine.clock.now()+7200)
+    with engine.store.atomic():
+        governor.pause(engine, w, 'noop')
+        engine.store.set_meta('card:'+w.id, '')  # an owner turn shows and clears the card before pricing runs
+    assert engine.store.get_meta('card:'+w.id) == ''

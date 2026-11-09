@@ -215,7 +215,9 @@ def _test(engine,w,session,cache_line,wake_cache=''):
     o=Occurrence(w.id,f'r:{engine.clock.now():.17g}',payload_json=[{'message':'The owner asked to run this now (/pulse run).'}],attempt=1)
     try:
         with engine.store.atomic():
-            reason,defer,until=engine.gate(w,o,session)
+            # tick() and the claim barrier refuse before gate() when HeartBeat is off or paused for the whole profile.
+            reason,defer,until=(('plugin_off',True,None) if not engine.policy.enabled else
+                                ('paused_all',True,None) if engine.paused() else engine.gate(w,o,session))
             message_held=engine.message_hold_reason(w,session)
             text=engine.render_occurrence(w,replace(o,force_silent=bool(message_held)),session,
                                          message_held=message_held,cache_line=wake_cache,held_reports='')
@@ -225,7 +227,8 @@ def _test(engine,w,session,cache_line,wake_cache=''):
         'daily_message_cap':'daily message cap','role_budget':'daily role budget','daily_cost_cap':'daily cost cap',
         'session_off':'this chat is off','session_paused':'this chat is paused','injection_disabled':'gateway injection is disabled',
         'wake_inactive':'wake is not active','held_paused':'wake is paused','wake_spacing':'wake spacing',
-        'in_flight':'another wake is running','provider_unavailable':'provider unavailable','dm_only':'DMs only'}
+        'in_flight':'another wake is running','provider_unavailable':'provider unavailable','dm_only':'DMs only',
+        'plugin_off':'HeartBeat 2.0 is off in settings','paused_all':'HeartBeat 2.0 is paused'}
     verdict='Would run now: '+('no — '+reasons.get(reason,reason)+
         (' until '+_time(engine,until) if until is not None else '')+
         (' (held; it would wait)' if defer else ' (it would be skipped)') if reason else 'yes')

@@ -31,7 +31,8 @@ def pause(engine,wake,rule):
     if s.cas_wake(current.id,current.status,expected_version=current.version,
                   status='paused',status_reason=f'governor:{rule}'):
         cache_line=engine.tool.cache_result(current)
-        s.set_meta('card:'+current.id,rule+(' · '+cache_line if cache_line else ''))
+        written=rule+(' · '+cache_line if cache_line else '')
+        s.set_meta('card:'+current.id,written)
         paused=s.get_wake(current.id)
         def price_card():
             # Display only: a failure keeps the unpriced card and never reaches the committed tick.
@@ -39,7 +40,8 @@ def pause(engine,wake,rule):
                 label=engine.tool.cache_result(paused)
                 with s.atomic():
                     latest=s.get_wake(paused.id)
-                    if latest.version==paused.version and latest.status=='paused':
+                    # An owner turn may have shown and cleared the card meanwhile: only replace the card this pause wrote.
+                    if latest.version==paused.version and latest.status=='paused' and s.get_meta('card:'+paused.id)==written:
                         s.set_meta('card:'+paused.id,rule+(' · '+label if label else ''))
             except Exception:
                 pass
