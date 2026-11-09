@@ -122,7 +122,7 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
         gap = age*60 if seconds is None else seconds
         if first_wake and seconds is not None: gap += age*60
         state = 'warm' if gap < ttl else 'cold'
-        price = f' (~${(warm if state=="warm" else cold):.2f}) · cold ~${cold:.2f}' if warm is not None and cold is not None else ''
+        price = (f' (~${cold:.2f})' if state=='cold' else f' (~${warm:.2f}) · cold ~${cold:.2f}') if warm is not None and cold is not None else ''
         edge = ttl-max(30,.05*ttl)
         next_hint = 'floor ≥ TTL: wakes cold' if floor>edge else f'next warm ≤{minutes(edge)}'
         text = f'{label} · {"this wake" if seconds is None else minutes(seconds)} {state}{price} · {next_hint}'

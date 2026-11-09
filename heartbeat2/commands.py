@@ -1,14 +1,15 @@
 """Compact /pulse controls; gateway-bound session is the only authority."""
+from dataclasses import replace
 from datetime import datetime, timedelta
 import json
 import re
 
-from .model import Wake, Session, FINISHED_WAKE_STATUSES
+from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES
 from . import governor
 from . import cache
 from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
-from .tool import session_env, Infeasible
+from .tool import session_env, Infeasible, filter_text
 
 DURATIONS = _DURATION.pattern+r'(?:\s*(?:,\s*)?(?:and\s*)?'+_DURATION.pattern+r')*'  # one way to split whitespace: linear
 LIST_RECENT_FINISHED = 10
@@ -16,6 +17,7 @@ FINISHED_STATUSES = FINISHED_WAKE_STATUSES
 HELP = ('/pulse status | desk | list [all] | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
         'role every 1d [at 09:00] <charter> | role self <charter> | budget <id> <n>/day | '
+        'run <id> (queue now, usual checks) | test <id> (preview, nothing sent) | '
         'pause|resume|cancel <id|all> [for 3d] | off|on | '
         'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
 
@@ -124,7 +126,7 @@ def _item(engine, wake, today_budget=None):
     elif today_budget and wake.status == 'active' and today_budget[0] >= today_budget[1]: due = 'resting until tomorrow'
     else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
     role = f' · today {today_budget[0]}/{today_budget[1]}' if today_budget else ''
-    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + wake.kind + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + wake.kind + filter_text(wake) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _occurrences(engine, wake):
@@ -192,9 +194,11 @@ def _add(engine, session, text, *, role=False):
     wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command', role=role,
         platform=session.platform, chat_type=session.chat_type, chat_id=session.chat_id,
         armed_session_id=session.current_session_id, title=_clip(note,80))
-    _activation(engine,session,wake)
-    result = engine.tool.prepare(wake, {'trigger':trigger})
-    created = engine.store.create_wake(result.wake)
+    with engine.store.atomic():
+        session=engine.store.get_session(session.session_key)
+        _activation(engine,session,wake)
+        result = engine.tool.prepare(wake, {'trigger':trigger})
+        created = engine.store.create_wake(result.wake)
     return _item(engine, created)+_clamps(result.clamped)+'\n'+engine.tool.cache_result(created)+'\n'+engine.tool.receipt(created,session)
 
 
@@ -202,18 +206,54 @@ def _clamps(clamped):
     return ''.join(f'\nClamped {key}: {value}' for key,value in clamped.items())
 
 
+class _DryRun(Exception):
+    pass
+
+
+def _test(engine,w,session,cache_line):
+    o=Occurrence(w.id,f'r:{engine.clock.now():.17g}',payload_json=[{'message':'The owner asked to run this now (/pulse run).'}])
+    try:
+        with engine.store.atomic():
+            reason,defer,until=engine.gate(w,o,session)
+            message_held=engine.message_hold_reason(w,session)
+            text=engine.render_occurrence(w,replace(o,force_silent=bool(message_held)),session,
+                                         message_held=message_held,cache_line=cache_line,held_reports='')
+            raise _DryRun
+    except _DryRun: pass
+    reasons={'quiet_hours':'quiet hours','busy':'chat is busy','daily_model_cap':'daily model cap',
+        'daily_message_cap':'daily message cap','role_budget':'daily role budget','daily_cost_cap':'daily cost cap',
+        'session_off':'this chat is off','session_paused':'this chat is paused','injection_disabled':'gateway injection is disabled',
+        'wake_inactive':'wake is not active','held_paused':'wake is paused','wake_spacing':'wake spacing',
+        'in_flight':'another wake is running','provider_unavailable':'provider unavailable','dm_only':'DMs only'}
+    verdict='Would run now: '+('no — '+reasons.get(reason,reason)+
+        (' until '+_time(engine,until) if until is not None else '')+
+        (' (held; it would wait)' if defer else ' (it would be skipped)') if reason else 'yes')
+    next_fire=(_time(engine,w.next_due_at) if w.kind in TIME_KINDS else f'on {w.kind} events' if w.kind in EVENT_KINDS else
+               f'every {w.trigger_json["check_every"]}' if w.kind in PROBE_KINDS else 'on owner silence')
+    return '\n'.join([f'Test {w.id} (dry run: nothing sent, no model call)',verdict,'Next: '+next_fire,
+                      *([cache_line] if cache_line else []),'Wake text:',_clip(text,1500)])
+
+
 def handle(raw_args, runtime):
     key = session_env('HERMES_SESSION_KEY')
     if not key or key == 'default': return 'Error: /pulse needs the invoking gateway session.'
     try:
         engine = runtime.get_engine()
-        engine.refresh()
         action, _, rest = (raw_args or 'status').strip().partition(' ')
         rest = rest.strip()
+        if action in {'run','test'}:
+            try:
+                with engine.store.atomic():
+                    engine.refresh()
+                    raise _DryRun
+            except _DryRun: pass
+        else: engine.refresh()
+        preview=engine.store.get_wake(rest) if action=='test' else None
+        cache_line=engine.tool.cache_result(preview) if preview and preview.session_key==key else ''
         with engine.store.atomic():
             session = engine.store.get_session(key)
             bound={name:session_env('HERMES_SESSION_'+name.upper()) for name in ('platform','chat_type','chat_id')}
-            if bound['platform'] in MESSAGING_PLATFORMS:
+            if action not in {'run','test'} and bound['platform'] in MESSAGING_PLATFORMS:
                 engine.store.upsert_session(Session(key,**bound,current_session_id=session_env('HERMES_SESSION_ID')))
                 session=engine.store.get_session(key)
                 engine.store.cas_session(key,{'platform':session.platform,'chat_type':session.chat_type,'chat_id':session.chat_id},**bound)
@@ -221,6 +261,25 @@ def handle(raw_args, runtime):
             if session is None or session.platform not in MESSAGING_PLATFORMS:
                 return 'Error: /pulse needs a known messaging-gateway session.'
             if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
+        if action in {'add','role'}: return _add(engine,session,rest,role=action=='role')
+        with engine.store.atomic():
+            session=engine.store.get_session(key)
+            if action in {'run','test'}:
+                if not re.fullmatch(r'\S+',rest) or rest=='all': raise ValueError(action+' expects one item id')
+                wake=engine.store.get_wake(rest)
+                if wake is None or wake.session_key!=key: return 'Error: unknown item in this chat.'
+                if wake.status in FINISHED_STATUSES: raise ValueError('it has finished')
+                if action=='test': return _test(engine,wake,session,cache_line)
+                if wake.status=='proposed': raise ValueError(f'approve it first with /pulse ok {wake.id}')
+                if wake.status=='paused': raise ValueError(f'resume it first with /pulse resume {wake.id}')
+                if wake.kind=='at': raise ValueError(f'a one-time reminder fires once at its time; preview it with /pulse test {wake.id}')
+                occurrences=engine.store.list_occurrences(wake.id)
+                if any(o.state in {'claimed','started'} for o in occurrences): return f'{wake.id} is running now.'
+                if any(o.state=='pending' for o in occurrences): return f'Already queued: {wake.id} runs on the next check.'
+                now=engine.clock.now()
+                engine.store.add_occurrence(wake.id,f'r:{now:.17g}',payload=[{'message':'The owner asked to run this now (/pulse run).'}])
+                engine.signal()
+                return f'Queued {wake.id}: it runs on the next check, under the usual checks (busy chat, quiet hours, daily caps).'
             if action == 'desk' and not rest:
                 from .desk import render_desk
                 return render_desk(engine,session,clock=engine.clock,timezone=engine.policy.resolved_timezone(),policy=engine.policy)
@@ -278,8 +337,6 @@ def handle(raw_args, runtime):
                 days = int((rest or '7d')[:-1])
                 if not 1 <= days <= engine.policy.ledger_days: raise ValueError('ledger range exceeds retained days')
                 return _ledger(engine,key,days)
-            if action == 'add': return _add(engine,session,rest)
-            if action == 'role': return _add(engine,session,rest,role=True)
             if action == 'budget':
                 match = re.fullmatch(r'(\S+)\s+(\d+)/day',rest)
                 if not match: raise ValueError('budget expects <id> <n>/day')
@@ -333,7 +390,8 @@ def handle(raw_args, runtime):
             for wake in wakes:
                 if action == 'why':
                     reason=wake.reason or ('you asked (via /pulse add)' if wake.creator=='user' else 'you asked in chat' if owner_requested(wake) else 'the named task')
-                    return f'{_item(engine,wake)}\nWhy: {reason}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\nFires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}\n'+_occurrences(engine,wake)
+                    filters=filter_text(wake)
+                    return f'{_item(engine,wake)}\nWhy: {reason}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\n'+(f'Filters: {filters.strip()}\n' if filters else '')+f'Fires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}\n'+_occurrences(engine,wake)
                 try:
                     with engine.store.atomic():
                         lines.append(_transition(engine,session,wake,action,seconds))

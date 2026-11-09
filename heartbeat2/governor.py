@@ -32,6 +32,18 @@ def pause(engine,wake,rule):
                   status='paused',status_reason=f'governor:{rule}'):
         cache_line=engine.tool.cache_result(current)
         s.set_meta('card:'+current.id,rule+(' · '+cache_line if cache_line else ''))
+        paused=s.get_wake(current.id)
+        def price_card():
+            # Display only: a failure keeps the unpriced card and never reaches the committed tick.
+            try:
+                label=engine.tool.cache_result(paused)
+                with s.atomic():
+                    latest=s.get_wake(paused.id)
+                    if latest.version==paused.version and latest.status=='paused':
+                        s.set_meta('card:'+paused.id,rule+(' · '+label if label else ''))
+            except Exception:
+                pass
+        s.after_commit(price_card)
         for o in s.list_occurrences(current.id,state='started'):
             if o.outcome is None:
                 s.update_occurrence(o.wake_id,o.dedupe_key,'started',attempt=o.attempt,force_silent=True)

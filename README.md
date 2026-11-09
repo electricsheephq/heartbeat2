@@ -163,6 +163,8 @@ pulse tool results name the ignored setting.
 | `/pulse desk` | The agent's desk: each role's rhythm, last result and next turn; today's messages, turns and cost against your limits; and why messages are held, if they are. Finished roles stay on it until you've written in the chat (for up to 24 hours), and it counts results held for you. |
 | `/pulse budget <id> 3/day` | Set a role's daily turns. The agent can go under your number but never over it; only this command raises it. |
 | `/pulse list` · `/pulse why <id>` | Active, proposed and paused items plus the 10 most recently created finished ones; `/pulse list all` shows everything. Why lists the last 10 trigger keys, states, reasons, matched/created and held-since times, and delivered yes/no |
+| `/pulse run <id>` | Queue one occurrence now (except a one-time reminder); keeps every usual check, including busy chat, quiet hours and daily caps |
+| `/pulse test <id>` | Preview the checks, next fire, cache and wake text; sends nothing, calls no model and changes nothing |
 | `/pulse ledger [7d]` | Totals over the range: fires, checks, model turns, messages, replies, cache/cost and token splits |
 | `/pulse pause <id\|all> [for 3d]` · `resume` · `cancel` | Control one item or all of them |
 | `/pulse quiet 22:00-07:30` · `quiet for 3h` · `quiet off` · `quiet default` | Quiet hours for this chat; `default` goes back to your settings |

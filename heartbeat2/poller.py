@@ -652,29 +652,15 @@ class Poller:
         if health:
             health['trial']=o.id
             s.set_meta('provider_health',json.dumps(health))
-        from .wake_text import render_wake, escape_text
-        from .desk import render_desk, held_report_lines
-        from .intake import marker_tag
-        tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
-        recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
-        late=None
-        if o.dedupe_key.startswith('t:'):
-            try: late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
-            except ValueError: pass
+        from .desk import held_report_lines
         reports=''
         if (w.role or w.trigger_json.get('own_time')) and not message_held and not o.force_silent:
             report_lines,shown=held_report_lines(s,w.session_key)
             if report_lines:
                 reports='\n'.join(['Held for the owner (their limits held these earlier). If you message them this turn, include what still matters:', *report_lines])
                 s.set_meta('report_shown:'+o.id,json.dumps(shown))
-        text=render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
-             recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-(0 if o.force_silent else 1),
-             max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
-             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
-             cache_line=cache_line,marker_tag=tag,held_reports=reports,
-             desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
-                              measure=lambda text: len(escape_text(text)),turn=o)
-                  if w.role or w.trigger_json.get('own_time') else '')
+        text=self.render_occurrence(w,o,session,held_by=held_by,message_held=message_held,
+                                    cache_line=cache_line,held_reports=reports)
         if not self.eligible():
             # Lost the home after claiming: give the claim back unsent, as it was.
             if health:
@@ -699,6 +685,26 @@ class Poller:
                 self.terminal_one_shot(s.get_wake(w.id))
                 governor.error(self,s.get_wake(w.id))
             else: s.refund(w.id,o.dedupe_key,attempt=o.attempt,error='inject_failed')
+
+    def render_occurrence(self,w,o,session,*,held_by='',message_held='',cache_line='',held_reports=''):
+        s=self.store
+        from .wake_text import render_wake, escape_text
+        from .desk import render_desk
+        from .intake import marker_tag
+        tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
+        recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
+        late=None
+        if o.dedupe_key.startswith('t:'):
+            try: late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
+            except ValueError: pass
+        return render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
+             recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-int(not o.force_silent and o.state in {'claimed','started'}),
+             max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
+             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
+             cache_line=cache_line,marker_tag=tag,held_reports=held_reports,
+             desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
+                              measure=lambda text: len(escape_text(text)),turn=o)
+                  if w.role or w.trigger_json.get('own_time') else '')
 
     def terminal_one_shot(self,w):
         if not one_shot(w) or w.status!='active' or w.next_due_at is not None: return
