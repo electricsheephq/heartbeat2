@@ -92,6 +92,18 @@ class Tool:
         self.engine, self.session_key_fn = engine, session_key_fn
 
     def identity(self, *, surface=''):
+        from . import voice
+        target = voice.current(self.engine)
+        if target:
+            # The bridge names the conversation; run and approval ids rotate underneath it.
+            chat_id, sid = target
+            key = voice.PREFIX + chat_id
+            s = self.engine.store.get_session(key)
+            if s is None:
+                s = Session(key, platform=voice.PLATFORM, chat_type='dm',
+                            chat_id=chat_id, current_session_id=sid)
+                self.engine.store.upsert_session(s)
+            return s
         key = self.session_key_fn()
         if not key or key == 'default':
             return None
@@ -154,8 +166,12 @@ class Tool:
                 pause_seconds = parse_duration(args['pause_for'])
                 if not 60 <= pause_seconds <= e.policy.max_lifetime_days * 86400:
                     raise ValueError(f'pause_for must be between 1 minute and {e.policy.max_lifetime_days:g} days (max_lifetime_days)')
+            # Asked before the transaction: a slow bridge must never hold the store lock the poller needs.
+            from . import voice
+            live_voice = voice.connected(e, s)
             with e.store.atomic():
                 s = e.store.get_session(s.session_key)
+                live_voice = live_voice and voice.is_voice(s)
                 flight = e.intake.flight_for(session_id, s.session_key)
                 created_in = 'wake_turn' if flight or e.intake.in_wake_turn(session_id, s.session_key) else 'human_turn'
                 evidence = self.owner_turn_evidence(session_id, created_in)
@@ -212,7 +228,7 @@ class Tool:
                         chat_type=s.chat_type, allow_gateway_injection=e.injection_allowed(),
                         kind=(args.get('trigger') or {}).get('kind',''), created_in=created_in,
                         depth=depth, parent_role=parent_role, children_created=children,
-                        untrusted_payload=bool(retained and retained.untrusted),
+                        untrusted_payload=bool(retained and retained.untrusted), voice_session=live_voice,
                         active_count=active_count, global_active_count=global_active_count)
                     if not gate.allowed:
                         if gate.reason in {'max_active', 'global_max_active'}:
@@ -281,7 +297,7 @@ class Tool:
                     if action in {'resume','update'}:
                         if not s.enabled:
                             return {'error':'session_off'}
-                        if not deliverable_platform(s.platform):
+                        if not live_voice and not deliverable_platform(s.platform):
                             return {'error':'non_gateway', 'detail':platform_refusal(s.platform)}
                         if e.policy.dm_only and s.chat_type != 'dm':
                             return {'error':'dm_only'}

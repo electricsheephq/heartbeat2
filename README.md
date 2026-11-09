@@ -227,7 +227,7 @@ Kanban watchers can target one task with `trigger.task_id`, one board with `trig
 Only probe and event watchers can carry a `deadline`: it is a one-time "nothing happened" fallback, and the watcher keeps going until it expires. Quiet hours can hold that fallback wake.
 
 ## Settings
-Voice plugin authors can use the optional [`voice_bridge` registration contract](docs/voice-bridge.md); this release registers transports only, with no voice wake consumer.
+Voice plugin authors can use the optional [`voice_bridge` registration contract](docs/voice-bridge.md). With a bridge registered, wakes run in connected API voice conversations; installing HeartBeat alone adds no bridge and admits no API session.
 
 These live under `plugins.entries.heartbeat2.settings` and appear in **Settings ▸ Plugins**. The agent's tool can't change them. When a request goes past a bound, the tool tells the agent exactly what it clamped.
 
@@ -353,6 +353,7 @@ The [roadmap tracker](https://github.com/electricsheephq/heartbeat2/issues/139) 
 | Desktop and TUI | Hermes 0.23+ with local-session plugin injection and consent |
 | CLI | Refused; plugin turns are not shown |
 | API server | Refused; plugin turns are dropped |
+| API voice conversation | Only while connected through the owner's [`voice_bridge` plugin](docs/voice-bridge.md), with consent; busy or disconnected devices hold the wake |
 | Cron | Refused |
 
 Wakes can't run in the Hermes CLI: it doesn't show plugin turns. Use the Desktop app, the TUI or a messaging chat.

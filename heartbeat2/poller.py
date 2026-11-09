@@ -18,7 +18,7 @@ import uuid
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every
-from . import governor
+from . import governor, voice
 
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
@@ -103,7 +103,9 @@ class Poller:
         now=self.clock.now()
         return bool(self.policy.enabled and not self.paused() and self.injection_allowed() and s is not None and s.enabled
                     and not (s.paused_until is not None and s.paused_until>now)
-                    and not (self.policy.dm_only and s.chat_type!='dm') and deliverable_platform(s.platform))
+                    and not (self.policy.dm_only and s.chat_type!='dm')
+                    # No transport call: callers hold the store lock. A registered bridge is enough for an owner turn's context.
+                    and (deliverable_platform(s.platform) or voice.is_voice(s) and voice.voice_bridge_for(self) is not None))
 
     def injection_allowed(self):
         try:
@@ -347,7 +349,9 @@ class Poller:
                 if not self.eligible(): break
                 w=s.get_wake(o.wake_id)
                 cache_line=self.cache_line(w)  # Pricing may fetch metadata; never hold the write lock.
-                self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
+                # The voice bridge is asked here for the same reason; the gate inside the transaction reads this answer.
+                with voice.asked(w,self.voice_hold(w)):
+                    self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
             self.notifications.tick(self)
         except Exception as exc:
             self.log.warning('heartbeat2 tick failed',exc_info=True)
@@ -744,6 +748,15 @@ class Poller:
             return 'daily_message_cap'
         return ''
 
+    def voice_hold(self,w):
+        """Why a voice conversation can't take a wake right now ('' when it can); None for every other chat.
+
+        This asks the bridge, which may block: call it before opening a store transaction, under voice.asked()."""
+        s=self.store.get_session(w.session_key) if w is not None else None
+        if not voice.is_voice(s): return None
+        if not voice.connected(self,s): return 'voice_disconnected'
+        return '' if voice.ready(self,s) else 'busy'
+
     def gate(self,w,o,s):
         now=self.clock.now()
         if o.state=='pending' and o.held_since is not None and o.error.startswith('held_'):
@@ -776,7 +789,12 @@ class Poller:
         if not s.enabled: return 'session_off',False,None
         if s.paused_until is not None and s.paused_until>now: return 'session_paused',True,None
         if self.policy.dm_only and (s.chat_type!='dm' or w.chat_type!='dm'): return 'dm_only',False,None
-        if not deliverable_platform(s.platform): return 'non_gateway',False,None
+        if voice.is_voice(s):
+            # The tick and /pulse test ask the bridge before their transaction; a direct caller asks here.
+            voice_hold=voice.answer(w)
+            if voice_hold is None: voice_hold=self.voice_hold(w)
+            if voice_hold: return voice_hold,True,None
+        elif not deliverable_platform(s.platform): return 'non_gateway',False,None
         # The owner has been away sleep_after_days: the agent's own work runs no turn until they write (#62). This comes
         # before the message holds, which still run a turn silently. A report-back passes only for agreed results.
         if sleeps(w) and self.policy.asleep(s,now):
@@ -948,7 +966,8 @@ class Poller:
             self.refund_claimed(o,held_by)
             return
         inject_raised=False
-        try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
+        voice_wake=voice.is_voice(session)
+        try: accepted=voice.inject(self,session,text) if voice_wake else self.ctx.inject_message(text,session_key=w.session_key)
         except Exception as exc:
             inject_raised=True
             accepted=False
@@ -980,6 +999,13 @@ class Poller:
                             from .notifier import episode, EPISODE_PREFIX
                             if not s.get_meta(EPISODE_PREFIX+w.session_key):
                                 s.set_meta(EPISODE_PREFIX+w.session_key,json.dumps(episode(self,w.session_key)))
+                return
+            if voice_wake and not inject_raised:
+                # The device turned busy or dropped after the gate asked: nothing was sent and nothing failed.
+                # Wait like any busy chat, within the wake's own expiry, without spending an injection retry.
+                with s.atomic():
+                    if self.refund_claimed(o,'busy'):
+                        s.set_meta('not_before:'+o.id,str(self.clock.now()+RETRY_DELAYS[0]))
                 return
             count=int(s.get_meta('inject_failures:'+o.id) or 0)+1
             s.set_meta('inject_failures:'+o.id,str(count))

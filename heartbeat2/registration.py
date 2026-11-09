@@ -17,7 +17,7 @@ PLUGIN_ROOT=Path(__file__).resolve().parents[1]
 # Every module of the plugin. A runtime imports them all up front, so plugin files replaced under a running process (an
 # upgrade without a reload) stay inert until the restart instead of mixing old and new modules (#207).
 MODULES=('cache','clock','commands','desk','governor','intake','model','notifier','policy','poller','probes','schedule',
-         'serving','store','tool','voice_bridge','wake_text')
+         'serving','store','tool','voice','voice_bridge','wake_text')
 
 
 def installed_version():

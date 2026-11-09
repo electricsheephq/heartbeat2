@@ -378,6 +378,9 @@ class Intake:
 
     def _key(self,sid='',key=''):
         if key and key!='default': return key
+        from . import voice
+        target=voice.current(self.engine)
+        if target: return voice.PREFIX+target[0]
         current=self.engine.tool.session_key_fn()
         if current and current!='default': return current
         return self.bindings.get(sid,'')
@@ -534,6 +537,13 @@ class Intake:
                     self.count(key,pending.get('mid'),identity.platform)
                 s.set_meta(stamp,'')
         parsed=marker(user_message,secret=s.get_meta('marker_secret'),require_tag=(identity.chat_type != 'dm'))
+        from . import voice
+        # The bridge named this conversation for this session id, so a rotated id is the same conversation.
+        voice_turn=voice.is_voice(identity)
+        # Owner credit needs the bridge's own word; a bridge error reads as no, and the turn's bookkeeping carries on.
+        if not parsed and voice_turn and voice.owner_message(e,identity,user_message):
+            owner_seen=True
+            self.human(key,identity.platform,dedupe=['voice:'+key+':'+turn_id])
         if not parsed:
             row=conversation_history[-1] if conversation_history else None
             if isinstance(row,dict) and row.get('role')=='user' and not row.get('display_kind'):
@@ -601,7 +611,7 @@ class Intake:
                 if w is None or w.session_key!=key or o is None: return None
                 invalid=o.attempt!=attempt or o.state not in {'claimed','started'}
                 if not invalid and w.armed_session_id and w.armed_session_id!=session_id:
-                    tip=e.compression_tip(w.armed_session_id)
+                    tip=session_id if voice_turn else e.compression_tip(w.armed_session_id)
                     if tip==session_id:
                         s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
                         w=s.get_wake(wid)
@@ -633,7 +643,7 @@ class Intake:
             # human turn has visited the new tip before /new arrives.
             for w in s.list_wakes(key):
                 if w.status in {'active','paused','proposed'} and w.armed_session_id and w.armed_session_id!=session_id:
-                    tip=e.compression_tip(w.armed_session_id)
+                    tip=session_id if voice_turn else e.compression_tip(w.armed_session_id)
                     if tip==session_id:
                         s.cas_wake(w.id,w.status,expected_version=w.version,armed_session_id=session_id)
                     elif tip is not None:

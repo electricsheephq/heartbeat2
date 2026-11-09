@@ -6,7 +6,7 @@ import re
 
 from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES, RUN_KEY_PREFIX, RUN_PAYLOAD
 from . import governor
-from . import cache
+from . import cache, voice
 from .policy import INJECTION_CONFIG, LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, platform_refusal, session_platform, owner_requested, agreed_watcher, cap_counts, is_keep_warm, is_watcher, sleeps
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible, filter_text
@@ -58,6 +58,8 @@ def _activation(engine, session, wake):
     gate = engine.policy.creation_gate(session_key=session.session_key, platform=session.platform,
         chat_type=session.chat_type, allow_gateway_injection=engine.injection_allowed(),
         creator='user', kind=wake.kind,
+        # No transport call here (a transaction is open): handle() already had the bridge name this conversation.
+        voice_session=voice.is_voice(session) and voice.voice_bridge_for(engine) is not None,
         active_count=active_count, global_active_count=global_active_count)
     if not gate.allowed: raise ValueError(gate.reason + ('\n'+gate.detail if gate.detail else ''))
 
@@ -327,7 +329,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
         'in_flight':'another wake is running','provider_unavailable':'provider unavailable','dm_only':'DMs only',
         'plugin_off':'HeartBeat 2.0 is off in settings','paused_all':'HeartBeat 2.0 is paused',
         'not_before':'waiting to retry a failed delivery' if retry else 'waiting out an earlier hold',
-        'app_closed':'the app window is closed',
+        'app_closed':'the app window is closed','voice_disconnected':'the voice device is not connected',
         'checkin_not_due':'the owner has not been quiet long enough','ack_timeout':'not acknowledged after three attempts',
         'eval_backoff':'retrying after an error','drop_pauses':'an earlier unacknowledged turn pauses the wake first'}
     if ahead: reasons['in_flight']=f'another wake ({ahead}) takes the turn first'
@@ -347,6 +349,11 @@ def _test(engine,w,session,cache_line,wake_cache=''):
 
 def handle(raw_args, runtime):
     key = session_env('HERMES_SESSION_KEY')
+    # A command run in a connected voice conversation is that conversation's: the bridge names it, as for the tool.
+    # Asked before any transaction, so a slow bridge never holds the store lock.
+    try: target = voice.current(runtime.get_engine())
+    except Exception: target = None
+    if target: key = voice.PREFIX + target[0]
     if not key or key == 'default': return 'Error: /pulse needs the invoking gateway session.'
     try:
         engine = runtime.get_engine()
@@ -356,10 +363,13 @@ def handle(raw_args, runtime):
         preview=engine.store.get_wake(rest) if action=='test' else None
         cache_line=engine.tool.cache_result(preview) if preview and preview.session_key==key else ''
         wake_cache=engine.cache_line(preview) if preview and preview.session_key==key else ''
+        # The preview's device questions go to the bridge here, before the transaction.
+        voice_hold=engine.voice_hold(preview) if preview and preview.session_key==key else None
         with engine.store.atomic():
             session = engine.store.get_session(key)
             bound={name:session_env('HERMES_SESSION_'+name.upper()) for name in ('platform','chat_type','chat_id')}
             bound['platform']=session_platform(bound['platform'],engine.ctx)
+            if target: bound={'platform':voice.PLATFORM,'chat_type':'dm','chat_id':target[0]}
             # Hermes commands bind platform=local outside the model turn's surface scope. Only a known
             # app surface in this same chat is a valid fallback; local itself never establishes delivery.
             if bound['platform']=='local':
@@ -370,16 +380,18 @@ def handle(raw_args, runtime):
                 elif action not in {'run','test'} and platform_refusal(session.platform):
                     return platform_refusal(session.platform)  # a CLI chat gets the CLI's own refusal
             app_off=action=='off' and session is not None and session.platform in LOCAL_SURFACES
-            if action not in {'run','test'} and not app_off and bound['platform'] and not deliverable_platform(bound['platform']):
+            if action not in {'run','test'} and not app_off and not target and bound['platform'] and not deliverable_platform(bound['platform']):
                 return platform_refusal(bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
-            if action not in {'run','test'} and deliverable_platform(bound['platform']):
-                engine.store.upsert_session(Session(key,**bound,current_session_id=session_env('HERMES_SESSION_ID')))
+            if action not in {'run','test'} and (target or deliverable_platform(bound['platform'])):
+                engine.store.upsert_session(Session(key,**bound,current_session_id=target[1] if target else session_env('HERMES_SESSION_ID')))
                 session=engine.store.get_session(key)
                 engine.store.cas_session(key,{'platform':session.platform,'chat_type':session.chat_type,'chat_id':session.chat_id},**bound)
                 session=engine.store.get_session(key)
-            if session is None or not (app_off or deliverable_platform(session.platform)):
+            if session is None or not (app_off or target or deliverable_platform(session.platform)):
                 return platform_refusal(session.platform if session else bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
             if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
+        if target and action in {'warm','owntime'} and rest in {'','on','off'}:
+            return 'Keep-warm and own time are not available in voice conversations.'
         if action in {'add','role'}: return _add(engine,session,rest,role=action=='role')
         if action == 'warm' and rest in {'','on','off'}: return _warm(engine,key,rest)
         if action == 'owntime' and rest in {'','on','off'}: return _owntime(engine,key,rest)
@@ -390,7 +402,8 @@ def handle(raw_args, runtime):
                 wake=engine.store.get_wake(rest)
                 if wake is None or wake.session_key!=key: return 'Error: unknown item in this chat.'
                 if wake.status in FINISHED_STATUSES: raise ValueError('it has finished')
-                if action=='test': return _test(engine,wake,session,cache_line,wake_cache)
+                if action=='test':
+                    with voice.asked(wake,voice_hold): return _test(engine,wake,session,cache_line,wake_cache)
                 if wake.status=='proposed': raise ValueError(f'approve it first with /pulse ok {wake.id}')
                 if wake.status=='paused': raise ValueError(f'resume it first with /pulse resume {wake.id}')
                 if wake.kind=='at': raise ValueError(f'a one-time reminder fires once at its time; preview it with /pulse test {wake.id}')

@@ -46,7 +46,14 @@ These same disclosure and exception paragraphs appear in README and the manifest
 - HeartBeat 2.0 is intended for messaging-gateway DMs. With default `dm_only=true`,
   groups and unknown chat types are refused. Turning `dm_only=false` permits
   recognized gateway groups; this is an opt-in exception, not tested live here.
-  CLI, TUI, Desktop, API server and cron arming are refused.
+  CLI, TUI, Desktop, ordinary API server and cron arming are refused. The plugin the owner names
+  in `voice_bridge` may admit a connected API voice conversation as a DM, for its own
+  profile only; the bridge chooses the stable destination, never tool arguments. It
+  must authenticate the device, attest genuine owner messages, run `/pulse` commands
+  only for genuine owner input, reject busy/offline injections and deliver only final
+  transformed responses, including silent verdicts. A missing, withdrawn or failing
+  bridge reads as no bridge. Existing injection consent, expiry, quiet hours and
+  budgets still apply. See the [voice bridge contract](docs/voice-bridge.md).
 - Core consent is `plugins.entries.heartbeat2.allow_gateway_injection: true`,
   outside `settings`. Agent tools cannot write settings or specify destinations.
 - File probes may read configured local files; relative paths resolve against
