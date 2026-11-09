@@ -1,7 +1,7 @@
 """A bounded, read-only view of this chat's responsibilities and budgets."""
 from types import SimpleNamespace
 
-from .commands import _clip, _oneline, _time, messages_count, quiet_until
+from .commands import _clip, _oneline, _paused, _time, messages_count, quiet_until
 from .policy import is_watcher
 from .schedule import quiet_end, zone
 from .wake_text import _age
@@ -11,10 +11,10 @@ def cost_line(store, key, timezone, policy):
     counts = store.agent_cost_today(key, timezone)
     text = ''
     if policy.daily_cost_limit_usd or counts['cost_microusd']:
-        text = f'cost today ${counts["cost_microusd"]/1e6:.2f}'
+        text = f'agent spend today ${counts["cost_microusd"]/1e6:.2f}'
         if policy.daily_cost_limit_usd: text += f' of ${policy.daily_cost_limit_usd:.2f}'
     if counts['unpriced_calls']:
-        text += (' · ' if text else '') + f'{counts["unpriced_calls"]} unpriced'
+        text += (' · ' if text else '') + f'{counts["unpriced_calls"]} unpriced calls not counted'
     return text
 
 
@@ -71,6 +71,8 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
         due = ('paused · ' + _plain(_oneline(w.status_reason or 'paused')) if w.status == 'paused'
                else 'resting until tomorrow' if today >= budget
                else 'next ' + _time(view, w.next_due_at, compact=True))
+        if w.status == 'paused' and w.status_reason in {'command','agent_timed'} and store.get_meta('resume_after:'+w.id):
+            due = _paused(view, w, compact=True)
         title = _plain(_clip(_oneline(w.title or w.note), 80))
         rows.append(f'- role {w.id} {title} · {_rhythm(w)} · last: {summary} · '
                     f'{due} · today {today}/{budget}')

@@ -285,6 +285,9 @@ class Policy:
             return Gate(False, "needs_owner_ok")
         if action == "resume" and wake.status_reason.startswith("governor:") and created_in != "human_turn":
             return Gate(False, "needs_owner")
+        if action == "resume" and wake.status_reason == "command" and created_in != "human_turn":
+            # The owner paused it with /pulse pause: only the owner, or the agent in the owner's turn, resumes it.
+            return Gate(False, "needs_owner", "The owner paused this; they can resume it with /pulse resume, or ask you to.")
         kind = new_kind if new_kind is not None else wake.kind
         if wake.role and kind not in RECURRING_KINDS:
             return Gate(False, 'role_needs_recurring')

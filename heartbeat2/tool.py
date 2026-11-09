@@ -18,8 +18,8 @@ STR = {'type': 'string'}
 BOOL = {'type': 'boolean'}
 PARAMETERS = obj({
     'action': {'type': 'string', 'enum': ['create', 'list', 'desk', 'update', 'pause', 'resume', 'cancel', 'respond', 'off']},
-    'id': STR, 'title': STR, 'note': STR, 'reason': STR,
-    'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','check_every','deadline','cwd')},
+    'id': STR, 'title': STR, 'note': STR, 'reason': STR, 'pause_for': STR,
+    'trigger': obj({**{k: STR for k in ('kind','at','every','cron','after','path','pattern','url','check_every','deadline','cwd','task_id','board','message_id')},
                     'fire_on': {'type':'string','enum':['change','success','failure','json']},
                     'pid': {'type':'integer'}, 'command': {'type':'array','items':STR},
                     'emojis': {'type':'array','items':STR}}),
@@ -33,7 +33,7 @@ PARAMETERS = obj({
 PARAMETERS['required'] = ['action']
 DESCRIPTION = ('Your own time in this chat. Use create to arm a wake/watcher (note and trigger.kind required), or a role '
                '(role=true on every/cron/self) for a standing responsibility you own: no expiry, a turns-per-day budget, a desk view; list to inspect; desk to read your desk now (your roles, what is due, held messages, turns, messages and cost left today); '
-               'update to change instructions or trigger; pause to suspend; resume to restart a paused wake; '
+               'update to change instructions or trigger; pause to suspend (pause_for: "12h" resumes it on its own); resume to restart a paused wake; '
                'cancel to end it; off to stop checks for this chat. During a wake turn, use respond to set '
                'outcome and notify, optionally scratch/next_check; outcome=progress with notify=false and a summary is real work, never counted as idle. Bounds and clamps are reported. Never type silence markers. '
                'Results include a `cache` line; pick intervals the line marks warm. '
@@ -118,11 +118,20 @@ class Tool:
             if s is None:
                 return {'error':'missing_session'}
             action = args.get('action')
+            pause_seconds = None
+            if 'pause_for' in args:
+                if action != 'pause' or not isinstance(args.get('id'), str) or not args['id'] or args['id'] == 'all':
+                    raise ValueError('pause_for requires action: pause and a single id (not all)')
+                if not isinstance(args['pause_for'], str):
+                    raise ValueError('pause_for must be a duration string')
+                pause_seconds = parse_duration(args['pause_for'])
+                if not 60 <= pause_seconds <= e.policy.max_lifetime_days * 86400:
+                    raise ValueError(f'pause_for must be between 1 minute and {e.policy.max_lifetime_days:g} days (max_lifetime_days)')
             with e.store.atomic():
                 s = e.store.get_session(s.session_key)
                 flight = e.intake.flight_for(session_id, s.session_key)
                 evidence = self.owner_turn_evidence(session_id, flight)
-                created_in = 'wake_turn' if flight else 'human_turn'
+                created_in = 'wake_turn' if flight or e.intake.in_wake_turn(session_id, s.session_key) else 'human_turn'
                 if action == 'respond':
                     return self.respond(args, flight)
                 if action == 'list':
@@ -235,7 +244,7 @@ class Tool:
                         budget = args.get('budget',{}).get('turns_per_day')
                         if w.role and isinstance(budget,int) and not isinstance(budget,bool):
                             ceiling = e.store.owner_budget(w.id)
-                            if flight:
+                            if created_in == 'wake_turn':
                                 limit = e.policy.role_budget(w)
                                 if budget > limit:
                                     request = {**args, 'budget':{'turns_per_day':limit}}
@@ -294,12 +303,17 @@ class Tool:
                         clamps.update(result.clamped)
                         candidate = self.feasible(candidate,explicit_expiry='expires' in until)
                     else:
-                        candidate = replace(w,status='paused' if action=='pause' else 'cancelled',status_reason='agent')
+                        candidate = replace(w,status='paused' if action=='pause' else 'cancelled',
+                                            status_reason='agent_timed' if pause_seconds is not None else 'agent')
                     updates = {k:v for k,v in asdict(candidate).items() if k not in {'id','session_key','created_at','updated_at','version'} and v != getattr(w,k)}
                     if updates and not e.store.cas_wake(w.id,w.status,expected_version=w.version,**updates):
                         return {'error':'concurrent_change'}
                     if action in {'pause','cancel'}:
                         e.cancel_occurrences(w.id,'paused' if action=='pause' else 'cancelled',preserve_started=True)
+                    if action == 'pause':
+                        e.store.set_meta('resume_after:'+w.id,str(e.clock.now()+pause_seconds) if pause_seconds is not None else '')
+                    elif action in {'resume','cancel'}:
+                        e.store.set_meta('resume_after:'+w.id,'')
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
                     w=e.store.get_wake(w.id)
                     if action == 'update' and owner_lowered: e.store.set_owner_budget(w.id,max(1,budget))  # the number the owner asked for
@@ -383,6 +397,10 @@ class Tool:
             lead=(f'{first}, then every {duration(w.trigger_json["check_every"])}' if w.kind in PROBE_KINDS else
                   f'Waits for {w.kind} events' if watcher else
                   f'Waits for {duration(parse_duration(w.trigger_json.get("after",p.checkin_after_hours*3600)))} of owner silence')
+            if w.kind in {'kanban_completed','kanban_blocked','kanban_worker_exited'}:
+                if 'task_id' in w.trigger_json: lead+=f' for task {w.trigger_json["task_id"]}'
+                if 'board' in w.trigger_json: lead+=f' on board {w.trigger_json["board"]}'
+            if w.kind=='reaction' and 'message_id' in w.trigger_json: lead+=f' on message {w.trigger_json["message_id"]}'
             parts=[lead+(f'; if nothing happens by {local(w.deadline_at)}, it tells you once' if watcher and w.deadline_at is not None else '')+'.']
         if w.status not in {'proposed','paused'}:
             from .policy import owner_requested
@@ -448,6 +466,16 @@ class Tool:
         if w.trigger_json.get('builtin'):
             trigger['builtin'] = True
         kind=trigger.get('kind',w.kind)
+        if any(k in trigger for k in ('task_id','board')):
+            if kind not in {'kanban_completed','kanban_blocked','kanban_worker_exited'}:
+                raise ValueError('task_id and board apply to kanban triggers')
+            if any(not isinstance(trigger[k],str) or not trigger[k].strip() for k in ('task_id','board') if k in trigger):
+                raise ValueError('task_id and board must be non-empty strings')
+        if 'message_id' in trigger:
+            if kind!='reaction':
+                raise ValueError('message_id applies to reaction triggers')
+            if not isinstance(trigger['message_id'],str) or not trigger['message_id'].strip():
+                raise ValueError('message_id must be a non-empty string')
         if 'deadline' in args.get('trigger',{}) and kind not in PROBE_KINDS | EVENT_KINDS:
             raise ValueError('deadline works only for watchers (file, process, url, command and event kinds)')
         if kind in {'file','url'} and 'pattern' in trigger:
@@ -562,7 +590,7 @@ class Tool:
         if not isinstance(summary,str) or len(summary)>280: raise ValueError('summary exceeds 280 characters')
         changes={'outcome':outcome,'notify':args['notify'],'summary':summary}
         w=e.store.get_wake(o.wake_id)
-        if o.outcome is None and w.status in {'paused','cancelled'} and w.status_reason!='agent':
+        if o.outcome is None and w.status in {'paused','cancelled'} and w.status_reason not in {'agent','agent_timed'}:
             changes['force_silent']=True
         clamps={}
         scratch=args.get('scratch')

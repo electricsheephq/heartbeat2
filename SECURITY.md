@@ -117,8 +117,10 @@ A structured `pulse respond` with notify=false yields exactly `[SILENT]`; missin
 respond also defaults to silence. Hermes response trailers can break the final
 exact-marker match after transformation. Never treat fake-injector acceptance
 as proof of delivery. Enabled/settings/source gates, the daily wake-turn cap, the
-optional daily cost limit, per-role turn budgets, busy checks, estop and the idle
-governor bound the engine's work and spend. Quiet hours, the daily message cap and
+optional daily priced-spend limit (checked before each of the agent's own turns, not
+a hard ceiling on a turn already running; unpriced calls don't count toward it, even
+when the provider bills them), per-role turn budgets, busy checks, estop
+and the idle governor bound the engine's work and spend. Quiet hours, the daily message cap and
 the unanswered mute bound what reaches the owner: during them the agent's own
 recurring work and roles still run, silently, and their messages are not delivered.
 Roles and own-time turns are full model turns with the conversation's normal tools;

@@ -295,6 +295,12 @@ class Intake:
                 return f
         return None
 
+    def in_wake_turn(self,sid,key):
+        """A turn that began as a wake stays one, even after the owner stops its occurrence mid-turn (/pulse pause or cancel)."""
+        if self.flight_for(sid,key): return True
+        f=self.flights.get(sid)
+        return f is not None and f.session_key==key
+
     def _follow(self,sid):
         if not sid or sid in self.bindings or sid in self.flights: return
         e,s=self.engine,self.engine.store

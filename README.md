@@ -9,7 +9,7 @@
 - **Follow-ups and watchers.** A follow-up at a set time, a recurring check, a check-in after a long silence, or a deterministic watcher on a file, process, URL, read-only command or Hermes event. A watcher costs no model call until something changes.
 - **Same conversation, same model.** Every wake is a turn in the chat it belongs to, on that chat's own model. There is no side model, separate cron session or subagent.
 - **Quiet work counts.** A turn that researches, writes or prepares something without messaging you is real progress. Only wakes that keep finding nothing to do slow down, then pause and ask you once.
-- **You set the budgets.** Turns per day, an optional daily cost limit, turns per role, messages per day, the unanswered mute and quiet hours are your settings. They hold back messages and spending, not initiative: while you're away or asleep the agent can keep working, and it tells you what matters when you're back. That work still uses turns: the agent's recurring work, roles and own time keep running (and billing) under the mute and quiet hours, within the turns-per-day and cost limits. Roles and own time don't expire on a timer. The agent can tighten its own limits but never widen yours.
+- **You set the budgets.** Turns per day, an optional daily priced-spend limit, turns per role, messages per day, the unanswered mute and quiet hours are your settings. They hold back messages and spending, not initiative: while you're away or asleep the agent can keep working, and it tells you what matters when you're back. That work still uses turns: the agent's recurring work, roles and own time keep running (and billing) under the mute and quiet hours. Turn limits and the priced-spend check apply before each turn; the spend limit cannot stop a turn already running, and unpriced calls are not counted. Roles and own time don't expire on a timer. The agent can tighten its own limits but never widen yours.
 
 ## See it work
 
@@ -173,6 +173,7 @@ pulse tool results name the ignored setting.
 `/pulse` is a control panel, not conversation. Using it never counts as replying to the agent. Anything else you send counts as a reply, including a reaction or an edit on platforms that report them: it resets the unanswered mute and cancels wakes armed to stop when you reply. A reaction or edit counts only when its chat maps to one HeartBeat session; in a chat shared by several sessions (for example DM threads or topics) it is ignored. The other exceptions are listed under known issues: a message queued while the agent is busy on Signal or SimpleX, and a Codex app-server steer.
 
 **Your agent** gets one tool, `pulse` (`create · list · desk · update · pause · resume · cancel · respond · off`), and the bundled `heartbeat2-usage` skill. `desk` lets it read its desk at any point in a turn, the same view as `/pulse desk`. The skill teaches it to:
+- rest one wake with `action: pause`, its `id` and `pause_for: "12h"` when it knows when to return; its timer never resumes a wake you paused or a chat you turned off, and it can resume a wake you paused with `/pulse pause` only during your own turn, never from its wake turns;
 - take on roles and keep working on them, follow up on what it started, and use its own time well;
 - treat your budgets as the rules it works inside, and message you only when it's worth your attention;
 - prefer a watcher to a timer whenever a deterministic check can tell "changed";
@@ -193,6 +194,7 @@ Watchers available to the agent:
 | Hermes events | A kanban task completes or blocks, a worker exits, a subagent finishes, the API errors, or someone reacts to or edits a message |
 
 Hermes events are selected by `trigger.kind`: `kanban_completed`, `kanban_blocked`, `kanban_worker_exited`, `subagent_done`, `api_error`, `reaction` (with an optional `emojis` filter) and `message_edited`.
+Kanban watchers can target one task with `trigger.task_id`, one board with `trigger.board`, or both. Reaction watchers can target one message with `trigger.message_id`.
 
 Only probe and event watchers can carry a `deadline`: it is a one-time "nothing happened" fallback, and the watcher keeps going until it expires. Quiet hours can hold that fallback wake.
 
@@ -210,7 +212,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Wake turns per day | `max_model_wakes_per_day` | 24 | Per chat, local day. Each wake turn is a full model turn. |
 | Wake messages per day | `max_messages_per_day` | 6 | Per chat, local day. |
 | Own time (hours between turns) | `own_time_hours` | 0 | 0 = off. The agent gets a turn of its own this often to work on its roles, follow things up, reflect or rest. Each is a full model turn; quiet hours hold its messages, not its work. |
-| Daily cost limit for the agent's own turns (USD) | `daily_cost_limit_usd` | 0 | 0 = none. Once today's priced cost of turns the agent started reaches this, its own turns stop until tomorrow. Your own reminders still fire. Unpriced routes are not counted; `/pulse status` shows them. |
+| Daily priced-spend limit for the agent's own turns (USD) | `daily_cost_limit_usd` | 0 | 0 = none. Checked before each of the agent's own turns: once today's priced spend on turns it started reaches this, they stop until tomorrow. It is not a hard ceiling on a turn already running. Your own reminders still fire. Unpriced routes are not counted; /pulse status shows how many calls were unpriced. |
 | Turns per role per day (default) | `role_turns_per_day_default` | 6 | A role's budget when none is set for it. Each turn is a full model turn. |
 | Most turns a role may take per day | `role_turns_per_day_max` | 12 | Caps every role budget. A budget you set with `/pulse budget`, or a lowering you ask the agent for, is a ceiling the agent can go under but never raise. The chat's wake-turn limit still applies. |
 | Follow-ups a role may arm per turn | `max_children_per_wake_turn` | 3 | How many wakes or watchers one role turn may create. Other wake turns may create one. |

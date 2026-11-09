@@ -53,10 +53,10 @@ def _reschedule(engine,wake):
 
 
 def resume_timed(engine):
-    """Only command-paused items with an explicit timer may auto-resume."""
+    """Only command or agent_timed pauses with an explicit timer may auto-resume."""
     for wake in engine.store.list_wakes(status='paused'):
         until = float(engine.store.get_meta('resume_after:'+wake.id) or 0)
-        if not until or until > engine.clock.now() or wake.status_reason != 'command': continue
+        if not until or until > engine.clock.now() or wake.status_reason not in {'command','agent_timed'}: continue
         session = engine.store.get_session(wake.session_key)
         if session is None: continue
         try:
@@ -97,11 +97,11 @@ def _time(engine, epoch, *, compact=False):
     return datetime.fromtimestamp(epoch,tz).strftime(fmt)
 
 
-def _paused(engine, wake):
-    # Only a governor pause takes keep; only a timed /pulse pause resumes on its own (resume_timed).
+def _paused(engine, wake, *, compact=False):
+    # Only a governor pause takes keep; explicit command/agent timers may auto-resume.
     if wake.status_reason.startswith('governor:'): return 'paused · resumes on keep/resume'
-    until = float(engine.store.get_meta('resume_after:'+wake.id) or 0) if wake.status_reason == 'command' else 0
-    return f'paused · resumes {_time(engine, until)} or on resume' if until else 'paused · resumes on resume'
+    until = float(engine.store.get_meta('resume_after:'+wake.id) or 0) if wake.status_reason in {'command','agent_timed'} else 0
+    return f'paused · resumes {_time(engine, until, compact=compact)} or on resume' if until else 'paused · resumes on resume'
 
 
 def _role_today(engine, wake):
@@ -249,9 +249,9 @@ def handle(raw_args, runtime):
                          f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {messages_count(daily["delivered"],engine.store.messages_in_flight(key),engine.policy.max_messages_per_day)} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
                          f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
                 held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
-                if engine.policy.daily_cost_limit_usd:
-                    from .desk import cost_line
-                    lines.append(cost_line(engine.store,key,engine.policy.resolved_timezone(),engine.policy))
+                from .desk import cost_line
+                cost=cost_line(engine.store,key,engine.policy.resolved_timezone(),engine.policy)
+                if cost: lines.append(cost)
                 if held: lines.append(f'Held items: {held}')
                 if engine.settings_notice(): lines.append(engine.settings_notice())
                 if cache.ttl_for_session(engine.store,session)==(300,'hermes'):
@@ -360,7 +360,8 @@ def _transition(engine,session,wake,action,seconds):
         return _item(engine,engine.store.get_wake(wake.id)) + (f'\nNew cadence: {result["cadence_s"]:g} seconds.\n{result.get("cache","")}' if action=='slow' else '')
     if wake.status=='proposed' and action not in {'ok','cancel','stop'}:
         raise ValueError('proposed item: approve with /pulse ok or cancel')
-    if action=='pause' and wake.status!='active': raise ValueError('pause needs an active item')
+    if action=='pause' and wake.status!='active' and not (wake.status=='paused' and wake.status_reason=='agent_timed'):
+        raise ValueError('pause needs an active item')
     if action=='watch' and wake.status not in {'active','paused'}: raise ValueError('watch needs an active or paused item')
     if action=='watch' and (wake.role or wake.trigger_json.get('own_time')):
         raise ValueError('roles and own time stay recurring; use /pulse slow, /pulse budget or /pulse cancel')
