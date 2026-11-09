@@ -27,6 +27,16 @@ One real run in a Telegram DM, captured as it happened (only reply-quote headers
 
 ![The agent confirms the round() change caused both failures and reports all 10 tests passing after restoring the Decimal version](docs/media/see-it-work-3-fix.png)
 
+A second real run on the same profile shows roles and the desk (the reply-quote header is painted out).
+
+**4. Hand it a role.** Asked to own the shop's release notes, a weekly batch of social drafts and a pop-up poster brief, the agent sets up three roles and sends a receipt. For each one it gives the rhythm, what it will and won't do without an OK, and a budget of one work turn a day. It also lists the facts it still needs, and anything missing stays TBC instead of being invented. (The release-notes row is above this crop.)
+
+![The agent's receipt for two of its three new roles, with rhythms, limits, a one-turn-a-day budget and the facts it still needs](docs/media/see-it-work-4-roles.png)
+
+**5. Its desk.** `/pulse desk` shows the view the agent gets at the start of every role turn: each role's rhythm, last result and next turn, the day's messages and turns against your limits, and why messages are held right now. (A long desk lists the most recently updated roles and counts the rest.) Here it is quiet hours: the roles' turns still run, but their replies are held, not sent or queued. The agent keeps what you should hear in its notes for when you're back.
+
+![The desk listing three roles with their cron or interval rhythms and next turns, today's message and turn counts, and messages held for quiet hours](docs/media/see-it-work-5-desk.png)
+
 ## What it feels like
 
 **A follow-up that reads the room.**

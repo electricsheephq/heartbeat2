@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.5 — 2026-11-09
+
+- **README: roles and the desk.** "See it work" now continues with two screenshots from a real run: the agent's receipt when it takes on three roles (rhythm, limits, a one-turn-a-day budget and the facts it still needs), and `/pulse desk` showing those roles with today's budgets and messages held for quiet hours. No code changes.
+
 ## 0.3.4 — 2026-11-09
 
 - **A message still being written counts as in progress, not sent.** While a wake turn is running, and its message could still reach you, it holds one of the day's message slots (a turn whose messages are held, or that was silenced, holds none). The desk and `/pulse status` used to count that slot as a message already sent. They now read, for example, `messages today 2/6 (+1 in progress)`. The desk inside the running turn's own wake text no longer tells the agent its messages are held when that turn is the one using the day's last message. Message caps are unchanged.
