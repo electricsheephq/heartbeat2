@@ -3,10 +3,12 @@ from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 import json
+import hashlib
+import logging
 import re
 
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
-from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS, owner_class, holds_messages
+from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS, owner_class, holds_messages, cap_counts
 from .schedule import parse_at, parse_duration, next_every, next_cron
 
 
@@ -169,14 +171,17 @@ class Tool:
                     parent_role = bool(parent and (parent.role or parent.trigger_json.get('own_time')))
                     depth = (1 if parent_role else parent.depth+1) if parent else 0
                     children = int(e.store.get_meta(child_key) or 0) if child_key else 0
+                    active_count, global_active_count = cap_counts(e.store, s.session_key)
                     gate = e.policy.creation_gate(session_key=s.session_key, platform=s.platform,
                         chat_type=s.chat_type, allow_gateway_injection=e.injection_allowed(),
                         kind=(args.get('trigger') or {}).get('kind',''), created_in=created_in,
                         depth=depth, parent_role=parent_role, children_created=children,
                         untrusted_payload=bool(flight and flight.untrusted),
-                        active_count=sum(w.status in {'active','proposed'} for w in e.store.list_wakes(s.session_key)),
-                        global_active_count=sum(w.status in {'active','proposed'} for w in e.store.list_wakes()))
+                        active_count=active_count, global_active_count=global_active_count)
                     if not gate.allowed:
+                        if gate.reason in {'max_active', 'global_max_active'}:
+                            logging.getLogger('heartbeat2').warning('pulse create refused: %s session=%s',
+                                gate.reason, hashlib.sha256(s.session_key.encode()).hexdigest()[:16])
                         return {'error':gate.reason,'detail':gate.detail}
                     kind = (args.get('trigger') or {})['kind']
                     requested = args.get('owner_asked') is True and evidence and kind == 'at'
@@ -241,8 +246,9 @@ class Tool:
                         if action == 'resume':
                             if w.status != 'paused':
                                 return {'error':'not_resumable'}
-                            if w.status == 'paused' and (sum(x.status in {'active','proposed'} for x in e.store.list_wakes(s.session_key)) >= e.policy.max_active or sum(x.status in {'active','proposed'} for x in e.store.list_wakes()) >= 50):
-                                return {'error':'max_active'}
+                            cap = e.policy.cap_gate(*cap_counts(e.store, s.session_key))
+                            if not cap.allowed:
+                                return {'error':'max_active','detail':cap.detail}
                         # An update without a trigger keeps a stored relative deadline instead of re-reading it.
                         fresh = 'trigger' in args
                         trig = args.get('trigger')

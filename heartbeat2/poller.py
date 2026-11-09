@@ -14,8 +14,8 @@ import os
 import random
 import uuid
 
-from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import MESSAGING_PLATFORMS, owner_class, is_owner, is_watcher, one_shot, holds_messages
+from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES, agent_authored
+from .policy import MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages
 from .schedule import time_due, local_day, parse_duration, next_every
 from . import governor
 
@@ -451,6 +451,15 @@ class Poller:
                     s.add_occurrence(w.id,f't:{w.deadline_at:.17g}',payload=[{'message':'deadline passed — nothing happened'}])
                 s.cas_wake(w.id,'active',expected_version=w.version,deadline_at=None)
 
+    def cancel_non_gateway_builtins(self, *, own_time=False):
+        for w in self.store.list_wakes():
+            if (not w.trigger_json.get('builtin') or bool(w.trigger_json.get('own_time')) != own_time
+                    or w.status in FINISHED_WAKE_STATUSES): continue
+            session = self.store.get_session(w.session_key)
+            if session is not None and not deliverable_platform(session.platform):
+                if self.store.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='non_gateway'):
+                    self.cancel_occurrences(w.id,'non_gateway',preserve_started=True)
+
     def own_time(self):
         s,now=self.store,self.clock.now()
         hours=self.policy.own_time_hours
@@ -459,10 +468,12 @@ class Poller:
                 if s.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='settings'):
                     self.cancel_occurrences(w.id,'settings',preserve_started=True)
         if not hours: return
+        self.cancel_non_gateway_builtins(own_time=True)
         floor=max(self.policy.min_interval_minutes,self.policy.agent_ungated_floor_minutes)*60
         interval=max(hours*3600,floor)
         maximum=max(2*hours*3600,floor)
         for session in s.list_sessions():
+            if not deliverable_platform(session.platform): continue
             if session.last_human_at is None or not session.episode_id: continue
             wid='owntime_'+hashlib.sha256(session.session_key.encode()).hexdigest()[:16]
             w=s.get_wake(wid)
@@ -476,7 +487,7 @@ class Poller:
                     pacing_min_s=floor,pacing_max_s=maximum,next_due_at=now+interval))
                 continue
             updates={}
-            reactivate=w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason=='settings'
+            reactivate=w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason in {'settings','non_gateway'}
             if w.trigger_json.get('hours')!=hours or w.trigger_json.get('floor',floor)!=floor or reactivate:
                 updates.update(base_interval_s=interval,eff_interval_s=interval,pacing_min_s=floor,
                                pacing_max_s=maximum,next_due_at=now+interval,
@@ -490,7 +501,9 @@ class Poller:
         s,now=self.store,self.clock.now()
         if not self.policy.source_silence: return
         if self.policy.owner_silent_checkin:
+            self.cancel_non_gateway_builtins()
             for session in s.list_sessions():
+                if not deliverable_platform(session.platform): continue
                 if session.last_human_at is None or not session.episode_id: continue
                 identity=hashlib.sha1(session.session_key.encode()).hexdigest()[:16]
                 wid='checkin_'+identity
@@ -500,8 +513,8 @@ class Poller:
                         'owner_silent',id=wid,platform=session.platform,chat_type=session.chat_type,chat_id=session.chat_id,
                         armed_session_id=session.current_session_id,creator='user',reason='The owner has been quiet.',
                         trigger_json={'after':self.policy.checkin_after_hours*3600,'builtin':True}))
-                elif w.status in {'done','orphaned'}:
-                    # This system wake belongs to the chat, not one agent id.
+                elif w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason=='non_gateway':
+                    # This system wake belongs to the chat, not one agent id; it comes back when the chat is deliverable again.
                     s.cas_wake(w.id,w.status,expected_version=w.version,status='active',status_reason='',armed_session_id=session.current_session_id)
         for w in s.list_wakes(status='active'):
             if w.kind!='owner_silent': continue
@@ -554,7 +567,7 @@ class Poller:
         if not s.enabled: return 'session_off',False,None
         if s.paused_until is not None and s.paused_until>now: return 'session_paused',True,None
         if self.policy.dm_only and (s.chat_type!='dm' or w.chat_type!='dm'): return 'dm_only',False,None
-        if s.platform not in MESSAGING_PLATFORMS: return 'non_gateway',False,None
+        if not deliverable_platform(s.platform): return 'non_gateway',False,None
         health=json.loads(self.store.get_meta('provider_health') or '{}')
         if health.get('trial'):
             wid,key=health['trial'].split('/',1)
