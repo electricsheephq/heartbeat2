@@ -3,7 +3,7 @@
 ## 0.3.12 — 2026-11-10
 
 - **The demo plays on the README.** The film now plays inline under the demo link, so you can watch it without leaving GitHub.
-- **Says up front that waiting costs nothing.** The README's opening now states that no model runs until there's work: plain code checks every wake and watcher, and the agent gets a turn only when something is due or a watcher's condition is met, with `/pulse` and `/pulse why <id>` to see what's next and why. Documentation only; no code changes.
+- **Says up front that waiting costs nothing.** The README's opening now states that no model runs until there's work: plain code checks every wake and watcher, and the agent gets a turn only when something is due or a watcher's condition is met, with `/pulse` for what's next and `/pulse why <id>` for an item's recent triggers, states and reasons. Documentation only; no code changes.
 
 ## 0.3.11 — 2026-11-10
 

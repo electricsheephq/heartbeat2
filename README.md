@@ -4,7 +4,7 @@
 
 **Give your Hermes agent a working life between messages: wakes, watchers and roles, within daily turn and message caps.**
 
-No model runs until there's work: plain code checks every wake and watcher, and the agent gets a turn only when something is due or a watcher's condition is met. `/pulse` shows what's next; `/pulse why <id>` shows why something fired or was held.
+No model runs until there's work: plain code checks every wake and watcher, and the agent gets a turn only when something is due or a watcher's condition is met. `/pulse` shows what's next; `/pulse why <id>` lists an item's recent triggers with their states and reasons.
 
 ▶ **[Watch the demo](https://x.com/ElectricSheepIO/status/2119811070089138455)**
 
