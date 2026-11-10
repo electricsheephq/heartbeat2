@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.12 — 2026-11-10
+
+- **Says up front that waiting costs nothing.** The README's opening now states that no model runs until there's work: plain code checks every wake and watcher, and the agent gets a turn only when something is due or a watched thing changed, with `/pulse` and `/pulse why <id>` to see what's next and why. Documentation only; no code changes.
+
 ## 0.3.11 — 2026-11-10
 
 - **A README that starts with the point.** The first screen now has the one-line pitch, the demo, the install line and a three-step first result (a reminder five minutes out) ahead of the slower role path. Stale lines are fixed: Desktop and TUI wakes wait on Hermes core, group and topic delivery has passed a live forum-topic test, and the roadmap points at the current milestones. The silence notes now include Hermes's model-fallback notice, and there is a troubleshooting list plus links to releases, changelog, contributing and license. Documentation only; no code changes.
