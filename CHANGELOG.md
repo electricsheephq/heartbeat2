@@ -2,7 +2,7 @@
 
 ## 0.3.12 — 2026-11-10
 
-- **Says up front that waiting costs nothing.** The README's opening now states that no model runs until there's work: plain code checks every wake and watcher, and the agent gets a turn only when something is due or a watched thing changed, with `/pulse` and `/pulse why <id>` to see what's next and why. Documentation only; no code changes.
+- **Says up front that waiting costs nothing.** The README's opening now states that no model runs until there's work: plain code checks every wake and watcher, and the agent gets a turn only when something is due or a watcher's condition is met, with `/pulse` and `/pulse why <id>` to see what's next and why. Documentation only; no code changes.
 
 ## 0.3.11 — 2026-11-10
 
