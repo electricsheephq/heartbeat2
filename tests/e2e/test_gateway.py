@@ -13,6 +13,11 @@ class Finding(AssertionError):
 
 # One Hermes tool-progress bubble for the pulse tool, nothing else.
 PROGRESS_BUBBLE = re.compile(r"⚙️ pulse(?:\.\.\.|: [^\n]*)?")
+# Hermes 0.23.x's own notice for an automated delivery a restart interrupted (gateway/delivery_ledger.py
+# RECOVERED_MARKER + agent/turn_failure_copy.py); exact text, so any other recovered text still fails.
+HERMES_INTERRUPTED_NOTICE = ("♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
+                             "An automated delivery was interrupted and was not run again. Some actions may already "
+                             "have run; verify their effects.")
 
 
 def record_latency(rig, due_at, wall_offset):
@@ -266,7 +271,9 @@ def test_restart_with_pending_wake(make_rig):
     # Hermes 0.23.x's delivery ledger posts its own notice for an automated delivery that a
     # restart interrupted (gateway/delivery_ledger.py RECOVERED_MARKER). That copy is Hermes core's,
     # not the plugin's; anything else visible is a plugin leak.
-    shown = [t for t in rig.new_visible(visible_before) if not t.startswith("♻️ Recovered reply")]
+    shown = rig.new_visible(visible_before)
+    if rig.session_authority():
+        shown = [t for t in shown if t != HERMES_INTERRUPTED_NOTICE]
     assert not shown, "crash-resumed turn emitted visible text"
     assert rig.occurrence(second)["delivered"] == 0
     # Older Hermes replays the interrupted turn and the plugin silences it (resumed_after_restart);
