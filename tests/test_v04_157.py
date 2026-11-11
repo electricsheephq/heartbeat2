@@ -63,6 +63,18 @@ def test_owner_during_turn_keeps_the_requested_next_check(engine):
     assert wake.next_due_at == e.clock.now()+4*3600
 
 
+def test_owner_during_turn_never_tips_a_noop_pause(engine):
+    e = engine
+    w = arm(e, 'every', noop_streak=e.policy.noop_pause_after-1)
+    e.tick(); start(e)
+    e.clock.advance(1)
+    admit(e, 'owner-157-noop')
+    end(e, 'no_change', True)
+    wake = e.store.get_wake(w.id)
+    assert wake.status == 'active' and wake.noop_streak == 0 and wake.engaged == 1
+    assert e.store.get_session(KEY).unanswered_count == 0
+
+
 def test_no_owner_counts_each_delivered_wake(engine):
     e = engine
     for count in (1, 2):

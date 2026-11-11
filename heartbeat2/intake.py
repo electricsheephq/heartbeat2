@@ -947,12 +947,13 @@ class Intake:
                                and session.last_human_at>o.started_at)
                 s.cas_session(key,{'unanswered_count':session.unanswered_count},
                               unanswered_count=session.unanswered_count+(0 if owner_engaged else 1),first_notice_sent=True)
-            governor.finish(e,s.get_wake(o.wake_id),s.get_occurrence(o.wake_id,o.dedupe_key))
-            # human() credits only finished occurrences, and the queued owner turn is deduplicated, so credit it here.
-            # It keeps the next check the agent asked for, which governor.finish just applied.
+            # human() credits only finished occurrences, and the queued owner turn is deduplicated, so credit it here,
+            # before governor.finish: its value and pause rules then see an engaged delivery (a no_change the owner
+            # answered can't tip a wake into a no-op pause). It keeps the next check the agent asked for.
             if owner_engaged:
                 done=s.get_occurrence(o.wake_id,o.dedupe_key)
                 governor.engagement(e,done,next_check=done.next_check_s)
+            governor.finish(e,s.get_wake(o.wake_id),s.get_occurrence(o.wake_id,o.dedupe_key))
         e.signal()
         return None
 
