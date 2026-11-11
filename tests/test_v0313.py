@@ -94,3 +94,35 @@ def test_preview_user_silence_is_conditional(engine, command):
         'Would run now: no — the owner has not been quiet long enough')
     pending(engine, w, 's:episode')
     assert command('test '+w.id).splitlines()[1] == 'Would run now: yes'
+
+
+@pytest.mark.parametrize('setup', ['off', 'paused'])
+def test_preview_keeps_stored_hold_while_profile_off_or_paused(engine, command, setup):
+    # Dispatch never runs while off or paused, so the stored error is what the turn carries after resume.
+    w = arm(engine, 'every')
+    o = pending(engine, w)
+    assert engine.store.update_occurrence(w.id, o.dedupe_key, 'pending', error='busy')
+    if setup == 'off': engine.policy = replace(engine.policy, enabled=False)
+    else: engine.paused = lambda: True
+    assert 'Why: every (held by a busy chat)' in command('test '+w.id)
+
+
+def test_preview_live_hold_overrides_stored_error(engine, command):
+    w = arm(engine, 'every')
+    o = pending(engine, w)
+    assert engine.store.update_occurrence(w.id, o.dedupe_key, 'pending', error='busy')
+    session(engine, paused_until=engine.clock.now()+600)
+    preview = command('test '+w.id)
+    assert 'Why: every (held by a pause)' in preview and 'busy chat' not in preview
+
+
+def test_preview_live_hold_with_nothing_waiting(engine, command):
+    w = arm(engine, 'every')
+    session(engine, paused_until=engine.clock.now()+600)
+    assert 'Why: every (held by a pause)' in command('test '+w.id)
+
+
+def test_list_clips_each_filter_value(engine, command):
+    arm(engine, 'kanban_completed', trigger_json={'task_id': 't'*40, 'board': 'b'*24})
+    filters = command('list').split('kanban_completed', 1)[1].split(' · ', 1)[0]
+    assert 't'*23+'…' in filters and 'b'*24 in filters and 'b'*24+'…' not in filters

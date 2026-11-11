@@ -238,7 +238,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             o,(reason,defer,until)=candidates[pick],verdicts[pick]
             message_held=engine.message_hold_reason(w,session)
             text=engine.render_occurrence(w,replace(o,force_silent=bool(message_held)),session,
-                                         held_by=reason if reason and defer else (o.error if waiting else ''),
+                                         held_by=reason if reason and defer and not off else (o.error if waiting else ''),
                                          message_held=message_held,cache_line=wake_cache,held_reports='')
             raise _DryRun
     except _DryRun: pass
