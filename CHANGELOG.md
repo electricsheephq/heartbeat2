@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.14 — 2026-11-11
+
+- **Writing during a wake counts as a reply on Hermes 0.23.x.** If you write while a wake turn is running, that wake's message no longer counts toward the unanswered mute, and the wake isn't later treated as ignored. Hermes 0.23.x queues your message behind the turn instead of folding it in, so before this fix the mute could start one message early. The wake also keeps the next check the agent asked for (#157).
+- **Gateway tests run on Hermes 0.23.1 in CI.** The end-to-end matrix now includes Hermes v0.23.1 beside v0.21.6, v0.21.7 and main (#155).
+
 ## 0.3.13 — 2026-11-11
 
 - **Fully silent wakes need one Hermes setting.** A wake that decides to stay silent keeps its final reply out of the chat, but Hermes posts interim text (what the model writes alongside a tool call) by default. The README now says so, with the fix: `display.interim_assistant_messages: false`. The wake text now tells the model why it must not write alongside tool calls.
