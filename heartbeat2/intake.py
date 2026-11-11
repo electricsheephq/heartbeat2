@@ -937,15 +937,19 @@ class Intake:
                 s.set_meta('report_shown:'+o.id,'')
             if f.scratch is not None:
                 s.cas_wake(w.id,w.status,expected_version=w.version,scratch=f.scratch)
+            owner_engaged=False
             if delivered and session:
                 session=s.get_session(key)
                 # Hermes 0.23.x counts owner text sent during the wake turn but queues it behind the turn instead of
-                # folding it in (#157); an owner counted after the turn started still engaged, so this is not unanswered.
+                # folding it in (#157); an owner counted after the turn started still engaged, so this is neither
+                # unanswered nor ignored. (Owner text counted between claim and start still counts as before.)
                 owner_engaged=(session.last_human_at is not None and o.started_at is not None
                                and session.last_human_at>o.started_at)
                 s.cas_session(key,{'unanswered_count':session.unanswered_count},
                               unanswered_count=session.unanswered_count+(0 if owner_engaged else 1),first_notice_sent=True)
             governor.finish(e,s.get_wake(o.wake_id),s.get_occurrence(o.wake_id,o.dedupe_key))
+            # human() credits only finished occurrences, and the queued owner turn is deduplicated, so credit it here.
+            if owner_engaged: governor.engagement(e,s.get_occurrence(o.wake_id,o.dedupe_key))
         e.signal()
         return None
 

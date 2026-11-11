@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_engine import engine, arm, start, end, session, KEY
+from heartbeat2 import governor
+from test_engine import engine, arm, start, end, session, admit, KEY
 
 
 @pytest.mark.parametrize('when', ['before', 'at_start', 'during'])
@@ -30,6 +31,24 @@ def test_owner_counted_around_wake(engine, when):
     assert after.unanswered_count == (0 if when == 'during' else 1)
     assert after.first_notice_sent is True
     assert e.store.list_occurrences(w.id)[0].delivered == 1
+    # The governor agrees: an owner who wrote during the turn engaged, so the wake is not marked ignored later.
+    e.clock.advance(e.policy.engagement_window_hours*3600+1)
+    governor.settle_ignored(e)
+    wake = e.store.get_wake(w.id)
+    assert (wake.engaged, wake.ignored_streak) == ((1, 0) if when == 'during' else (0, 1))
+
+
+def test_owner_during_one_turn_does_not_cover_the_next(engine):
+    e = engine
+    arm(e); e.tick(); start(e)
+    e.clock.advance(1)
+    admit(e, 'owner-157-next')
+    end(e, 'progress', True)
+    assert e.store.get_session(KEY).unanswered_count == 0
+    e.clock.advance(601)
+    w = arm(e); e.tick(); start(e); end(e, 'progress', True)
+    assert e.store.list_occurrences(w.id)[0].delivered == 1
+    assert e.store.get_session(KEY).unanswered_count == 1
 
 
 def test_no_owner_counts_each_delivered_wake(engine):
