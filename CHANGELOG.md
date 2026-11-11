@@ -2,7 +2,7 @@
 
 ## 0.3.14 — 2026-11-11
 
-- **Writing during a wake counts as a reply on Hermes 0.23.x.** If you write while a wake turn is running, that wake's message no longer counts toward the unanswered mute, and the wake isn't later treated as ignored. Hermes 0.23.x queues your message behind the turn instead of folding it in, so before this fix the mute could start one message early. The wake also keeps the next check the agent asked for (#157).
+- **Writing during a wake counts as a reply on Hermes 0.23.x.** If you write once a wake turn has started, that wake's message no longer counts toward the unanswered mute, isn't later treated as ignored, and can't tip the wake into a no-change pause. Hermes 0.23.x queues your message behind the turn instead of folding it in, so before this fix the mute could start one message early. The wake keeps the next check the agent asked for. The Signal/SimpleX exception under Known issues still applies (#157).
 - **Gateway tests run on Hermes 0.23.1 in CI.** The end-to-end matrix now includes Hermes v0.23.1 beside v0.21.6, v0.21.7 and main (#155).
 
 ## 0.3.13 — 2026-11-11
