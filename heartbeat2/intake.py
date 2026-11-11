@@ -939,8 +939,12 @@ class Intake:
                 s.cas_wake(w.id,w.status,expected_version=w.version,scratch=f.scratch)
             if delivered and session:
                 session=s.get_session(key)
+                # Hermes 0.23.x counts owner text sent during the wake turn but queues it behind the turn instead of
+                # folding it in (#157); an owner counted after the turn started still engaged, so this is not unanswered.
+                owner_engaged=(session.last_human_at is not None and o.started_at is not None
+                               and session.last_human_at>o.started_at)
                 s.cas_session(key,{'unanswered_count':session.unanswered_count},
-                              unanswered_count=session.unanswered_count+1,first_notice_sent=True)
+                              unanswered_count=session.unanswered_count+(0 if owner_engaged else 1),first_notice_sent=True)
             governor.finish(e,s.get_wake(o.wake_id),s.get_occurrence(o.wake_id,o.dedupe_key))
         e.signal()
         return None
