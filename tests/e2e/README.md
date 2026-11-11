@@ -3,7 +3,7 @@
 These opt-in tests run the shipping Hermes gateway and Telegram adapter against
 Hermes's loopback Bot API stand-in and scripted OpenAI-compatible model. No
 Telegram account, real token, model spend, or live profile is used. The default
-unit run skips all 19 cells (E2 has two display variants).
+unit run skips all 21 cells (E2 has two display variants).
 
 Use a separate read-only checkout for each exact Hermes commit:
 
@@ -11,6 +11,7 @@ Use a separate read-only checkout for each exact Hermes commit:
 | --- | --- |
 | v0.21.6 | `818c13be1dc4fd28987e1e881a9408224afd4535` |
 | v0.21.7 | `71d34bad1045610252eda02ee79549436896e784` |
+| v0.23.1 | `3b421578588243f920886e6fe79a6faa87ea026e` |
 | main | `04eb00cef7d9ac2730ed5fd9039a6f3287eb49ca` |
 
 From the plugin worktree, with `HERMES_PIN` pointing to that checkout:
