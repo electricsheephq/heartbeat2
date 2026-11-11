@@ -128,7 +128,7 @@ Do the work, then call:
 ```
 
 Outcomes: `progress` (you did something useful, even silently), `no_change` (nothing to do), `done` (finished for good), `blocked`, `needs_attention`.
-- notify=false → your final reply is not posted; the work still counts. Write no text alongside tool calls on a wake turn; some platforms show tool progress.
+- notify=false → your final reply is not posted; the work still counts. Write no text alongside tool calls on a wake turn: Hermes can post that text even when you stay silent.
 - Never type silence markers. `notify=true` delivers one short, specific message. Do not guilt an absent owner or mention machinery, IDs or ledgers in that message.
 - Scratch is your notebook for this wake: it replaces the prior scratch. Scratch and next_check commit only when the turn completes successfully. `next_check` applies to `every`, `self` and role wakes that aren't cron, not to probes or one-time wakes; a cron wake follows its schedule. The last respond wins.
 

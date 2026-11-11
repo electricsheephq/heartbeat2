@@ -126,7 +126,7 @@ def _item(engine, wake, today_budget=None):
     elif today_budget and wake.status == 'active' and today_budget[0] >= today_budget[1]: due = 'resting until tomorrow'
     else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
     role = f' · today {today_budget[0]}/{today_budget[1]}' if today_budget else ''
-    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + wake.kind + _clip(filter_text(wake),60) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + wake.kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _occurrences(engine, wake):
@@ -238,7 +238,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             o,(reason,defer,until)=candidates[pick],verdicts[pick]
             message_held=engine.message_hold_reason(w,session)
             text=engine.render_occurrence(w,replace(o,force_silent=bool(message_held)),session,
-                                         held_by=o.error if waiting else '',
+                                         held_by=reason if reason and defer else (o.error if waiting else ''),
                                          message_held=message_held,cache_line=wake_cache,held_reports='')
             raise _DryRun
     except _DryRun: pass
