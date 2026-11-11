@@ -51,6 +51,18 @@ def test_owner_during_one_turn_does_not_cover_the_next(engine):
     assert e.store.get_session(KEY).unanswered_count == 1
 
 
+def test_owner_during_turn_keeps_the_requested_next_check(engine):
+    e = engine
+    w = arm(e, 'self', pacing_min_s=3600, pacing_max_s=6*3600)
+    e.tick(); start(e)
+    e.clock.advance(1)
+    admit(e, 'owner-157-pace')
+    end(e, 'progress', True, next_check='4h')
+    wake = e.store.get_wake(w.id)
+    assert wake.engaged == 1 and wake.eff_interval_s == 4*3600
+    assert wake.next_due_at == e.clock.now()+4*3600
+
+
 def test_no_owner_counts_each_delivered_wake(engine):
     e = engine
     for count in (1, 2):

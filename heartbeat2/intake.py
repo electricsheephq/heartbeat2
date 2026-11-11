@@ -949,7 +949,10 @@ class Intake:
                               unanswered_count=session.unanswered_count+(0 if owner_engaged else 1),first_notice_sent=True)
             governor.finish(e,s.get_wake(o.wake_id),s.get_occurrence(o.wake_id,o.dedupe_key))
             # human() credits only finished occurrences, and the queued owner turn is deduplicated, so credit it here.
-            if owner_engaged: governor.engagement(e,s.get_occurrence(o.wake_id,o.dedupe_key))
+            # It keeps the next check the agent asked for, which governor.finish just applied.
+            if owner_engaged:
+                done=s.get_occurrence(o.wake_id,o.dedupe_key)
+                governor.engagement(e,done,next_check=done.next_check_s)
         e.signal()
         return None
 
