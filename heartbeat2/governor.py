@@ -180,7 +180,7 @@ def error(engine,wake):
         if w.error_streak>=engine.policy.error_pause_after: pause(engine,w,'error')
 
 
-def engagement(engine,o):
+def engagement(engine,o,*,next_check=None):
     s=engine.store
     with s.atomic():
         if s.get_meta('engaged:'+o.id) or s.get_meta('ignored:'+o.id): return
@@ -188,7 +188,7 @@ def engagement(engine,o):
         w=s.get_wake(o.wake_id)
         s.cas_wake(w.id,w.status,expected_version=w.version,engaged=w.engaged+1,noop_streak=0,ignored_streak=0)
         engine.ledger(w,engaged=1)
-        engine.evaluate(s.get_wake(w.id),lambda:apply(engine,s.get_wake(w.id)))
+        engine.evaluate(s.get_wake(w.id),lambda:apply(engine,s.get_wake(w.id),next_check=next_check))
 
 
 def settle_ignored(engine):

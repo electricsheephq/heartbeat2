@@ -44,17 +44,11 @@ def busy_case(make_rig, *, mode="queue", command=False, photo=False):
     wid = rig.arm()
     row = rig.settled(wid)
     rig.assert_tools_ok()
-    # Hermes 0.23.x queues the owner's text behind the wake turn in a session authority's FIFO,
-    # so the plugin sees the owner only after the wake settled and counts its message unanswered (#157).
-    queued_after_settle = (mode == "queue" and not command and not photo and rig.session_authority()
-                           and rig.session()["unanswered_count"] == 1)
-    rig.human_once(before_events, before_human, unanswered=1 if queued_after_settle else 0)
+    rig.human_once(before_events, before_human, unanswered=0)
     assert len(rig.director.wake_starts) == 1
     assert len(rig.wake_openers()) == 1
     if not photo:
         assert any("WAKE-OWNER-ANSWER" in t for t in rig.texts()), rig.texts()
-    if queued_after_settle:
-        pytest.xfail("Hermes 0.23.x: owner message during a wake still counts the wake as unanswered (#157)")
     return rig, row
 
 
