@@ -39,11 +39,17 @@ def busy_case(make_rig, *, mode="queue", command=False, photo=False):
     wid = rig.arm()
     row = rig.settled(wid)
     rig.assert_tools_ok()
-    rig.human_once(before_events, before_human)
+    # Hermes 0.23.x queues the owner's text behind the wake turn in a session authority's FIFO,
+    # so the plugin sees the owner only after the wake settled and counts its message unanswered (#157).
+    queued_after_settle = (mode == "queue" and not command and not photo and rig.session_authority()
+                           and rig.session()["unanswered_count"] == 1)
+    rig.human_once(before_events, before_human, unanswered=1 if queued_after_settle else 0)
     assert len(rig.director.wake_starts) == 1
     assert len(rig.wake_openers()) == 1
     if not photo:
         assert any("WAKE-OWNER-ANSWER" in t for t in rig.texts()), rig.texts()
+    if queued_after_settle:
+        pytest.xfail("Hermes 0.23.x: owner message during a wake still counts the wake as unanswered (#157)")
     return rig, row
 
 
@@ -257,9 +263,16 @@ def test_restart_with_pending_wake(make_rig):
     assert row["attempt"] == 1 and len(rig.director.wake_starts) == 2
     # Hermes may replay at the model (NousResearch/hermes-agent#137358).
     # heartbeat2 must silence the turn without adopting/delivering the occurrence.
-    assert not rig.new_visible(visible_before), "crash-resumed turn emitted visible text"
+    # Hermes 0.23.x's delivery ledger posts its own notice for an automated delivery that a
+    # restart interrupted (gateway/delivery_ledger.py RECOVERED_MARKER). That copy is Hermes core's,
+    # not the plugin's; anything else visible is a plugin leak.
+    shown = [t for t in rig.new_visible(visible_before) if not t.startswith("♻️ Recovered reply")]
+    assert not shown, "crash-resumed turn emitted visible text"
     assert rig.occurrence(second)["delivered"] == 0
-    assert next(w for w in rig.rows("wakes") if w["id"] == second)["status_reason"] == "resumed_after_restart"
+    # Older Hermes replays the interrupted turn and the plugin silences it (resumed_after_restart);
+    # Hermes 0.23.x does not run it again and posts its recovered-reply notice instead (interrupted:restart).
+    reason = next(w for w in rig.rows("wakes") if w["id"] == second)["status_reason"]
+    assert reason == ("interrupted:restart" if rig.session_authority() else "resumed_after_restart"), reason
     assert sum("WAKE-DELIVERED" in t for t in rig.texts()) == 1
 
 
@@ -491,3 +504,61 @@ def test_wake_text_carries_cache_line(make_rig):
     assert len(lines) == 1 and len(lines[0]) <= 220, text
     assert lines[0].startswith(f"Cache: {provider} TTL unknown"), lines
     rig.assert_tools_ok()
+
+
+def _tool_names(body):
+    return {(t.get("function") or {}).get("name") for t in body.get("tools", [])}
+
+
+def test_role_takes_its_own_turn(make_rig):
+    # The film's core feature: the owner hands the agent a role, and the role takes its own
+    # turn in this chat, with its desk in the wake text. `/pulse run` queues that turn now.
+    rig = make_rig()
+    before = {w["id"] for w in rig.rows("wakes")}
+    rig.owner("/pulse role every 1d at 09:00 Keep the release notes current", "w_")
+    new = [w for w in rig.rows("wakes") if w["id"] not in before]
+    assert len(new) == 1 and new[0]["role"] and new[0]["creator"] == "user", new
+    wid = new[0]["id"]
+    rig.owner(f"/pulse run {wid}", "Queued")
+    row = rig.settled(wid)
+    rig.assert_tools_ok()
+    assert row["state"] == "done" and row["delivered"] == 1, row
+    assert len(rig.director.wake_starts) == 1
+    opener = rig.director._text(rig.wake_openers()[0]["messages"][-1])
+    assert f"[HeartBeat 2.0 · role {wid} · " in opener and "Your desk:" in opener, opener
+    assert sum("WAKE-DELIVERED" in t for t in rig.texts()) == 1
+
+
+def test_pulse_through_tool_search_bridge(make_rig):
+    # Hermes's default `tools.tool_search.enabled: auto` defers plugin tools behind the
+    # tool_search / tool_describe / tool_call bridge. Arming and the silent verdict must work
+    # when the model reaches `pulse` only through `tool_call`.
+    from tests.fakes.fake_llm_provider import Text, ToolCall
+
+    rig = make_rig(config={"tools": {"tool_search": {"enabled": "on"}}})
+
+    def bridged(arguments):
+        return ToolCall("tool_call", {"calls": [{"name": "pulse", "arguments": arguments}]})
+
+    before = {w["id"] for w in rig.rows("wakes")}
+    rig.director.script("bridge", bridged({"action": "create", "note": "bridge-wake",
+                                           "trigger": {"kind": "at", "at": "in 10s"}}),
+                        Text("ARMED-bridge"))
+    rig.owner("arm the requested item [in:bridge]", "ARMED-bridge")
+    new = [w for w in rig.rows("wakes") if w["id"] not in before]
+    assert len(new) == 1 and new[0]["creator"] == "agent", new
+    rig.assert_tools_ok()
+    names = _tool_names(rig.director.requests["bridge"][0])
+    if "pulse" in names or "tool_call" not in names:
+        pytest.skip(f"tool search did not defer pulse on this Hermes pin: {sorted(n for n in names if n)}")
+
+    rig.director.respond = lambda: bridged({"action": "respond", "outcome": "no_change", "notify": False,
+                                            "summary": "E2E bridge verdict"})
+    shown_before = rig.visible_ids()
+    row = rig.settled(new[0]["id"])
+    rig.assert_tools_ok()
+    assert row["state"] == "done" and row["outcome"] == "no_change", row
+    assert row["notify"] == 0 and row["delivered"] == 0, row
+    assert "tool_call" in _tool_names(rig.wake_openers()[0])
+    shown = [t for t in rig.new_visible(shown_before) if "HeartBeat 2.0:" not in t]
+    assert shown == [], shown
