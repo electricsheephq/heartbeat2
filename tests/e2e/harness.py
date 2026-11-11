@@ -287,9 +287,19 @@ class PulseRig:
         time.sleep(1)
 
     def injections(self):
-        """Gateway dispatches, including repeated dispatches of the same marker."""
+        """Gateway dispatches, including repeated dispatches of the same marker.
+
+        Hermes logs exactly one of these per injection: "dispatched" on the standalone adapter
+        path, "admitted" when a session authority commits it to the durable FIFO (0.23.x).
+        """
+        text = (self.gateway.hermes_home / "logs/gateway.log").read_text()
+        return sum(text.count(f"Plugin message injection {verb}: plugin=heartbeat2")
+                   for verb in ("dispatched", "admitted"))
+
+    def session_authority(self):
+        """True when Hermes routed this rig's injections through a session authority (0.23.x)."""
         log = self.gateway.hermes_home / "logs/gateway.log"
-        return log.read_text().count("Plugin message injection dispatched: plugin=heartbeat2")
+        return "Plugin message injection admitted: plugin=heartbeat2" in log.read_text()
 
     def arm(self, note="e2e-wake", delay="1m"):
         before = {r["id"] for r in self.rows("wakes")}
@@ -325,12 +335,12 @@ class PulseRig:
         self.owner("/pulse status", "HeartBeat 2.0:")
         return row
 
-    def human_once(self, before_events, before_human):
+    def human_once(self, before_events, before_human, unanswered=0):
         events = self.events()
         assert len(events) == before_events + 1, f"owner counted {len(events)-before_events} times: {events}"
         session = self.session()
         assert session["last_human_at"] > before_human
-        assert session["unanswered_count"] == 0 and session["busy_since"] is None, session
+        assert session["unanswered_count"] == unanswered and session["busy_since"] is None, session
 
     def busy_action(self, text=None, photo=False):
         def action(record):
@@ -347,13 +357,21 @@ class PulseRig:
                 self.driver.dm(text)
             # Queue-mode text has no visible ack. Its real base-adapter log witnesses
             # busy admission; debounce is explicitly zero so the pending row can drain.
+            # Under a session authority (Hermes 0.23.x) the base adapter's debounce path is
+            # not used: the platform adapter flushes the text batch and the authority queues
+            # it behind the running wake turn, so that flush line is the witness there.
             def admitted():
                 if self.new_visible(before):
                     return True
                 if self.busy == "queue" and text and not text.startswith("/"):
                     with debug.open() as stream:
                         stream.seek(offset)
-                        return "debouncing follow-up (busy_text_mode=queue" in stream.read()
+                        chunk = stream.read()
+                    if "debouncing follow-up (busy_text_mode=queue" in chunk:
+                        return True
+                    flushed = any("Flushing text batch " in line and line.endswith(f" ({len(text)} chars)")
+                                  for line in chunk.splitlines())
+                    return self.session_authority() and flushed
                 return False
             self.wait(admitted, "busy input accepted during model request", 20)
             return self.director.respond()

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.13 — 2026-11-11
+
+- **Fully silent wakes need one Hermes setting.** A wake that decides to stay silent keeps its final reply out of the chat, but Hermes posts interim text (what the model writes alongside a tool call) by default. The README now says so, with the fix: `display.interim_assistant_messages: false`. The wake text now tells the model why it must not write alongside tool calls.
+- **Cleaner check-ins and desk.** A check-in's wake header (which the model reads) now says `check-in` instead of `watcher` and drops the empty title slot, so it no longer shows a doubled separator. The desk says `1 wake` and `1 watcher` instead of `1 wakes` (#151).
+- **`/pulse why` remembers why something was held.** After a held occurrence is released and fires, its row still shows why it was held, for example `was held: waiting for your reply` (#151).
+- **Shorter `/pulse list` rows.** Long watcher filter values (a task id, message id or emoji list) are shortened in the list; `/pulse why` still shows them in full (#151).
+- **`/pulse test` matches what would be sent.** The preview includes the same "(held by …)" note a dispatched turn carries, and a wake you made for owner silence no longer says "Would run now: yes" before you've been quiet long enough (#151).
+- **Gateway tests on current Hermes.** The end-to-end suite now passes against Hermes 0.23.x in local runs (a 0.23.x CI pin comes next) and adds two scenarios: a role taking its own turn, and arming plus a silent verdict when Hermes's default tool search reaches `pulse` through its `tool_call` bridge (#155). One 0.23.x difference found along the way is tracked in #157.
+
 ## 0.3.12 — 2026-11-10
 
 - **The demo plays on the README.** The film now plays inline under the demo link, so you can watch it without leaving GitHub.

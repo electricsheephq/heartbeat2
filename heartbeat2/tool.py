@@ -69,15 +69,19 @@ class Infeasible(ValueError):
     pass
 
 
-def filter_text(w):
+def filter_text(w, limit=None):
+    """Filter clause for a watcher; `limit` shortens each value inside the word (list rows), None keeps it whole."""
     t=w.trigger_json
+    def v(value):
+        value=str(value)
+        return value if limit is None or len(value)<=limit else value[:limit-1]+'…'
     text=''
     if w.kind in {'kanban_completed','kanban_blocked','kanban_worker_exited'}:
-        if 'task_id' in t: text+=f' for task {t["task_id"]}'
-        if 'board' in t: text+=f' on board {t["board"]}'
+        if 'task_id' in t: text+=f' for task {v(t["task_id"])}'
+        if 'board' in t: text+=f' on board {v(t["board"])}'
     if w.kind=='reaction':
-        if 'message_id' in t: text+=f' on message {t["message_id"]}'
-        if t.get('emojis'): text+=' for '+' '.join(t['emojis'])
+        if 'message_id' in t: text+=f' on message {v(t["message_id"])}'
+        if t.get('emojis'): text+=' for '+v(' '.join(t['emojis']))
     return text
 
 

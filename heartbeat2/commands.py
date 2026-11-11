@@ -126,15 +126,26 @@ def _item(engine, wake, today_budget=None):
     elif today_budget and wake.status == 'active' and today_budget[0] >= today_budget[1]: due = 'resting until tomorrow'
     else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
     role = f' · today {today_budget[0]}/{today_budget[1]}' if today_budget else ''
-    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + wake.kind + filter_text(wake) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + wake.kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _occurrences(engine, wake):
     reasons={'held_unanswered':'held: waiting for your reply', 'held_daily_cap':'held: waiting for daily capacity', 'held_paused':'held: wake paused',
         'unanswered':'dropped: unanswered mute', 'daily_model_cap':f'dropped: daily model cap ({engine.policy.max_model_wakes_per_day})',
         'daily_message_cap':f'dropped: daily message cap ({engine.policy.max_messages_per_day})', 'expired_held':'expired while held'}
+    def held_clause(o):
+        held = o.held_reason
+        if not held or held == o.error: return ''
+        if held in {'held_unanswered','held_daily_cap','held_paused'}:
+            return ' · was '+reasons[held]
+        if held.startswith(('message_held:', 'reported:')):
+            code = held.split(':', 1)[1]
+            label = {'quiet_hours':'quiet hours', 'daily_message_cap':'daily message cap',
+                     'unanswered':'unanswered mute'}.get(code, code.replace('_', ' '))
+            return ' · message held: '+label
+        return ' · was held: '+held.replace('_', ' ')
     return '\n'.join(f'{o.dedupe_key} · {o.state} · {reasons.get(o.error,o.error.replace("_"," ") or o.outcome or "none")} · '
-        f'matched/created {_time(engine,o.matched_at) if o.matched_at is not None else _time(engine,o.created_at) if o.created_at else "before v0.1.2"} · held-since {_time(engine,o.held_since)} · delivered {"yes" if o.delivered else "no"}'
+        f'matched/created {_time(engine,o.matched_at) if o.matched_at is not None else _time(engine,o.created_at) if o.created_at else "before v0.1.2"} · held-since {_time(engine,o.held_since)} · delivered {"yes" if o.delivered else "no"}'+held_clause(o)
         for o in engine.store.list_occurrences(wake.id)[-10:])
 
 
@@ -227,6 +238,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             o,(reason,defer,until)=candidates[pick],verdicts[pick]
             message_held=engine.message_hold_reason(w,session)
             text=engine.render_occurrence(w,replace(o,force_silent=bool(message_held)),session,
+                                         held_by=reason if reason and defer and not off else (o.error if waiting else ''),
                                          message_held=message_held,cache_line=wake_cache,held_reports='')
             raise _DryRun
     except _DryRun: pass
@@ -239,6 +251,8 @@ def _test(engine,w,session,cache_line,wake_cache=''):
         'not_before':'waiting to retry a failed delivery','checkin_not_due':'the owner has not been quiet long enough'}
     # A watcher with nothing waiting runs only when what it watches changes; its probe isn't run here.
     label='Would run on a match now: ' if w.kind in PROBE_KINDS|EVENT_KINDS and not waiting else 'Would run now: '
+    if w.kind == 'owner_silent' and not w.trigger_json.get('builtin') and not waiting:
+        label = 'Would run once the owner has been quiet long enough: '
     verdict=label+('no — '+reasons.get(reason,reason)+
         (' until '+_time(engine,until) if until is not None else '')+
         (' (held; it would wait)' if defer else ' (it would be skipped)') if reason else 'yes')
