@@ -44,7 +44,8 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
                 desk: str = "", held_reports: str = "") -> str:
     now = clock.now()
     local = datetime.fromtimestamp(now, zone(timezone))
-    label = "role" if wake.role else "wake" if wake.kind in TIME_KINDS else "watcher"
+    label = ("role" if wake.role else "check-in" if wake.kind == "owner_silent"
+             else "wake" if wake.kind in TIME_KINDS else "watcher")
     owner = "you at the owner's request" if owner_requested(wake) else "you" if wake.creator == "agent" else "the owner"
     owner_age = _age(now - session.last_human_at) if session.last_human_at is not None else "unknown"
     why = wake.reason or trigger_summary or wake.kind
@@ -56,8 +57,9 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
     fire_limit = 1 if wake.kind == "at" else wake.max_fires if wake.max_fires is not None else "∞"
     tz_name = getattr(local.tzinfo, "key", None) or local.tzname()
     tag = f" n:{marker_tag}" if marker_tag is not None else ""
+    title = f" · {escape_text(wake.title)}" if wake.title.strip() else ""
     lines = [
-        f"⟦pulse o:{occurrence.id} a:{occurrence.attempt}{tag}⟧ [HeartBeat 2.0 · {label} {wake.id} · {escape_text(wake.title)} · armed by {owner} {_age(now - wake.created_at)} ago]",
+        f"⟦pulse o:{occurrence.id} a:{occurrence.attempt}{tag}⟧ [HeartBeat 2.0 · {label} {wake.id}{title} · armed by {owner} {_age(now - wake.created_at)} ago]",
         f"Local time: {local:%a %d %b %H:%M} ({tz_name}){owner_clause} · fire {wake.fires + 1} of {fire_limit}",
         f"Why: {escape_text(why)}", f"Your note: {escape_text(wake.note)}",
     ]

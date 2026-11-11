@@ -88,8 +88,10 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
     other = [w for w in wakes if not w.role and w.status == 'active']
     due = [(t, w) for w in other for t in (w.next_due_at, w.deadline_at) if t is not None]
     next_due = min(due, key=lambda pair: pair[0]) if due else None
-    tail = [f'- Other: {sum(not is_watcher(w) for w in other)} wakes, '
-            f'{sum(is_watcher(w) for w in other)} watchers · next due ' +
+    watchers = sum(is_watcher(w) for w in other)
+    wake_count = len(other) - watchers
+    tail = [f'- Other: {wake_count} wake' + ('s' if wake_count != 1 else '') +
+            f', {watchers} watcher' + ('s' if watchers != 1 else '') + ' · next due ' +
             (f'{_time(view,next_due[0],compact=True)} ({_clip(_oneline(next_due[1].title or next_due[1].note),40)})'
              if next_due else 'none')]
     counts = store.daily_counts(key, zone(timezone))
