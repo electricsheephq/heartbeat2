@@ -385,5 +385,5 @@ def test_cache_line_after_new_has_no_stale_or_zero_price(engine, pulse):
     warm_chat(e)
     e.intake.on_session_reset(old_session_id='sid', new_session_id='sid2')
     w = arm(e, 'every')
-    line = e.cache_line(w)
-    assert 'no model call yet' in line and '$' not in line
+    assert e.cache_line(w) == ''  # no cache line until the new conversation's first model call
+    assert e.store.get_session(KEY).last_route == ''

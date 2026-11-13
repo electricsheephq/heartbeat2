@@ -105,10 +105,7 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
         if not session or not session.last_route: return ''
         ttl, source = ttl_for_session(store,session)
         provider = session.last_route.split('|')[0][:24]
-        if session.last_cache_touch_at is None:
-            # A new conversation (/new) before its first model call: no touch or prompt size to price yet.
-            return f'Cache: {provider} ' + (('1h' if ttl==3600 else minutes(ttl)) if ttl else f'TTL {source}') + ' · no model call yet in this conversation'
-        age = max(0,now-session.last_cache_touch_at)/60
+        age = max(0,now-(session.last_cache_touch_at if session.last_cache_touch_at is not None else now))/60
         if not ttl:
             if watcher: return f'Cache: {provider} TTL {source} · last touch {age:.0f}m ago'
             route_provider, model, part = session.last_route.split('|', 2)
