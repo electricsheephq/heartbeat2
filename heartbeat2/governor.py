@@ -91,7 +91,7 @@ def owner_answer(engine,wake,answer):
         return {'ok':True,'cadence_s':interval,'cache':engine.cache_line(w,seconds=interval)} if answer=='slow' else {'ok':True}
 
 
-def apply(engine,wake,*,next_check=None):
+def apply(engine,wake,*,next_check=None,not_after=None):
     s,p=engine.store,engine.policy
     w=s.get_wake(wake.id)
     if w.status!='active': return
@@ -120,31 +120,49 @@ def apply(engine,wake,*,next_check=None):
             due=next_cron(w.trigger_json['cron'],now=engine.clock.now(),timezone=p.resolved_timezone(),
                           minimum_interval_s=w.base_interval_s or 0)
             skips=p.noop_backoff_factor**min(k,16)-1
+            kept,added=set(),0
             # A bounded number of cron times is materialised; a larger backoff
             # jumps the cron search boundary rather than burning a long loop.
             if skips>256:
                 due=next_cron(w.trigger_json['cron'],now=engine.clock.now(),timezone=p.resolved_timezone(),minimum_interval_s=eff)
             else:
                 for _ in range(skips):
-                    s.add_occurrence(w.id,f't:{due:.17g}',state='skipped')
-                    s.connection.execute("UPDATE occurrences SET error='governor' WHERE wake_id=? AND dedupe_key=? AND state='skipped'",(w.id,f't:{due:.17g}'))
+                    key=f't:{due:.17g}'
+                    kept.add(key)
+                    if s.add_occurrence(w.id,key,state='skipped'):
+                        s.connection.execute("UPDATE occurrences SET error='governor' WHERE wake_id=? AND dedupe_key=? AND state='skipped'",(w.id,key))
+                        added+=1
                     due=next_cron(w.trigger_json['cron'],now=due,timezone=p.resolved_timezone(),minimum_interval_s=w.base_interval_s or 0)
-                if skips: engine.ledger(w,governor_skips=skips)
+            # A re-apply (an owner engaging, an ignored delivery settling) recomputes the backoff: governor skips of future
+            # cron times it no longer makes are removed, or the first of them would swallow the time it now fires at (#161).
+            now=engine.clock.now()
+            stale=[o.dedupe_key for o in s.list_occurrences(w.id,state='skipped')
+                   if o.error=='governor' and o.dedupe_key.startswith('t:') and o.dedupe_key not in kept and float(o.dedupe_key[2:])>now]
+            for key in stale:
+                s.connection.execute("DELETE FROM occurrences WHERE wake_id=? AND dedupe_key=? AND state='skipped' AND error='governor'",(w.id,key))
+            if added: engine.ledger(w,governor_skips=added)
             updates['next_due_at']=due
         else:
             updates['next_due_at']=next_every(engine.clock.now(),eff,
                 anchor=w.trigger_json.get('at') if w.kind=='every' else None,
                 timezone=p.resolved_timezone(),jitter_unit=0 if w.trigger_json.get('at') else engine.jitter(),**engine.timing(w))
+            if not_after is not None: updates['next_due_at']=min(updates['next_due_at'],not_after)
     if updates:
         s.cas_wake(w.id,w.status,expected_version=w.version,**updates)
         w=s.get_wake(w.id)
+    rule=pause_rule(engine,w)
+    if rule: pause(engine,w,rule)
+
+
+def pause_rule(engine,w):
+    """The governor rule a wake's current streaks and value history break, if any."""
+    s,p=engine.store,engine.policy
     since=float(s.get_meta('ratio_since:'+w.id) or '-inf')
     history=[o for o in s.list_occurrences(w.id) if o.state=='done' and o.ended_at is not None and o.ended_at>since][-20:]
-    rule=('noop' if w.noop_streak>=p.noop_pause_after else
-          'ignored' if w.ignored_streak>=p.ignored_pause_after else
-          'error' if w.error_streak>=p.error_pause_after else
-          'ratio' if len(history)>=12 and sum(value(engine,o) for o in history)/len(history)<.1 else None)
-    if rule: pause(engine,w,rule)
+    return ('noop' if w.noop_streak>=p.noop_pause_after else
+            'ignored' if w.ignored_streak>=p.ignored_pause_after else
+            'error' if w.error_streak>=p.error_pause_after else
+            'ratio' if len(history)>=12 and sum(value(engine,o) for o in history)/len(history)<.1 else None)
 
 
 def finish(engine,wake,occurrence):
@@ -189,15 +207,44 @@ def error(engine,wake):
         if w.error_streak>=engine.policy.error_pause_after: pause(engine,w,'error')
 
 
-def engagement(engine,o,*,next_check=None):
-    s=engine.store
+def engagement(engine,o,*,next_check=None,late=False):
+    """Credit an owner reply to a delivered occurrence.
+
+    late=True is an owner message after the occurrence finished (Intake.human). Its turn already set the schedule
+    with the next check the agent asked for, so the credit only undoes what the idle streaks did: a backoff in
+    effect, or a pause the owner has not seen yet. Without a backoff the agent's pace stands untouched (#161)."""
+    s,p=engine.store,engine.policy
     with s.atomic():
         if s.get_meta('engaged:'+o.id) or s.get_meta('ignored:'+o.id): return
         s.set_meta('engaged:'+o.id,'1')
         w=s.get_wake(o.wake_id)
+        backoff=w.noop_streak>=p.noop_slowdown_after
         s.cas_wake(w.id,w.status,expected_version=w.version,engaged=w.engaged+1,noop_streak=0,ignored_streak=0)
         engine.ledger(w,engaged=1)
-        engine.evaluate(s.get_wake(w.id),lambda:apply(engine,s.get_wake(w.id),next_check=next_check))
+        if not late:
+            engine.evaluate(s.get_wake(w.id),lambda:apply(engine,s.get_wake(w.id),next_check=next_check))
+        elif s.get_meta('governed:'+o.id):  # Not yet governed: finish applies the schedule with this credit counted.
+            engine.evaluate(s.get_wake(w.id),lambda:_late(engine,w.id,backoff))
+
+
+def _late(engine,wake_id,backoff):
+    s=engine.store
+    w=s.get_wake(wake_id)
+    # A pause on idle streaks the owner hasn't been shown yet, and that no rule supports now, is lifted: the owner
+    # engaging is the answer to it. A pause already shown stays for /pulse keep|slow|stop; error pauses always stay.
+    if (w.status=='paused' and w.status_reason in {'governor:noop','governor:ignored','governor:ratio'}
+            and s.get_meta('card:'+w.id) and pause_rule(engine,w) is None):
+        if s.cas_wake(w.id,'paused',expected_version=w.version,status='active',status_reason=''):
+            s.set_meta('card:'+w.id,'')
+            backoff=True
+            w=s.get_wake(w.id)
+    if w.status!='active' or not backoff or w.kind not in RECURRING_KINDS: return
+    done=[o for o in s.list_occurrences(w.id,state='done') if o.ended_at is not None]
+    latest=max(done,key=lambda o:o.ended_at) if done else None
+    now=engine.clock.now()
+    # The agent's own next check, counted from now, and never later than the wake was already due.
+    apply(engine,w,next_check=latest.next_check_s if latest else None,
+          not_after=w.next_due_at if w.next_due_at is not None and w.next_due_at>now else None)
 
 
 def settle_ignored(engine):
