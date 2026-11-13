@@ -15,6 +15,14 @@ TTL = 3594.0  # the longest gap seen warm on this route (the route reports no TT
 EDGE = TTL - max(120, .08 * TTL)
 
 
+@pytest.fixture(autouse=True)
+def no_reported_ttl(monkeypatch):
+    # Review (CodeRabbit): pin the route TTL lookup, so a Hermes-reported TTL in the test environment can't override
+    # the learned warm gap these tests seed.
+    from heartbeat2 import cache
+    monkeypatch.setattr(cache, 'cache_ttl_for', lambda *a, **k: (None, 'unknown'))
+
+
 @pytest.fixture
 def pulse(monkeypatch):
     monkeypatch.setattr(commands, 'session_env', lambda name: KEY if name == 'HERMES_SESSION_KEY' else '')

@@ -299,8 +299,8 @@ Owner wakes, cron and anchored repeats retain their timing. Cache lines show the
 **Keep a long chat warm: `/pulse warm on`.** On a long conversation, the first message after the cache expires rewrites the
 whole prompt at the cache-write price (about 2x input on a 1h Claude cache), where a warm message pays the read price (about
 0.1x). `/pulse warm on` turns on keep-warm for that one chat: just before the cache would expire, HeartBeat sends a tiny silent
-turn ("reply [SILENT]", no tools) that reads the cache and keeps it alive, so the next real message stays warm.
-- It pings only while it saves money: on routes whose cache lasts 30 minutes or more, while the chat's prompt is at least
+turn ("reply [SILENT]", no tools) that reads the cache and keeps it alive, so the next real message stays warm. If you don't come back before it pauses, those pings were spent for nothing, so the pause is set with that in mind.
+- It pings only where a ping can pay off: on routes whose cache lasts 30 minutes or more, while the chat's prompt is at least
   `keep_warm_min_tokens`, and while you've written in the last `keep_warm_idle_hours`. When you come back, it starts again.
 - Any real turn in the chat (yours or a wake's) moves the next ping out, so an active chat gets no pings. It never pings a cache
   that has already gone cold.
