@@ -29,7 +29,7 @@ def warm_chat(e, *, prompt=300000, warm_gap=TTL, touch=None, human=None):
             last_human_at=now if human is None else human)
 
 
-def turn(e, *, started_at, prompt=300000, read=299000):
+def turn(e, *, started_at, prompt=300000, read=299000, reply='[SILENT]'):
     """One keep-warm turn as the gateway runs it: marker in, one priced call, silent reply, end."""
     text = e.ctx.calls[-1][0]
     assert e.intake.pre_llm_call(session_id='sid', turn_id='turn', user_message=text, platform='telegram') is None
@@ -37,7 +37,7 @@ def turn(e, *, started_at, prompt=300000, read=299000):
                               base_url='https://api.anthropic.com', started_at=started_at,
                               usage={'input_tokens': prompt, 'cache_read_tokens': read, 'cache_write_tokens': prompt-read,
                                      'output_tokens': 3})
-    out = e.intake.transform_llm_output(response_text='[SILENT]', session_id='sid', turn_id='turn')
+    out = e.intake.transform_llm_output(response_text=reply, session_id='sid', turn_id='turn')
     e.intake.on_session_end(session_id='sid', turn_id='turn', completed=True, failed=False, interrupted=False)
     return out
 
@@ -83,8 +83,11 @@ def test_ping_fires_just_before_the_cache_expires_and_stays_silent(engine, pulse
     text, key = e.ctx.calls[0]
     assert key == KEY and 'keep-warm' in text and text.rstrip().endswith('Reply with exactly: [SILENT]')
     assert len(text) < 300  # minimal prompt: no desk, payload or contract
+    # While the ping is in flight it is neither a wake turn nor a message slot.
+    assert e.daily(KEY) == {'model_turns': 0, 'delivered': 0}
     before = e.store.get_session(KEY)
-    assert turn(e, started_at=e.clock.now()) == '[SILENT]'
+    # Even a model that ignores the prompt and chats is kept out of the chat.
+    assert turn(e, started_at=e.clock.now(), reply='Good morning! Anything I can help with?') == '[SILENT]'
     w = warm_wake(e)
     o, = e.store.list_occurrences(w.id)
     assert o.state == 'done' and not o.delivered and o.force_silent
@@ -93,7 +96,7 @@ def test_ping_fires_just_before_the_cache_expires_and_stays_silent(engine, pulse
     assert after.unanswered_count == before.unanswered_count and after.last_wake_turn_at == before.last_wake_turn_at
     assert e.daily(KEY) == {'model_turns': 0, 'delivered': 0}
     # Owner spend, never the agent's own-turn budget.
-    assert e.store.agent_cost_today(KEY, e.policy.resolved_timezone())['cost_microusd'] == 0
+    assert e.store.agent_cost_today(KEY, e.policy.resolved_timezone()) == {'cost_microusd': 0, 'unpriced_calls': 0}
     assert w.noop_streak == 0 and w.status == 'active'
     # The ping touched the cache: the next one is a full edge later.
     assert after.last_cache_touch_at == pytest.approx(e.clock.now())
@@ -263,3 +266,19 @@ def test_probes_run_in_bounded_batches(engine, tmp_path):
 
 def test_keep_warm_key_is_per_touch():
     assert keep_warm_key(1.5) == 'k:1.5' and keep_warm_key(1.5) != keep_warm_key(1.25)
+
+
+def test_ping_stays_silent_even_if_the_model_asks_to_notify(engine, pulse):
+    e = engine
+    warm_chat(e)
+    pulse(e, 'warm on')
+    e.clock.advance(EDGE)
+    e.tick()
+    e.intake.pre_llm_call(session_id='sid', turn_id='turn', user_message=e.ctx.calls[-1][0], platform='telegram')
+    e.intake.post_api_request(session_id='sid', turn_id='turn', usage={})
+    e.tool.handle({'action': 'respond', 'outcome': 'progress', 'notify': True, 'summary': 'Checked in.'}, session_id='sid')
+    assert e.intake.transform_llm_output(response_text='Hi there!', session_id='sid', turn_id='turn') == '[SILENT]'
+    e.intake.on_session_end(session_id='sid', turn_id='turn', completed=True, failed=False, interrupted=False)
+    o, = e.store.list_occurrences(warm_wake(e).id)
+    assert o.state == 'done' and not o.delivered
+    assert e.store.get_session(KEY).unanswered_count == 0

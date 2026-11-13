@@ -8,7 +8,7 @@ import logging
 import re
 
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
-from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS, owner_class, holds_messages, cap_counts
+from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS, owner_class, holds_messages, cap_counts, is_keep_warm
 from .schedule import parse_at, parse_duration, next_every, next_cron
 
 
@@ -154,7 +154,7 @@ class Tool:
                     return self.respond(args, flight)
                 if flight is not None and action not in {'list', 'desk'}:
                     parent = e.store.get_wake(flight.wake_id)
-                    if parent is not None and parent.trigger_json.get('keep_warm'):
+                    if parent is not None and is_keep_warm(parent):
                         return {'error':'keep_warm_turn','detail':'This turn only keeps the cache warm: change nothing and reply [SILENT].'}
                 if action == 'list':
                     return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w)} for w in e.store.list_wakes(s.session_key)]}

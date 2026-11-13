@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.15 — 2026-11-13
+
+- **Keep a long chat's cache warm: `/pulse warm on`.** On a long conversation, the first message after the prompt cache expires rewrites the whole prompt at the cache-write price. Keep-warm sends a tiny silent turn just before the cache would expire, so your next message reads the cache instead. It's per chat, and only you turn it on or off. It pings only while it saves money: on caches that last 30 minutes or more, while the prompt is at least `keep_warm_min_tokens`, and while you've written in the last `keep_warm_idle_hours` (12 by default). It never pings a cache that has already gone cold. Any real turn moves the next ping out. Pings are silent and don't count as wake turns, messages, active items or agent spend; `/pulse status` and `/pulse ledger` show them on their own row (#163).
+- **Higher limits on active wakes.** A chat can hold 50 active or proposed wakes and watchers (was 10), and a profile 200 (was a fixed 50, now the `max_active_profile` setting). Daily turn, message and spend limits are unchanged. Watchers now run in batches of at most 16 per check, so many slow watchers can't hold up timed wakes.
+
 ## 0.3.14 — 2026-11-11
 
 - **Writing during a wake counts as a reply on Hermes 0.23.x.** If you write once a wake turn has started, that wake's message no longer counts toward the unanswered mute, isn't later treated as ignored, and can't tip the wake into a no-change pause. Hermes 0.23.x queues your message behind the turn instead of folding it in, so before this fix the mute could start one message early. The wake keeps the next check the agent asked for. The Signal/SimpleX exception under Known issues still applies (#157).
