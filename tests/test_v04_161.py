@@ -26,15 +26,15 @@ def test_owner_after_the_turn_clears_a_backoff_down_to_the_agents_pace(engine):
     e = engine
     p = e.policy
     w = arm(e, 'self', pacing_min_s=3600, pacing_max_s=6*3600, noop_streak=p.noop_slowdown_after-1)
-    _fire(e, 'no_change', next_check='1h')
+    _fire(e, 'no_change', next_check='90m')
     finished = e.clock.now()
     wake = e.store.get_wake(w.id)
     assert wake.noop_streak == p.noop_slowdown_after and wake.next_due_at == finished+2*3600  # backed off
     e.clock.advance(300)
     admit(e, 'owner-161-backoff')
     wake = e.store.get_wake(w.id)
-    # The agent's 1h, counted from the owner's message: sooner than the backoff, never sooner than asked.
-    assert wake.noop_streak == 0 and wake.next_due_at == e.clock.now()+3600
+    # The agent's 90m, counted from the owner's message: sooner than the backoff, never sooner than asked.
+    assert wake.noop_streak == 0 and wake.next_due_at == e.clock.now()+90*60
 
 
 def test_owner_late_in_a_backoff_never_moves_the_wake_later(engine):
