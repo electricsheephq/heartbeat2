@@ -122,3 +122,31 @@ def test_a_reapply_never_counts_the_same_cron_skip_twice(engine):
         governor.apply(e, e.store.get_wake(w.id))  # e.g. an ignored delivery settling re-applies the same backoff
     assert e.store.get_ledger(day, w.id)['governor_skips'] == before
     assert sorted(o.dedupe_key for o in e.store.list_occurrences(w.id, state='skipped')) == keys
+
+
+def test_a_lift_never_takes_a_slot_filled_meanwhile(engine):
+    # Review (Astra): the paused wake freed its slot; a lift must not push the chat past max_active.
+    from dataclasses import replace
+    e = engine
+    e.policy = replace(e.policy, max_active=1)
+    w = arm(e, 'every', noop_streak=e.policy.noop_pause_after-1)
+    _fire(e, 'no_change')
+    assert e.store.get_wake(w.id).status == 'paused'
+    arm(e, 'every', next_due_at=e.clock.now()+7200)  # The freed slot, taken (for example by /pulse add).
+    e.clock.advance(60)
+    admit(e, 'owner-161-cap')
+    wake = e.store.get_wake(w.id)
+    assert (wake.status, wake.status_reason) == ('paused', 'governor:noop') and e.store.get_meta('card:'+w.id)
+
+
+def test_owner_late_in_a_cron_backoff_keeps_the_due_cron_time(engine):
+    # Review (Astra): a reply shortly before the backed-off cron time must not push it to the next one.
+    e = engine
+    p = e.policy
+    w = arm(e, 'cron', trigger_json={'cron': '0 * * * *'}, noop_streak=p.noop_slowdown_after-1)
+    _fire(e, 'no_change')
+    due = e.store.get_wake(w.id).next_due_at
+    e.clock.advance(due-e.clock.now()-600)
+    admit(e, 'owner-161-cron-late')
+    assert e.store.get_wake(w.id).next_due_at == due
+    assert e.store.get_occurrence(w.id, f't:{due:.17g}') is None

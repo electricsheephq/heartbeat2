@@ -46,3 +46,12 @@ def test_another_wake_earlier_in_the_tick_takes_the_turn(engine, command):
     out = command('test '+second.id)
     assert f'Would run now: no — another wake ({first.id}) takes the turn first (held; it would wait)' in out
     assert 'Would run now: yes' in command('test '+first.id)
+
+
+def test_a_drop_that_pauses_the_wake_previews_as_no(engine, command):
+    # Review (Astra): each drop is an error; at the threshold the wake pauses before the next one is sent.
+    e = engine
+    w, o = queued(e, command, error_streak=e.policy.error_pause_after-1)
+    e.store.set_meta('accepted:'+o.id, '3')
+    e.store.add_occurrence(w.id, 't:second')
+    assert 'Would run now: no — not acknowledged after three attempts (it would be dropped)' in command('test '+w.id)

@@ -6,7 +6,7 @@ all value and pause decisions here use structured occurrence fields.
 from dataclasses import replace
 import logging
 from .model import RECURRING_KINDS, PROBE_KINDS
-from .policy import is_keep_warm
+from .policy import cap_counts, is_keep_warm
 from .schedule import local_day, next_cron, next_every, parse_duration
 
 VALUABLE = {'progress','done','needs_attention'}
@@ -141,6 +141,8 @@ def apply(engine,wake,*,next_check=None,not_after=None):
             for key in stale:
                 s.connection.execute("DELETE FROM occurrences WHERE wake_id=? AND dedupe_key=? AND state='skipped' AND error='governor'",(w.id,key))
             if added: engine.ledger(w,governor_skips=added)
+            # A cron time the wake was already due at stays: an owner reply only ever brings a wake sooner.
+            if not_after is not None and not kept: due=min(due,not_after)
             updates['next_due_at']=due
         else:
             updates['next_due_at']=next_every(engine.clock.now(),eff,
@@ -233,7 +235,9 @@ def _late(engine,wake_id,backoff):
     # A pause on idle streaks the owner hasn't been shown yet, and that no rule supports now, is lifted: the owner
     # engaging is the answer to it. A pause already shown stays for /pulse keep|slow|stop; error pauses always stay.
     if (w.status=='paused' and w.status_reason in {'governor:noop','governor:ignored','governor:ratio'}
-            and s.get_meta('card:'+w.id) and pause_rule(engine,w) is None):
+            and s.get_meta('card:'+w.id) and pause_rule(engine,w) is None
+            # The slot it freed may have been taken meanwhile: never lift a pause past the active-wake limits.
+            and (w.trigger_json.get('builtin') or engine.policy.cap_gate(*cap_counts(s,w.session_key)).allowed)):
         if s.cas_wake(w.id,'paused',expected_version=w.version,status='active',status_reason=''):
             s.set_meta('card:'+w.id,'')
             backoff=True
