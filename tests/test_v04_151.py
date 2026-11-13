@@ -55,3 +55,16 @@ def test_a_drop_that_pauses_the_wake_previews_as_no(engine, command):
     e.store.set_meta('accepted:'+o.id, '3')
     e.store.add_occurrence(w.id, 't:second')
     assert 'Would run now: no — not acknowledged after three attempts (it would be dropped)' in command('test '+w.id)
+
+
+def test_a_broken_other_wake_does_not_break_the_preview(engine, command, monkeypatch):
+    # Review (scout): a tick isolates one wake's bad data; the preview must too.
+    e = engine
+    first, _ = queued(e, command)
+    second, _ = queued(e, command)
+    real = e.gate
+    def gate(w, o, session):
+        if w.id == first.id: raise ValueError('bad stored data')
+        return real(w, o, session)
+    monkeypatch.setattr(e, 'gate', gate)
+    assert 'Would run now: yes' in command('test '+second.id)

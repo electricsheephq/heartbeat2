@@ -248,11 +248,13 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             ahead=''
             if not reason:
                 # The tick walks every waiting occurrence in order: an earlier one in this chat that passes takes the turn first.
+                def goes_first(other,x):
+                    try: return not engine.gate(other,x,session)[0] and int(engine.store.get_meta('accepted:'+x.id) or 0)<3
+                    except Exception: return False  # A tick isolates a broken wake (Poller.evaluate); so does the preview.
                 for x in engine.store.list_occurrences(state='pending'):
                     if x.wake_id==w.id and (not waiting or x.dedupe_key==o.dedupe_key): break
                     other=engine.store.get_wake(x.wake_id)
-                    if (x.wake_id!=w.id and other is not None and other.session_key==w.session_key
-                            and not engine.gate(other,x,session)[0] and int(engine.store.get_meta('accepted:'+x.id) or 0)<3):
+                    if x.wake_id!=w.id and other is not None and other.session_key==w.session_key and goes_first(other,x):
                         reason,defer,until,ahead='in_flight',True,None,x.wake_id
                         break
             retry=None
