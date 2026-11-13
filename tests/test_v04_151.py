@@ -68,3 +68,13 @@ def test_a_broken_other_wake_does_not_break_the_preview(engine, command, monkeyp
         return real(w, o, session)
     monkeypatch.setattr(e, 'gate', gate)
     assert 'Would run now: yes' in command('test '+second.id)
+
+
+def test_a_wake_retrying_after_an_error_neither_runs_nor_goes_first(engine, command):
+    # Review (CodeRabbit): a tick skips a wake until its evaluation retry time.
+    e = engine
+    first, _ = queued(e, command)
+    second, _ = queued(e, command)
+    e.store.set_meta('eval_not_before:'+first.id, str(e.clock.now()+300))
+    assert 'Would run now: yes' in command('test '+second.id)
+    assert 'Would run now: no — retrying after an error until ' in command('test '+first.id)

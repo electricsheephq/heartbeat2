@@ -150,3 +150,27 @@ def test_owner_late_in_a_cron_backoff_keeps_the_due_cron_time(engine):
     admit(e, 'owner-161-cron-late')
     assert e.store.get_wake(w.id).next_due_at == due
     assert e.store.get_occurrence(w.id, f't:{due:.17g}') is None
+
+
+def test_an_overdue_wake_stays_due_after_a_reply(engine):
+    # Review (CodeRabbit): a reply must not postpone a wake already due but not dispatched yet.
+    e = engine
+    p = e.policy
+    w = arm(e, 'self', pacing_min_s=3600, pacing_max_s=6*3600, noop_streak=p.noop_slowdown_after-1)
+    _fire(e, 'no_change', next_check='90m')
+    due = e.store.get_wake(w.id).next_due_at
+    e.clock.advance(due-e.clock.now()+30)  # Due, and not yet picked up by a tick.
+    admit(e, 'owner-161-overdue')
+    assert e.store.get_wake(w.id).next_due_at == due
+
+
+def test_a_lifted_pause_does_not_fire_at_once(engine):
+    e = engine
+    w = arm(e, 'every', noop_streak=e.policy.noop_pause_after-1)
+    _fire(e, 'no_change')
+    wake = e.store.get_wake(w.id)
+    assert e.store.cas_wake(w.id, 'paused', expected_version=wake.version, next_due_at=e.clock.now()-60)
+    e.clock.advance(60)
+    admit(e, 'owner-161-stale')
+    wake = e.store.get_wake(w.id)
+    assert wake.status == 'active' and wake.next_due_at > e.clock.now()

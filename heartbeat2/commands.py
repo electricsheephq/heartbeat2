@@ -246,10 +246,15 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             if not reason and (dies(o) or dropped and (one_shot(w) or w.error_streak+dropped>=engine.policy.error_pause_after)):
                 reason,defer,until='ack_timeout',False,None
             ahead=''
+            # After an evaluation error a tick leaves the wake alone until its retry time (Poller.evaluate).
+            backoff_until=lambda x:float(engine.store.get_meta('eval_not_before:'+x.id) or 0)
+            if not reason and not off and engine.clock.now()<backoff_until(w):
+                reason,defer,until='eval_backoff',True,backoff_until(w)
             if not reason:
                 # The tick walks every waiting occurrence in order: an earlier one in this chat that passes takes the turn first.
                 def goes_first(other,x):
-                    try: return not engine.gate(other,x,session)[0] and int(engine.store.get_meta('accepted:'+x.id) or 0)<3
+                    try: return (engine.clock.now()>=backoff_until(other) and not engine.gate(other,x,session)[0]
+                                 and int(engine.store.get_meta('accepted:'+x.id) or 0)<3)
                     except Exception: return False  # A tick isolates a broken wake (Poller.evaluate); so does the preview.
                 for x in engine.store.list_occurrences(state='pending'):
                     if x.wake_id==w.id and (not waiting or x.dedupe_key==o.dedupe_key): break
@@ -275,7 +280,8 @@ def _test(engine,w,session,cache_line,wake_cache=''):
         'in_flight':'another wake is running','provider_unavailable':'provider unavailable','dm_only':'DMs only',
         'plugin_off':'HeartBeat 2.0 is off in settings','paused_all':'HeartBeat 2.0 is paused',
         'not_before':'waiting to retry a failed delivery' if retry else 'waiting out an earlier hold',
-        'checkin_not_due':'the owner has not been quiet long enough','ack_timeout':'not acknowledged after three attempts'}
+        'checkin_not_due':'the owner has not been quiet long enough','ack_timeout':'not acknowledged after three attempts',
+        'eval_backoff':'retrying after an error'}
     if ahead: reasons['in_flight']=f'another wake ({ahead}) takes the turn first'
 
     # A watcher with nothing waiting runs only when what it watches changes; its probe isn't run here.

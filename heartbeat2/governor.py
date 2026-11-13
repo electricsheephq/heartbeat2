@@ -234,21 +234,23 @@ def _late(engine,wake_id,backoff):
     w=s.get_wake(wake_id)
     # A pause on idle streaks the owner hasn't been shown yet, and that no rule supports now, is lifted: the owner
     # engaging is the answer to it. A pause already shown stays for /pulse keep|slow|stop; error pauses always stay.
+    lifted=False
     if (w.status=='paused' and w.status_reason in {'governor:noop','governor:ignored','governor:ratio'}
             and s.get_meta('card:'+w.id) and pause_rule(engine,w) is None
             # The slot it freed may have been taken meanwhile: never lift a pause past the active-wake limits.
             and (w.trigger_json.get('builtin') or engine.policy.cap_gate(*cap_counts(s,w.session_key)).allowed)):
         if s.cas_wake(w.id,'paused',expected_version=w.version,status='active',status_reason=''):
             s.set_meta('card:'+w.id,'')
-            backoff=True
+            backoff=lifted=True
             w=s.get_wake(w.id)
     if w.status!='active' or not backoff or w.kind not in RECURRING_KINDS: return
     done=[o for o in s.list_occurrences(w.id,state='done') if o.ended_at is not None]
     latest=max(done,key=lambda o:o.ended_at) if done else None
     now=engine.clock.now()
-    # The agent's own next check, counted from now, and never later than the wake was already due.
-    apply(engine,w,next_check=latest.next_check_s if latest else None,
-          not_after=w.next_due_at if w.next_due_at is not None and w.next_due_at>now else None)
+    # The agent's own next check, counted from now, and never later than the wake was already due: an overdue wake
+    # stays due. A lifted pause's old due time is stale (paused wakes aren't scheduled), so it doesn't fire at once.
+    stale=w.next_due_at is None or lifted and w.next_due_at<=now
+    apply(engine,w,next_check=latest.next_check_s if latest else None,not_after=None if stale else w.next_due_at)
 
 
 def settle_ignored(engine):
