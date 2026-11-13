@@ -152,8 +152,10 @@ class Tool:
                 created_in = 'wake_turn' if flight or e.intake.in_wake_turn(session_id, s.session_key) else 'human_turn'
                 if action == 'respond':
                     return self.respond(args, flight)
-                if flight is not None and action not in {'list', 'desk'}:
-                    parent = e.store.get_wake(flight.wake_id)
+                # The turn's own flight, even after /pulse warm off or a cancel ended its occurrence mid-turn.
+                retained = flight or (e.intake.flights.get(session_id) if created_in == 'wake_turn' else None)
+                if retained is not None and action not in {'list', 'desk'}:
+                    parent = e.store.get_wake(retained.wake_id)
                     if parent is not None and is_keep_warm(parent):
                         return {'error':'keep_warm_turn','detail':'This turn only keeps the cache warm: change nothing and reply [SILENT].'}
                 if action == 'list':

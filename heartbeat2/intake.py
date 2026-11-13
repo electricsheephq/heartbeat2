@@ -975,6 +975,12 @@ class Intake:
         if not old: return None
         self.anchors.pop(old,None)
         with s.atomic():
+            # The old conversation's cache touch and prompt size don't describe the new one: a keep-warm ping
+            # (or a learned warm/cold gap) must wait for the new conversation's own first model call.
+            for session in s.list_sessions():
+                if session.current_session_id==old or session.session_key==self.bindings.get(old):
+                    s.cas_session(session.session_key,{'last_cache_touch_at':session.last_cache_touch_at},
+                                  last_cache_touch_at=None,last_prompt_tokens=0)
             keys=set()
             for w in s.list_wakes():
                 if (w.role or w.trigger_json.get('builtin')) and w.armed_session_id==old:

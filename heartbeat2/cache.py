@@ -145,7 +145,7 @@ KEEP_WARM_COLD_MARGIN = 60  # Never start a ping this close to the cache's end: 
 def warm_lifetime(store, session):
     """The cache lifetime a keep-warm ping can rely on: the route's known TTL, else the longest gap this route stayed warm."""
     ttl, source = ttl_for_session(store, session)
-    if ttl: return ttl, source
+    if ttl or source == 'off': return ttl, source  # Caching turned off: old warm gaps say nothing now.
     if not session or not session.last_route: return None, 'unknown'
     provider, model, part = session.last_route.split('|', 2)
     host = (urlsplit(_base(part)).hostname or '') if part else ''
@@ -163,6 +163,8 @@ def keep_warm_plan(store, session, policy, now):
         return {'reason': 'waiting for the first model call in this chat'}
     touch = session.last_cache_touch_at
     ttl, source = warm_lifetime(store, session)
+    if source == 'off':
+        return {'reason': 'prompt caching is off for this route', 'touch': touch}
     if not ttl:
         return {'reason': "this route's cache lifetime isn't known yet", 'touch': touch}
     if ttl < KEEP_WARM_MIN_TTL:

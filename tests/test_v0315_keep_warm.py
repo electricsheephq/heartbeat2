@@ -296,3 +296,44 @@ def test_ping_stays_silent_even_if_the_model_asks_to_notify(engine, pulse):
     o, = e.store.list_occurrences(warm_wake(e).id)
     assert o.state == 'done' and not o.delivered
     assert e.store.get_session(KEY).unanswered_count == 0
+
+
+def test_no_ping_when_prompt_caching_is_off(engine, pulse, monkeypatch):
+    # Review (Astra): an old warm gap must not keep paid pings going after caching is turned off.
+    e = engine
+    from heartbeat2 import cache
+    warm_chat(e)
+    monkeypatch.setattr(cache, 'ttl_for_session', lambda store, session: (None, 'off'))
+    assert 'prompt caching is off' in pulse(e, 'warm on')
+    e.clock.advance(EDGE)
+    e.tick()
+    assert not e.ctx.calls
+
+
+def test_a_ping_cancelled_mid_turn_still_cannot_change_anything(engine, pulse):
+    # Review (Astra): /pulse warm off during a running ping ends its occurrence, but the turn is still a ping turn.
+    e = engine
+    warm_chat(e)
+    pulse(e, 'warm on')
+    e.clock.advance(EDGE)
+    e.tick()
+    e.intake.pre_llm_call(session_id='sid', turn_id='turn', user_message=e.ctx.calls[-1][0], platform='telegram')
+    assert pulse(e, 'warm off') == 'Keep-warm is off for this chat.'
+    result = e.tool.handle({'action': 'create', 'note': 'x', 'trigger': {'kind': 'at', 'at': 'in 5m'}}, session_id='sid')
+    assert result['error'] == 'keep_warm_turn'
+    assert [w.id for w in e.store.list_wakes(KEY)] == [warm_wake(e).id]
+
+
+def test_new_conversation_waits_for_its_own_first_call(engine, pulse):
+    # Review (Astra): after /new, the old chat's touch and size must not schedule a ping into the new one.
+    e = engine
+    warm_chat(e)
+    pulse(e, 'warm on')
+    e.clock.advance(EDGE - 60)
+    e.intake.on_session_reset(old_session_id='sid', new_session_id='sid2')
+    s = e.store.get_session(KEY)
+    assert s.last_cache_touch_at is None and s.last_prompt_tokens == 0
+    assert warm_wake(e).armed_session_id == 'sid2' and warm_wake(e).status == 'active'
+    e.clock.advance(120)
+    e.tick()
+    assert not e.ctx.calls
