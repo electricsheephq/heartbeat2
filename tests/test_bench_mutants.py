@@ -17,7 +17,7 @@ CAS=('heartbeat2/store.py',"WHERE wake_id=? AND dedupe_key=? AND state='pending'
 FLOCK=('heartbeat2/poller.py','            fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)','            pass')
 MUTANTS={
     'governor_pause_off':[('heartbeat2/governor.py','    if rule: pause(engine,w,rule)','    if False: pause(engine,w,rule)')],
-    'caps_off':[('heartbeat2/poller.py',"        if cap and not (cap=='daily_message_cap' and message_held) and not (owner_class(w) and one_shot(w)):",'        if False:')],
+    'caps_off':[('heartbeat2/poller.py',"        if cap and not is_keep_warm(w) and not (cap=='daily_message_cap' and message_held) and not (owner_class(w) and one_shot(w)):",'        if False:')],
     'mute_class_regress':[('heartbeat2/policy.py','unanswered_count >= self.max_unanswered and not owner_class(wake)', 'unanswered_count >= self.max_unanswered and not is_owner(wake)')],
     'dm_only_off':[('heartbeat2/policy.py','        if self.dm_only and chat_type != "dm":','        if False:')],
     'replay_slots':[('heartbeat2/poller.py',"                        s.add_occurrence(w.id,due.dedupe_key,state=due.state)\n", "                        s.add_occurrence(w.id,due.dedupe_key,state=due.state)\n                    if w.kind in RECURRING_KINDS and due.state=='pending':\n                        k=due.scheduled_for+w.eff_interval_s\n                        while k<=now:\n                            s.add_occurrence(w.id,f't:{k:.17g}'); k+=w.eff_interval_s\n")],

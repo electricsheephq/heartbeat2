@@ -1,5 +1,5 @@
 name: heartbeat2
-version: "0.3.14"
+version: "0.3.15"
 description: >-
   HeartBeat 2.0: your agent's own time between your messages. Roles it owns, follow-ups,
   own-time turns and free deterministic watchers, all in the conversation that armed them and
@@ -126,9 +126,18 @@ config_schema:
     description: "Watchers never check more often than this. Maximum 604800 (one week)."
   max_active:
     type: int
-    default: 10
+    default: 50
+    min: 0
+    max: 1000
     label: "Active wakes per chat"
-    description: "Also capped at 50 across the profile."
+    description: "Active or proposed wakes and watchers in one chat. Check-ins, own time and keep-warm don't count. Turns and messages have their own daily limits."
+  max_active_profile:
+    type: int
+    default: 200
+    min: 0
+    max: 10000
+    label: "Active wakes across the profile"
+    description: "The same count across all of this profile's chats."
   max_lifetime_days:
     type: int
     default: 14
@@ -144,6 +153,20 @@ config_schema:
     default: false
     label: "Check in after a long silence"
     description: "Off by default. One check-in per silence, with how to turn it off."
+  keep_warm_idle_hours:
+    type: int
+    default: 12
+    min: 1
+    max: 168
+    label: "Keep-warm pauses after (hours without your messages)"
+    description: "For chats where you turned on /pulse warm: pings stop once you haven't written for this long, and start again when you do."
+  keep_warm_min_tokens:
+    type: int
+    default: 20000
+    min: 0
+    max: 10000000
+    label: "Keep-warm smallest context (tokens)"
+    description: "No ping while the chat's prompt is smaller than this: a cold start is cheap then."
   checkin_after_hours:
     type: int
     default: 24

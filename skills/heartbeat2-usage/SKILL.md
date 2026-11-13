@@ -36,6 +36,7 @@ Results include a `cache` line. Choose intervals it marks warm, respecting floor
 - The Codex OAuth route is reported as unknown until learned. Other routes learn from warm/cold gaps; an unknown TTL is not a guarantee.
 - An interval just over the TTL rewrites the prefix every time and costs the most per hour. Cold becomes cheaper again at roughly 16h on Claude 1h and about 5h on GPT-6.x.
 - Owner wakes, cron and anchored repeats are never snapped, but their cache effect is shown.
+- Keep-warm is the owner's: on a long chat they can type `/pulse warm on` to keep its cache warm with tiny silent pings while they're active. If cold starts come up, tell them about it; you can't turn it on or off. A keep-warm turn asks for exactly `[SILENT]`: reply with that, call no tools and do no work.
 
 ## Kinds
 

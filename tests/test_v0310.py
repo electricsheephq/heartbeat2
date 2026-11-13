@@ -157,7 +157,7 @@ def test_cleanup_obeys_settings_then_cleans_when_enabled(engine, family):
 
 
 def test_fifty_gateway_builtins_do_not_block_create(engine):
-    fill(engine, 50, builtins=True)
+    fill(engine, engine.policy.max_active_profile, builtins=True)
     result = create(engine)
     assert result.get('armed'), result
 
@@ -166,13 +166,13 @@ def test_fifty_gateway_builtins_do_not_block_create(engine):
 @pytest.mark.parametrize('status', ['active', 'proposed'])
 def test_user_wake_caps_explain_recovery_and_log_safely(engine, caplog, scope, status):
     e = engine
-    fill(e, e.policy.max_active if scope == 'chat' else 50, same_chat=scope == 'chat', status=status)
+    fill(e, e.policy.max_active if scope == 'chat' else e.policy.max_active_profile, same_chat=scope == 'chat', status=status)
     with caplog.at_level(logging.WARNING, logger='heartbeat2'):
         result = create(e)
     reason = 'max_active' if scope == 'chat' else 'global_max_active'
     assert result['error'] == reason
     assert result['detail'] and '/pulse cancel' in result['detail']
-    limit = e.policy.max_active if scope == 'chat' else 50
+    limit = e.policy.max_active if scope == 'chat' else e.policy.max_active_profile
     assert f'reached its limit of {limit} active or proposed wakes' in result['detail'] and "don't count" in result['detail']
     records = [r for r in caplog.records if r.name == 'heartbeat2' and r.levelno == logging.WARNING]
     assert len(records) == 1 and reason in records[0].getMessage()
@@ -193,7 +193,7 @@ def test_same_chat_builtins_do_not_consume_last_create_slot(engine):
 def test_activation_paths_exclude_builtins(engine, monkeypatch, action, scope):
     e = engine
     if scope == 'profile':
-        fill(e, 50, builtins=True)
+        fill(e, e.policy.max_active_profile, builtins=True)
     else:
         fill(e, e.policy.max_active-1, same_chat=True)
         builtin(e, 'silence')
@@ -212,7 +212,7 @@ def test_activation_paths_exclude_builtins(engine, monkeypatch, action, scope):
 @pytest.mark.parametrize('scope', ['chat', 'profile'])
 def test_resume_cap_refusal_has_matching_detail(engine, scope):
     e = engine
-    fill(e, e.policy.max_active if scope == 'chat' else 50, same_chat=scope == 'chat')
+    fill(e, e.policy.max_active if scope == 'chat' else e.policy.max_active_profile, same_chat=scope == 'chat')
     w = arm(e, status='paused')
     refused = e.tool.handle({'action': 'resume', 'id': w.id}, session_id='sid')
     assert refused['error'] == 'max_active'

@@ -135,3 +135,50 @@ def display(counts):
     if counts.get('warm_wakes',0)+counts.get('cold_wakes',0) and not counts.get('unpriced_calls',0):
         return f'warm {counts.get("warm_wakes",0)} / cold {counts.get("cold_wakes",0)} · ~${counts.get("cost_microusd",0)/1e6:.2f}'
     return 'in / cached / written / out: '+ ' / '.join(str(counts.get(k,0)) for k in ('tokens_in','cache_read_tokens','cache_write_tokens','tokens_out'))
+
+
+# Keep-warm (#163): a ping pays one cache read of the chat's prefix to spare the next turn a cold rewrite.
+KEEP_WARM_MIN_TTL = 1800  # On shorter caches the pings cost more than the cold starts they prevent.
+KEEP_WARM_COLD_MARGIN = 60  # Never start a ping this close to the cache's end: a late ping is a cold write.
+
+
+def warm_lifetime(store, session):
+    """The cache lifetime a keep-warm ping can rely on: the route's known TTL, else the longest gap this route stayed warm."""
+    ttl, source = ttl_for_session(store, session)
+    if ttl or source == 'off': return ttl, source  # Caching turned off: old warm gaps say nothing now.
+    if not session or not session.last_route: return None, 'unknown'
+    provider, model, part = session.last_route.split('|', 2)
+    host = (urlsplit(_base(part)).hostname or '') if part else ''
+    rows = json.loads(store.get_meta('cache_routes') or '{}')
+    row = rows.get(session.last_route, rows.get(f'{provider}|{model}|{host}', {}))
+    warm, cold = row.get('max_warm_gap'), row.get('min_cold_gap')
+    # A warm gap is a lower bound on the lifetime, unless a shorter gap was already seen cold.
+    if warm and (cold is None or warm < cold): return warm, 'warm_seen'
+    return None, 'unknown'
+
+
+def keep_warm_plan(store, session, policy, now):
+    """When this chat's next keep-warm ping is due, or why there is none. Pure: reads the session and route rows only."""
+    if session is None or session.last_cache_touch_at is None or not session.last_route:
+        return {'reason': 'waiting for the first model call in this chat'}
+    touch = session.last_cache_touch_at
+    ttl, source = warm_lifetime(store, session)
+    if source == 'off':
+        return {'reason': 'prompt caching is off for this route', 'touch': touch}
+    if not ttl:
+        return {'reason': "this route's cache lifetime isn't known yet", 'touch': touch}
+    if ttl < KEEP_WARM_MIN_TTL:
+        return {'reason': f'the cache lasts {minutes(ttl)}; keep-warm needs 30m or more', 'touch': touch, 'ttl': ttl}
+    if (session.last_prompt_tokens or 0) < policy.keep_warm_min_tokens:
+        return {'reason': f'the context is small ({session.last_prompt_tokens or 0} tokens), so a cold start is cheap', 'touch': touch, 'ttl': ttl}
+    if session.last_human_at is None or now - session.last_human_at >= policy.keep_warm_idle_hours * 3600:
+        return {'reason': f'resting: no message from you in {policy.keep_warm_idle_hours}h; it resumes when you write', 'touch': touch, 'ttl': ttl}
+    cold_at = touch + ttl - KEEP_WARM_COLD_MARGIN
+    if now >= cold_at:
+        return {'reason': 'the cache has gone cold; it resumes after the next model call', 'touch': touch, 'ttl': ttl}
+    return {'due_at': touch + ttl - max(120, .08 * ttl), 'cold_at': cold_at, 'touch': touch, 'ttl': ttl, 'source': source}
+
+
+def keep_warm_key(touch):
+    """One ping per cache touch: a real turn moves the touch, and the ping it would have needed is never made."""
+    return f'k:{touch:.17g}'

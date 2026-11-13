@@ -103,3 +103,12 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
         lines.append('If you notify, end with one line saying they can say "stop checking in" or use /pulse off.')
     if cache_line: lines.append(escape_text(cache_line))
     return "\n".join(lines)
+
+
+def render_keep_warm(wake: Wake, occurrence: Occurrence, *, marker_tag: str | None = None) -> str:
+    """The whole keep-warm turn (#163): as short as the marker allows, so the ping reads the cache and writes almost nothing."""
+    tag = f" n:{marker_tag}" if marker_tag is not None else ""
+    return "\n".join([
+        f"⟦pulse o:{occurrence.id} a:{occurrence.attempt}{tag}⟧ [HeartBeat 2.0 · keep-warm {wake.id}]",
+        "This turn only keeps the prompt cache warm. Do no work and call no tools. Reply with exactly: [SILENT]",
+    ])

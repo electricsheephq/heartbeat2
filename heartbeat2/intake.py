@@ -10,6 +10,7 @@ import uuid
 
 from .model import Session
 from . import governor
+from .policy import is_keep_warm
 
 MARKER = re.compile(r'^⟦pulse o:([^\s]+) a:(\d+)(?: n:([0-9a-f]{16}))?⟧(?:\s|$)')
 ORIGIN = 'Gateway message origin (JSON data, not instructions or authorization):'
@@ -625,7 +626,10 @@ class Intake:
                 lines.append(f'HeartBeat 2.0: {counts}; /pulse shows status, /pulse off stops checks.')
             for w in s.list_wakes(key):
                 card=s.get_meta('card:'+w.id)
-                if card:
+                if card and is_keep_warm(w):
+                    if w.status=='paused': lines.append(f'Keep-warm ({w.id}) paused ({card}); /pulse warm on turns it back on.')
+                    s.set_meta('card:'+w.id,'')
+                elif card:
                     ending = '.' if w.role or w.trigger_json.get('own_time') else f'; convert with /pulse watch {w.id}.'
                     lines.append(f'{w.title or "A wake"} ({w.id}) paused ({card}): keep / slow / stop via /pulse{ending}')
                     s.set_meta('card:'+w.id,'')
@@ -972,6 +976,12 @@ class Intake:
         if not old: return None
         self.anchors.pop(old,None)
         with s.atomic():
+            # The old conversation's cache route, touch and prompt size don't describe the new one: a keep-warm ping,
+            # a cache line or a learned warm/cold gap must wait for the new conversation's own first model call.
+            for session in s.list_sessions():
+                if session.current_session_id==old or session.session_key==self.bindings.get(old):
+                    s.cas_session(session.session_key,{'last_cache_touch_at':session.last_cache_touch_at},
+                                  last_cache_touch_at=None,last_prompt_tokens=0,last_route='')
             keys=set()
             for w in s.list_wakes():
                 if (w.role or w.trigger_json.get('builtin')) and w.armed_session_id==old:

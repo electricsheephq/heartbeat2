@@ -6,6 +6,7 @@ all value and pause decisions here use structured occurrence fields.
 from dataclasses import replace
 import logging
 from .model import RECURRING_KINDS, PROBE_KINDS
+from .policy import is_keep_warm
 from .schedule import local_day, next_cron, next_every, parse_duration
 
 VALUABLE = {'progress','done','needs_attention'}
@@ -152,6 +153,14 @@ def finish(engine,wake,occurrence):
         if s.get_meta('governed:'+occurrence.id): return
         s.set_meta('governed:'+occurrence.id,'1')
         w=s.get_wake(wake.id)
+        if is_keep_warm(w):
+            # A keep-warm ping is a silent cache read, not work: no value, no idle streak, no backoff (#163).
+            counts=engine.usage_counts(occurrence)
+            counts['no_verdict']=0
+            s.cas_wake(w.id,w.status,expected_version=w.version,error_streak=0,
+                **{k:getattr(w,k)+v for k,v in counts.items()})
+            engine.ledger(w,**counts)
+            return
         useful=value(engine,occurrence)
         s.cas_wake(w.id,w.status,expected_version=w.version,
             noop_streak=0 if useful else w.noop_streak+1,
