@@ -242,12 +242,12 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             pick=next((n for n in passing if not dies(candidates[n])),passing[0] if passing else 0)
             o,(reason,defer,until)=candidates[pick],verdicts[pick]
             # Each drop counts as an error, and enough in a row pause the wake before the next one is sent: a watcher's
-            # waiting match is then held while paused, any other one skipped (Poller.gate).
+            # waiting match, or a turn already held, is then held while paused; any other one is skipped (Poller.gate).
             dropped=sum(dies(candidates[n]) for n in passing if n<pick)
             if not reason and dies(o):
                 reason,defer,until='ack_timeout',False,None
             elif not reason and dropped and w.error_streak+dropped>=engine.policy.error_pause_after:
-                reason,defer,until='drop_pauses',is_watcher(w),None
+                reason,defer,until='drop_pauses',is_watcher(w) or o.held_since is not None,None
             ahead=''
             # After an evaluation error a tick leaves the wake alone until its retry time (Poller.evaluate).
             backoff_until=lambda x:float(engine.store.get_meta('eval_not_before:'+x.id) or 0)

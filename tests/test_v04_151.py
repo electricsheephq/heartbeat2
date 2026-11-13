@@ -99,3 +99,14 @@ def test_evaluation_backoff_comes_before_any_other_verdict(engine, command):
     before = snapshot(e)
     assert 'Would run now: no — retrying after an error until ' in command('test '+w.id)
     assert snapshot(e) == before
+
+
+def test_a_turn_already_held_stays_held_when_a_drop_pauses_the_wake(engine, command):
+    # Review (scout): Poller.gate holds a paused wake's occurrence that already has held_since, as for a watcher.
+    e = engine
+    w, o = queued(e, command, error_streak=e.policy.error_pause_after-1)
+    e.store.set_meta('accepted:'+o.id, '3')
+    e.store.add_occurrence(w.id, 't:second')
+    assert e.store.update_occurrence(w.id, 't:second', 'pending', held_since=e.clock.now()-60, held_reason='held_daily_cap')
+    assert ('Would run now: no — an earlier unacknowledged turn pauses the wake first (held; it would wait)'
+            in command('test '+w.id))
