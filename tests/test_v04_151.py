@@ -54,7 +54,17 @@ def test_a_drop_that_pauses_the_wake_previews_as_no(engine, command):
     w, o = queued(e, command, error_streak=e.policy.error_pause_after-1)
     e.store.set_meta('accepted:'+o.id, '3')
     e.store.add_occurrence(w.id, 't:second')
-    assert 'Would run now: no — not acknowledged after three attempts (it would be dropped)' in command('test '+w.id)
+    assert 'Would run now: no — an earlier unacknowledged turn pauses the wake first (it would be skipped)' in command('test '+w.id)
+
+
+def test_a_one_shot_still_sends_its_next_turn_after_a_drop(engine, command):
+    # Review (scout): a drop ends a one-shot only once nothing else waits, and the previewed turn still waits.
+    e = engine
+    w = arm(e, 'at', next_due_at=e.clock.now()+3600)
+    for key in ('t:first', 't:second'):
+        e.store.add_occurrence(w.id, key)
+    e.store.set_meta('accepted:'+e.store.get_occurrence(w.id, 't:first').id, '3')
+    assert 'Would run now: yes' in command('test '+w.id)
 
 
 def test_a_broken_other_wake_does_not_break_the_preview(engine, command, monkeypatch):

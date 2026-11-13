@@ -7,7 +7,7 @@ import re
 from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES
 from . import governor
 from . import cache
-from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested, cap_counts, is_keep_warm, one_shot
+from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested, cap_counts, is_keep_warm, is_watcher
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible, filter_text
 
@@ -241,10 +241,13 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             passing=[n for n,v in enumerate(verdicts) if not v[0]]
             pick=next((n for n in passing if not dies(candidates[n])),passing[0] if passing else 0)
             o,(reason,defer,until)=candidates[pick],verdicts[pick]
-            # Each drop counts as an error: it ends a one-shot, and enough in a row pause the wake before the next is sent.
+            # Each drop counts as an error, and enough in a row pause the wake before the next one is sent: a watcher's
+            # waiting match is then held while paused, any other one skipped (Poller.gate).
             dropped=sum(dies(candidates[n]) for n in passing if n<pick)
-            if not reason and (dies(o) or dropped and (one_shot(w) or w.error_streak+dropped>=engine.policy.error_pause_after)):
+            if not reason and dies(o):
                 reason,defer,until='ack_timeout',False,None
+            elif not reason and dropped and w.error_streak+dropped>=engine.policy.error_pause_after:
+                reason,defer,until='drop_pauses',is_watcher(w),None
             ahead=''
             # After an evaluation error a tick leaves the wake alone until its retry time (Poller.evaluate).
             backoff_until=lambda x:float(engine.store.get_meta('eval_not_before:'+x.id) or 0)
@@ -281,7 +284,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
         'plugin_off':'HeartBeat 2.0 is off in settings','paused_all':'HeartBeat 2.0 is paused',
         'not_before':'waiting to retry a failed delivery' if retry else 'waiting out an earlier hold',
         'checkin_not_due':'the owner has not been quiet long enough','ack_timeout':'not acknowledged after three attempts',
-        'eval_backoff':'retrying after an error'}
+        'eval_backoff':'retrying after an error','drop_pauses':'an earlier unacknowledged turn pauses the wake first'}
     if ahead: reasons['in_flight']=f'another wake ({ahead}) takes the turn first'
 
     # A watcher with nothing waiting runs only when what it watches changes; its probe isn't run here.
