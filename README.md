@@ -262,7 +262,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Empty fires before pausing | `noop_pause_after` | 6 | Pauses the wake and asks you once: keep, slow, stop or watch. |
 | Ignored messages before pausing | `ignored_pause_after` | 3 | Delivered messages with no reply in the engagement window. |
 | Errors in a row before pausing | `error_pause_after` | 5 | Errors in a row before pausing. |
-| Reply window (hours) | `engagement_window_hours` | 6 | A reply within this window counts a delivered message as useful. |
+| Reply window (hours) | `engagement_window_hours` | 6 | A reply within this window counts a delivered message as useful. It undoes a slow-down back to the next check the agent asked for, and lifts a no-op or ignored pause you haven't been shown yet. |
 | Catch-up window (hours) | `catch_up_hours` | 6 | A one-shot more than this late after downtime is reported as missed instead of firing. |
 | Allowed watcher commands | `probe_commands` | `gh pr view, gh pr checks, gh run view, gh run list, git ls-remote, git status, git log` | Comma-separated argv prefixes for command watchers. Blank disables command watchers. |
 | Silence check-ins | `source_silence` | on | Silence check-ins. |
