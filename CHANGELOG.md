@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0 — 2026-11-13
+
+- **Your reply keeps the agent's own pace.** When you reply to a wake's message within the reply window, a recurring wake no longer drops back to its shortest interval. If it had slowed down for finding nothing, it returns to the next check the agent asked for, counted from your message, and never later than it was already due. Otherwise its schedule stays exactly as the agent's last turn set it. A no-op or ignored pause you haven't been shown yet is lifted by your reply; one you've already seen still waits for `/pulse keep`, `slow` or `stop`. On a slowed cron wake, your reply gives back the cron times it was skipping (#161).
+- **A wake turn stays a wake turn after you pause it.** If you pause or cancel a wake while its turn is running, everything the agent creates in the rest of that turn still follows the wake-turn rules: the role budget, the child limit, and no owner credit for `owner_asked` (#144).
+- **`/pulse test` matches what would happen in rare cases.** The preview tells a delivery retry apart from a hold left by quiet hours, and shows when either ends. It shows an unacknowledged turn as dropped and previews the one that would actually be sent. It says when another wake in the chat would take the turn first, and when a wake is waiting to retry after an error (#151).
+
 ## 0.3.15 — 2026-11-13
 
 - **Keep a long chat's cache warm: `/pulse warm on`.** On a long conversation, the first message after the prompt cache expires rewrites the whole prompt at the cache-write price. Keep-warm sends a tiny silent turn just before the cache would expire, so your next message reads the cache instead. It's per chat, and only you turn it on or off. It pings only where a ping can pay off: on caches that last 30 minutes or more, while the prompt is at least `keep_warm_min_tokens`, and while you've written in the last `keep_warm_idle_hours` (12 by default). It never pings a cache that has already gone cold. Any real turn moves the next ping out. Pings are silent and don't count as wake turns, messages, active items or agent spend; `/pulse status` and `/pulse ledger` show them on their own row (#163).

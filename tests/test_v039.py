@@ -361,9 +361,11 @@ def test_preview_uses_the_waiting_occurrence_and_its_retry_backoff(engine, comma
     assert command('run '+w.id).startswith('Queued ')
     o, = e.store.list_occurrences(w.id)
     e.store.set_meta('not_before:'+o.id, str(e.clock.now()+600))
+    e.store.set_meta('inject_failures:'+o.id, '1')
     before = snapshot(e)
     out = command('test '+w.id)
-    assert 'Would run now: no — waiting to retry a failed delivery (held; it would wait)' in out
+    # v0.4 (#151): the verdict names the retry time, and only a failed delivery is called a retry.
+    assert 'Would run now: no — waiting to retry a failed delivery until ' in out and '(held; it would wait)' in out
     assert 'The owner asked to run this now (/pulse run).' in out
     assert snapshot(e) == before
 

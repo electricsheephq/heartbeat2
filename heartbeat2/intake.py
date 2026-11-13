@@ -354,7 +354,7 @@ class Intake:
             s.set_meta('human_context:'+key,'1')
             for o in s.list_occurrences(session_key=key,state='done'):
                 if o.delivered and o.ended_at is not None and 0<=now-o.ended_at<=e.policy.engagement_window_hours*3600:
-                    governor.engagement(e,o)
+                    governor.engagement(e,o,late=True)
             for w in s.list_wakes(key):
                 if w.depth:
                     s.cas_wake(w.id,w.status,expected_version=w.version,depth=0)
