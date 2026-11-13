@@ -108,9 +108,10 @@ class Tool:
         if notice: result['settings_error']=notice
         return result
 
-    def owner_turn_evidence(self, session_id, flight):
+    def owner_turn_evidence(self, session_id, created_in):
+        # Keyed on the turn's provenance, not the live flight: a wake turn stays one after its occurrence is stopped (#144).
         e = self.engine
-        return (flight is None and bool(session_id) and bool(turn := e.intake.turns.get(session_id))
+        return (created_in == 'human_turn' and bool(session_id) and bool(turn := e.intake.turns.get(session_id))
                 and e.intake.owner_turns.get(session_id) == turn)
 
     def _handle(self, args, *, session_id='', **kwargs):
@@ -148,8 +149,8 @@ class Tool:
             with e.store.atomic():
                 s = e.store.get_session(s.session_key)
                 flight = e.intake.flight_for(session_id, s.session_key)
-                evidence = self.owner_turn_evidence(session_id, flight)
                 created_in = 'wake_turn' if flight or e.intake.in_wake_turn(session_id, s.session_key) else 'human_turn'
+                evidence = self.owner_turn_evidence(session_id, created_in)
                 if action == 'respond':
                     return self.respond(args, flight)
                 # The turn's own flight, even after /pulse warm off or a cancel ended its occurrence mid-turn.
@@ -174,8 +175,9 @@ class Tool:
                         return {'error':'session_off'}
                     if args.get('role') and args.get('babysit'):
                         return {'error':'role_not_babysit'}
-                    parent = e.store.get_wake(flight.wake_id) if flight else None
-                    child_key = e.child_key(flight) if flight else ''
+                    # Every wake-turn rule holds for the whole turn, also after the owner stops its occurrence (#144).
+                    parent = e.store.get_wake(retained.wake_id) if retained else None
+                    child_key = e.child_key(retained) if retained else ''
                     if args.get('role') and (args.get('trigger') or {}).get('kind') not in RECURRING_KINDS:
                         return {'error':'role_needs_recurring'}
                     parent_role = bool(parent and (parent.role or parent.trigger_json.get('own_time')))
@@ -186,7 +188,7 @@ class Tool:
                         chat_type=s.chat_type, allow_gateway_injection=e.injection_allowed(),
                         kind=(args.get('trigger') or {}).get('kind',''), created_in=created_in,
                         depth=depth, parent_role=parent_role, children_created=children,
-                        untrusted_payload=bool(flight and flight.untrusted),
+                        untrusted_payload=bool(retained and retained.untrusted),
                         active_count=active_count, global_active_count=global_active_count)
                     if not gate.allowed:
                         if gate.reason in {'max_active', 'global_max_active'}:
@@ -201,7 +203,7 @@ class Tool:
                              depth=depth, parent_wake_id=parent.id if parent else None,
                              status=gate.status, owner_requested=requested, role=args.get('role',False))
                     request, budget_clamps = args, {}
-                    if w.role and flight:
+                    if w.role and retained:
                         cap = e.policy.role_budget(parent) if parent and parent.role else e.policy.role_turns_per_day_default
                         budget = args.get('budget',{}).get('turns_per_day',e.policy.role_turns_per_day_default)
                         if isinstance(budget,int) and not isinstance(budget,bool) and budget > cap:
@@ -214,7 +216,7 @@ class Tool:
                         e.store.set_meta(child_key,str(children+1))
                     item = {'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w),'receipt':self.receipt(w,s)}
                     if args.get('owner_asked') is True and not requested:
-                        item['owner_asked_ignored'] = 'wake_turn' if flight is not None else 'not_owner_turn' if not evidence else 'not_one_shot'
+                        item['owner_asked_ignored'] = 'wake_turn' if created_in == 'wake_turn' else 'not_owner_turn' if not evidence else 'not_one_shot'
                     return item
                 if action not in {'update','pause','resume','cancel'}:
                     return {'error':'unknown_action'}
@@ -237,7 +239,7 @@ class Tool:
                                 else 'The check-in is controlled in Settings.'}
                     gate = e.policy.mutation_gate(w, action=action, session_key=s.session_key,
                         created_in=created_in, new_kind=(args.get('trigger') or {}).get('kind'),
-                        babysit=args.get('babysit'), untrusted_payload=bool(flight and flight.untrusted))
+                        babysit=args.get('babysit'), untrusted_payload=bool(retained and retained.untrusted))
                     if not gate.allowed:
                         if args.get('id') != 'all':
                             return {'error':gate.reason, **({'detail':gate.detail} if gate.detail else {})}
