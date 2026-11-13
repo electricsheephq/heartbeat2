@@ -627,7 +627,8 @@ class Intake:
             for w in s.list_wakes(key):
                 card=s.get_meta('card:'+w.id)
                 if card and is_keep_warm(w):
-                    lines.append(f'Keep-warm ({w.id}) paused ({card}); /pulse warm on turns it back on.')
+                    if w.status=='paused': lines.append(f'Keep-warm ({w.id}) paused ({card}); /pulse warm on turns it back on.')
+                    s.set_meta('card:'+w.id,'')
                 elif card:
                     ending = '.' if w.role or w.trigger_json.get('own_time') else f'; convert with /pulse watch {w.id}.'
                     lines.append(f'{w.title or "A wake"} ({w.id}) paused ({card}): keep / slow / stop via /pulse{ending}')

@@ -337,3 +337,31 @@ def test_new_conversation_waits_for_its_own_first_call(engine, pulse):
     e.clock.advance(120)
     e.tick()
     assert not e.ctx.calls
+
+
+def test_error_pause_card_shows_once_and_off_clears_it(engine, pulse):
+    # Review (Claude): the keep-warm pause card must not repeat on every owner turn, nor outlive /pulse warm off.
+    e = engine
+    from heartbeat2 import governor
+    warm_chat(e)
+    pulse(e, 'warm on')
+    w = warm_wake(e)
+    for _ in range(e.policy.error_pause_after):
+        governor.error(e, e.store.get_wake(w.id))
+    assert warm_wake(e).status == 'paused'
+    assert 'keep / slow' not in pulse(e, 'status')
+
+    def owner_turn(n):
+        e.store.set_meta('human_context:'+KEY, '1')
+        out = e.intake.pre_llm_call(session_id='sid', turn_id=f'h{n}', user_message='hi', platform='telegram')
+        e.intake.on_session_end(session_id='sid', turn_id=f'h{n}', completed=True)
+        return (out or {}).get('context', '')
+    assert 'Keep-warm' in owner_turn(1)
+    assert 'Keep-warm' not in owner_turn(2)
+    for _ in range(e.policy.error_pause_after):
+        governor.error(e, e.store.get_wake(w.id))
+    pulse(e, 'warm on')
+    for _ in range(e.policy.error_pause_after):
+        governor.error(e, e.store.get_wake(w.id))
+    pulse(e, 'warm off')
+    assert 'Keep-warm' not in owner_turn(3)

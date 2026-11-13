@@ -357,7 +357,7 @@ def handle(raw_args, runtime):
                 if status.get('state')=='stalled': lines.append('Stalled since '+_time(engine,status.get('since')))
                 if not engine.injection_allowed(): lines.append(INJECTION_CONFIG)
                 lines.extend(_item(engine,w,role_today.get(w.id)) for w in active)
-                lines.extend(f'{w.id}: keep / slow / stop / watch' for w in active if w.status_reason.startswith('governor:'))
+                lines.extend(f'{w.id}: keep / slow / stop / watch' for w in active if w.status_reason.startswith('governor:') and not is_keep_warm(w))
                 return '\n'.join(lines)
             if action == 'list' and rest in {'','all'}:
                 wakes = engine.store.list_wakes(key)
@@ -513,6 +513,7 @@ def _warm(engine, key, rest):
             if not engine.store.cas_wake(wid,wake.status,expected_version=wake.version,status='cancelled',status_reason='command'):
                 raise ValueError('concurrent item change')
             engine.cancel_occurrences(wid,'cancelled')
+            engine.store.set_meta('card:'+wid,'')
             engine.signal()
             return 'Keep-warm is off for this chat.'
         if not session.enabled: raise ValueError('this chat is off; use /pulse on')
