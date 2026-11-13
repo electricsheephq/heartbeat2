@@ -35,7 +35,8 @@ def test_the_preview_skips_an_occurrence_dispatch_would_drop(engine, command):
     e.store.set_meta('accepted:'+o.id, '3')
     e.store.add_occurrence(w.id, 't:second')
     out = command('test '+w.id)
-    assert 'Would run now: yes' in out
+    # The second, scheduled occurrence is the one shown, not the dropped /pulse run one.
+    assert 'Would run now: yes' in out and 'The owner asked to run this now' not in out
 
 
 def test_another_wake_earlier_in_the_tick_takes_the_turn(engine, command):
