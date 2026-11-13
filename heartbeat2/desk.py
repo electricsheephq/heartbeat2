@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 
 from .commands import _clip, _oneline, _paused, _time, messages_count, quiet_until
-from .policy import is_watcher
+from .policy import is_watcher, is_keep_warm
 from .schedule import quiet_end, zone
 from .wake_text import _age
 
@@ -85,7 +85,7 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
         title = _plain(_clip(_oneline(w.title or w.note), 80))
         summary = _plain(_clip(_oneline(last.summary or last.outcome or last.state), 80))
         rows.append(f'- done role {w.id} {title} · finished {_time(view, last.ended_at, compact=True)} · last: {summary}')
-    other = [w for w in wakes if not w.role and w.status == 'active']
+    other = [w for w in wakes if not w.role and w.status == 'active' and not is_keep_warm(w)]
     due = [(t, w) for w in other for t in (w.next_due_at, w.deadline_at) if t is not None]
     next_due = min(due, key=lambda pair: pair[0]) if due else None
     watchers = sum(is_watcher(w) for w in other)

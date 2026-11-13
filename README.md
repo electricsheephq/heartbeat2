@@ -193,6 +193,7 @@ pulse tool results name the ignored setting.
 | `/pulse ok <id>` | Approve a wake the agent proposed (when *Agent can arm wakes* is `ask_first`) |
 | `/pulse keep\|slow\|stop\|watch <id>` | Answer the governor's card for a paused wake (`watch` pauses it and asks your agent to turn it into a watcher; the next watcher-only trigger or schedule conversion keeps it yours). Any other agent edit of the trigger, timing or note makes it the agent's: it gets the agent's interval floor and cache snap, and the unanswered mute applies. |
 | `/pulse off` · `/pulse on` | Turn wakes off or back on for this chat. Only you can turn them back on. |
+| `/pulse warm on` · `warm off` · `warm` | Keep this chat's prompt cache warm while you're using it (see [Prompt cache](#prompt-cache)); bare `warm` shows its state |
 
 `/pulse` is a control panel, not conversation. Using it never counts as replying to the agent. Anything else you send counts as a reply, including a reaction or an edit on platforms that report them: it resets the unanswered mute and cancels wakes armed to stop when you reply. A reaction or edit counts only when its chat maps to one HeartBeat session; in a chat shared by several sessions (for example DM threads or topics) it is ignored. The other exceptions are listed under known issues: a message queued while the agent is busy on Signal or SimpleX, and a Codex app-server steer.
 
@@ -245,10 +246,13 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Shortest agent timer without a watcher (minutes) | `agent_ungated_floor_minutes` | 55 | Floor for recurring timers the agent arms without a watcher. |
 | Minutes between wake turns | `wake_spacing_minutes` | 10 | Per chat. |
 | Fastest watcher check (seconds) | `probe_floor_seconds` | 60 | Watchers never check more often than this. |
-| Active wakes per chat | `max_active` | 10 | Also capped at 50 across the profile. |
+| Active wakes per chat | `max_active` | 50 | Active or proposed wakes and watchers in one chat. Check-ins, own time and keep-warm don't count. Turns and messages have their own daily limits. |
+| Active wakes across the profile | `max_active_profile` | 200 | The same count across all of this profile's chats. |
 | Longest lifetime (days) | `max_lifetime_days` | 14 | Recurring wakes, watchers and agent follow-ups expire by then; agent recurring wakes default to 7 days. Roles and own time have no lifetime limit. |
 | Longest owner one-time reminder (days) | `max_reminder_days` | 365 | Owner-requested one-time reminders, including `/pulse add`, can be due up to this many days out, with `max_lifetime_days` of grace after a long reminder's due time. The hard end is the sum of both settings. If `max_lifetime_days` is larger, its existing bound applies instead; maximum 3650 days. |
 | Check in after a long silence | `owner_silent_checkin` | off | Off by default. One check-in per silence, with how to turn it off. |
+| Keep-warm pauses after (hours without your messages) | `keep_warm_idle_hours` | 12 | For chats where you turned on `/pulse warm`: pings stop once you haven't written for this long, and start again when you do. |
+| Keep-warm smallest context (tokens) | `keep_warm_min_tokens` | 20000 | No ping while the chat's prompt is smaller than this: a cold start is cheap then. |
 | Silence before a check-in (hours) | `checkin_after_hours` | 24 | Doubles for the next silence if a check-in is ignored. |
 | Wake-from-wake depth | `max_rearm_chain` | 2 | How many wakes deep a chain armed inside wake turns may go; a message from you resets it. |
 | Empty fires before slowing down | `noop_slowdown_after` | 3 | A recurring wake that keeps finding nothing doubles its interval after this many. |
@@ -291,6 +295,20 @@ The Codex OAuth route is reported as unknown until learned.
 Other routes learn a conservative TTL only after both warm and cold gaps are observed.
 Agent recurring intervals near the TTL snap below it with downward jitter, respecting floors.
 Owner wakes, cron and anchored repeats retain their timing. Cache lines show the effect and warm interval.
+
+**Keep a long chat warm: `/pulse warm on`.** On a long conversation, the first message after the cache expires rewrites the
+whole prompt at the cache-write price (about 2x input on a 1h Claude cache), where a warm message pays the read price (about
+0.1x). `/pulse warm on` turns on keep-warm for that one chat: just before the cache would expire, HeartBeat sends a tiny silent
+turn ("reply [SILENT]", no tools) that reads the cache and keeps it alive, so the next real message stays warm.
+- It pings only while it saves money: on routes whose cache lasts 30 minutes or more, while the chat's prompt is at least
+  `keep_warm_min_tokens`, and while you've written in the last `keep_warm_idle_hours`. When you come back, it starts again.
+- Any real turn in the chat (yours or a wake's) moves the next ping out, so an active chat gets no pings. It never pings a cache
+  that has already gone cold.
+- Pings are silent, aren't wake turns, and don't count toward wake turns, messages, active items or the daily priced-spend limit
+  for the agent's own turns. `/pulse status` and `/pulse ledger` show them on their own row with their cost.
+- Only you turn it on or off (`/pulse warm off`); the agent can't. When the route doesn't report the cache lifetime,
+  HeartBeat uses the longest gap it has seen stay warm on that route.
+- Hermes has no per-turn output cap for plugins, so the ping asks for a one-word reply rather than enforcing it.
 
 ## Security and privacy
 Disclosure — wakes and watchers run full turns on the conversation's own model, billed like any message; command watchers run allowlisted read-only commands without an approval prompt; URL watchers make the GET requests you configured; state stays in the profile's plugin-data; no telemetry. Command environments use Hermes' sanitizer on an allowlisted base and carry no provider, bot or GitHub tokens; gh uses its own hosts.yml or keyring. URL watchers always block cloud metadata, and block private/local addresses unless `url_allow_private` is enabled, checking every hop at connect time. File watchers honor Hermes read blocks at arm/update and every check, including rotation. Helpers run in the watcher's profile scope.

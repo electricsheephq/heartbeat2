@@ -7,7 +7,7 @@ import re
 from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES
 from . import governor
 from . import cache
-from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested, cap_counts
+from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested, cap_counts, is_keep_warm
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible, filter_text
 
@@ -18,7 +18,7 @@ HELP = ('/pulse status | desk | list [all] | ledger [7d] | why <id> | add in 2h 
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
         'role every 1d [at 09:00] <charter> | role self <charter> | budget <id> <n>/day | '
         'run <id> (queue now, usual checks) | test <id> (preview, nothing sent) | '
-        'pause|resume|cancel <id|all> [for 3d] | off|on | '
+        'pause|resume|cancel <id|all> [for 3d] | off|on | warm on|off (keep this chat\'s cache warm) | '
         'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
 
 
@@ -126,7 +126,9 @@ def _item(engine, wake, today_budget=None):
     elif today_budget and wake.status == 'active' and today_budget[0] >= today_budget[1]: due = 'resting until tomorrow'
     else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
     role = f' · today {today_budget[0]}/{today_budget[1]}' if today_budget else ''
-    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + wake.kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+    if is_keep_warm(wake) and wake.status == 'active' and wake.next_due_at is None: due = 'no ping due now'
+    kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
 
 
 def _occurrences(engine, wake):
@@ -160,7 +162,7 @@ def _ledger(engine, key, days):
                 if isinstance(value, int): counts[name] = counts.get(name, 0)+value
         fires, skips = counts.get('fires',0), counts.get('gated_skips',0)
         valuable, turns = counts.get('valuable',0), counts.get('model_turns',0)
-        verdict = 'useful' if valuable else 'no value yet' if turns else 'waiting'
+        verdict = 'keep-warm pings' if is_keep_warm(wake) else 'useful' if valuable else 'no value yet' if turns else 'waiting'
         lines.append(f'{wake.id} {_oneline(wake.title) or _clip(_oneline(wake.note),40)}: {fires} · {counts.get("checks",0)} · {turns} · '
                      f'{counts.get("delivered",0)} · {counts.get("engaged",0)} · '
                      f'{cache.display(counts)} · {counts.get("provider_deferrals",0)} · {counts.get("no_verdict",0)} · {verdict}')
@@ -285,6 +287,7 @@ def handle(raw_args, runtime):
                 return 'Error: /pulse needs a known messaging-gateway session.'
             if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
         if action in {'add','role'}: return _add(engine,session,rest,role=action=='role')
+        if action == 'warm' and rest in {'','on','off'}: return _warm(engine,key,rest)
         with engine.store.atomic():
             session=engine.store.get_session(key)
             if action in {'run','test'}:
@@ -320,13 +323,17 @@ def handle(raw_args, runtime):
                 elif override.get('until',0)>engine.clock.now(): quiet_label+=' (chat override)'
                 daily = engine.daily(key)
                 counts={}
+                warm={}
                 for wake in engine.store.list_wakes(key):
                     row=engine.store.get_ledger(local_day(engine.clock.now(),engine.policy.resolved_timezone()),wake.id) or {}
                     for name,value in row.items():
-                        if isinstance(value,int): counts[name]=counts.get(name,0)+value
+                        # Keep-warm spend is shown on its own line, never mixed into wake turns (#163).
+                        if isinstance(value,int):
+                            target=warm if is_keep_warm(wake) else counts
+                            target[name]=target.get(name,0)+value
                 active = [w for w in engine.store.list_wakes(key) if w.status in {'active','proposed','paused'}]
                 role_today = {w.id: _role_today(engine,w) for w in active if w.role}  # read once: header and rows agree
-                next_due = min((x for w in active if w.status=='active' and not _resting(engine,w,role_today.get(w.id))
+                next_due = min((x for w in active if w.status=='active' and not is_keep_warm(w) and not _resting(engine,w,role_today.get(w.id))
                                 for x in (w.next_due_at,w.deadline_at) if x is not None),default=None)
                 lines = [f'HeartBeat 2.0: {"on" if session.enabled and engine.policy.enabled else "off"} · poller {status["state"]}'
                          + (f' ({status["reason"]})' if status.get('reason') else ''),
@@ -335,6 +342,8 @@ def handle(raw_args, runtime):
                          f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {messages_count(daily["delivered"],engine.store.messages_in_flight(key),engine.policy.max_messages_per_day)} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
                          f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
                 held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
+                kw=engine.store.get_wake(keep_warm_id(key))
+                if kw is not None and kw.status in {'active','paused'}: lines.append(_keep_warm_line(engine,session,kw,warm))
                 from .desk import cost_line
                 cost=cost_line(engine.store,key,engine.policy.resolved_timezone(),engine.policy)
                 if cost: lines.append(cost)
@@ -436,6 +445,8 @@ def handle(raw_args, runtime):
 def _transition(engine,session,wake,action,seconds):
     if wake.status in FINISHED_STATUSES:
         raise ValueError('item is terminal')
+    if is_keep_warm(wake) and action not in {'pause','cancel','stop'}:
+        raise ValueError('keep-warm is turned on with /pulse warm on and off with /pulse warm off')
     if action in {'keep','slow'}:
         if wake.status!='paused' or not wake.status_reason.startswith('governor:'):
             raise ValueError('keep/slow answer a governor card; use /pulse resume')
@@ -470,3 +481,70 @@ def _transition(engine,session,wake,action,seconds):
     if action in {'ok','resume'}: output+='\n'+engine.tool.receipt(engine.store.get_wake(wake.id),session)
     if action=='watch': output+='\nPaused. Ask your agent to turn it into a watcher (pulse update with a file, process, url or command trigger).'
     return output
+
+
+def keep_warm_id(session_key):
+    import hashlib
+    return 'warm_'+hashlib.sha256(session_key.encode()).hexdigest()[:16]
+
+
+def _keep_warm_line(engine, session, wake, counts):
+    pings = counts.get('model_turns', 0)
+    spend = (f' · ~${counts.get("cost_microusd",0)/1e6:.2f}' if pings and not counts.get('unpriced_calls',0) else '')
+    head = f'Keep-warm: {"on" if wake.status=="active" else "paused"} · pings today {pings}{spend}'
+    if wake.status != 'active': return head + ' · /pulse warm on turns it back on'
+    plan = cache.keep_warm_plan(engine.store, session, engine.policy, engine.clock.now())
+    if 'due_at' in plan:
+        return head + f' · next ping {_time(engine,plan["due_at"])} (cache {cache.minutes(plan["ttl"])}) · it pauses after {engine.policy.keep_warm_idle_hours}h without a message from you'
+    return head + ' · no ping now: ' + plan['reason']
+
+
+def _warm(engine, key, rest):
+    """/pulse warm on|off: the owner's per-chat cache keep-warm (#163). Silent pings; the owner pays for them, so only they turn it on."""
+    wid = keep_warm_id(key)
+    with engine.store.atomic():
+        session, now = engine.store.get_session(key), engine.clock.now()
+        wake = engine.store.get_wake(wid)
+        if rest == '':
+            if wake is None or wake.status not in {'active','paused'}: return 'Keep-warm is off for this chat. /pulse warm on turns it on.'
+            return _keep_warm_line(engine, session, wake, engine.store.get_ledger(local_day(now,engine.policy.resolved_timezone()),wid) or {})
+        if rest == 'off':
+            if wake is None or wake.status not in {'active','paused'}: return 'Keep-warm is already off for this chat.'
+            if not engine.store.cas_wake(wid,wake.status,expected_version=wake.version,status='cancelled',status_reason='command'):
+                raise ValueError('concurrent item change')
+            engine.cancel_occurrences(wid,'cancelled')
+            engine.signal()
+            return 'Keep-warm is off for this chat.'
+        if not session.enabled: raise ValueError('this chat is off; use /pulse on')
+        gate = engine.policy.creation_gate(session_key=key, platform=session.platform, chat_type=session.chat_type,
+            allow_gateway_injection=engine.injection_allowed(), creator='user', kind='self')
+        if not gate.allowed: raise ValueError(gate.reason + ('\n'+gate.detail if gate.detail else ''))
+        if wake is None:
+            engine.store.create_wake(Wake(key, 'Keep the prompt cache warm.', 'self', id=wid, platform=session.platform,
+                chat_type=session.chat_type, chat_id=session.chat_id, armed_session_id=session.current_session_id,
+                creator='user', created_in='command', title='Keep-warm', reason='You turned on keep-warm (/pulse warm on).',
+                trigger_json={'builtin':True,'keep_warm':True}))
+        elif wake.status != 'active':
+            if not engine.store.cas_wake(wid,wake.status,expected_version=wake.version,status='active',status_reason='',
+                                         armed_session_id=session.current_session_id,error_streak=0,next_due_at=None):
+                raise ValueError('concurrent item change')
+            engine.store.set_meta('card:'+wid,'')
+        plan = cache.keep_warm_plan(engine.store, session, engine.policy, now)
+    engine.signal()
+    lines = [f'Keep-warm is on for this chat ({wid}). While you\'re writing here, a tiny silent ping just before the prompt cache '
+             f'expires keeps it warm, so your next message reads the cache instead of rewriting it. It pauses after '
+             f'{engine.policy.keep_warm_idle_hours}h without a message from you and resumes when you write. /pulse warm off stops it.']
+    prefix = session.last_prompt_tokens or 0
+    if 'due_at' in plan:
+        # Pricing may fetch metadata: outside the store transaction.
+        read = cold = None
+        try:
+            read = cache.cost(session.last_route, prompt=prefix, read=prefix, ttl=plan['ttl'])
+            cold = cache.cost(session.last_route, prompt=prefix, written=prefix, ttl=plan['ttl'])
+        except Exception:
+            pass
+        price = f' · a ping ~${read:.2f} vs a cold start ~${cold:.2f}' if read is not None and cold is not None else ''
+        lines.append(f'Cache {cache.minutes(plan["ttl"])} · context {prefix} tokens{price} · next ping {_time(engine,plan["due_at"])}')
+    else:
+        lines.append('No ping now: '+plan['reason']+'.')
+    return '\n'.join(lines)

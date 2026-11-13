@@ -36,6 +36,12 @@ def holds_messages(wake):
 def one_shot(wake):
     return wake.kind == 'at'
 
+
+def is_keep_warm(wake):
+    """The owner's per-chat cache keep-warm ping (#163): a settings-like built-in, never agent work."""
+    trigger = wake.trigger_json
+    return isinstance(trigger, dict) and bool(trigger.get('builtin') and trigger.get('keep_warm'))
+
 # Built-in messaging gateways at Hermes 04eb00cef7, gateway/config.py:217.
 # Registered plugin adapters can be admitted explicitly by the Hermes adapter.
 MESSAGING_PLATFORMS = frozenset({"telegram", "discord", "whatsapp", "whatsapp_cloud",
@@ -95,10 +101,13 @@ class Policy:
     agent_ungated_floor_minutes: int = 55
     wake_spacing_minutes: int = 10
     probe_floor_seconds: int = 60
-    max_active: int = 10
+    max_active: int = 50
+    max_active_profile: int = 200
     max_lifetime_days: int = 14
     max_reminder_days: int = 365
     owner_silent_checkin: bool = False
+    keep_warm_idle_hours: int = 12
+    keep_warm_min_tokens: int = 20000
     checkin_after_hours: int = 24
     max_rearm_chain: int = 2
     noop_slowdown_after: int = 3
@@ -174,7 +183,7 @@ class Policy:
                          max_children_per_wake_turn=max(1, min(result.max_children_per_wake_turn, 50)))
         for name in ("min_interval_minutes", "agent_ungated_floor_minutes", "probe_floor_seconds",
                      "max_lifetime_days", "max_reminder_days", "checkin_after_hours", "noop_backoff_factor",
-                     "noop_max_backoff_hours", "ledger_days"):
+                     "noop_max_backoff_hours", "ledger_days", "keep_warm_idle_hours"):
             if getattr(result, name) < 1:
                 raise ValueError(f"{name} must be positive")
         # Readable upper bounds, each far inside the value where date, float
@@ -190,6 +199,10 @@ class Policy:
             "max_reminder_days": 3650,
             "checkin_after_hours": 8760,
             "own_time_hours": 168,
+            "max_active": 1000,
+            "max_active_profile": 10000,
+            "keep_warm_idle_hours": 168,
+            "keep_warm_min_tokens": 10000000,
         }.items():
             if getattr(result, name) > maximum:
                 raise ValueError(f"{name} exceeds maximum {maximum:g}")
@@ -271,10 +284,10 @@ class Policy:
     def cap_gate(self, active_count, global_active_count) -> Gate:
         if active_count >= self.max_active:
             return Gate(False, "max_active", f"This chat has reached its limit of {self.max_active} active or proposed wakes "
-                        "(the check-in and own time don't count). Cancel one with /pulse cancel <id> or pulse cancel.")
-        if global_active_count >= 50:
-            return Gate(False, "global_max_active", "This profile has reached its limit of 50 active or proposed wakes across its chats "
-                        "(check-ins and own time don't count). Cancel some with /pulse cancel <id> in their chats.")
+                        "(the check-in, own time and keep-warm don't count). Cancel one with /pulse cancel <id> or pulse cancel.")
+        if global_active_count >= self.max_active_profile:
+            return Gate(False, "global_max_active", f"This profile has reached its limit of {self.max_active_profile} active or proposed wakes "
+                        "across its chats (check-ins, own time and keep-warm don't count). Cancel some with /pulse cancel <id> in their chats.")
         return Gate(True)
 
     def mutation_gate(self, wake: Wake, *, action: str, session_key: str,
@@ -284,6 +297,8 @@ class Policy:
             return Gate(False, "wrong_session")
         if wake.trigger_json.get('own_time') and action in {'pause','cancel','off'}:
             return Gate(False, 'builtin_settings_owned', 'Own time is set in Settings (own_time_hours).')
+        if is_keep_warm(wake):
+            return Gate(False, 'builtin_settings_owned', 'Keep-warm is the owner\'s: they turn it on and off with /pulse warm on|off.')
         if wake.role and babysit:
             return Gate(False, 'role_not_babysit')
         if wake.creator == "user" and not wake.role and created_in != "human_turn":

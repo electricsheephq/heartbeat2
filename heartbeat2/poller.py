@@ -15,12 +15,13 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages
+from .policy import MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm
 from .schedule import time_due, local_day, parse_duration, next_every
 from . import governor
 
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
+PROBES_PER_TICK = 16
 FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
@@ -262,6 +263,7 @@ class Poller:
             with s.atomic():
                 for w in s.list_wakes(): self.terminal_one_shot(w)
                 self.own_time()
+                self.keep_warm()
                 self.times()
                 self.silence()
                 if now-float(s.get_meta('last_gc_at') or 0)>=3600:
@@ -342,6 +344,9 @@ class Poller:
         due=[]
         with s.atomic():
             for w in s.list_wakes(status='active'):
+                # A bounded batch per tick (four waves of the four-worker pool), so many slow watchers can't hold
+                # back time wakes for long; the rest stay due and run on the next tick.
+                if len(due)>=PROBES_PER_TICK: break
                 if w.kind not in PROBE_KINDS or not self.family_enabled(w): continue
                 session=s.get_session(w.session_key)
                 if session is None or not session.enabled or session.paused_until is not None and session.paused_until>now: continue
@@ -408,6 +413,7 @@ class Poller:
     def _time(self,w):
         s,now=self.store,self.clock.now()
         if self.end_max_fires(w): return
+        if is_keep_warm(w): return  # keep_warm() schedules it from the chat's last cache touch.
         # Retain the existing schedule decisions, isolated per wake/savepoint.
         if w.status=='active':
             if w.expires_at is not None and w.expires_at<=now:
@@ -498,6 +504,25 @@ class Poller:
                                fires=0,max_fires=None,babysit=False)
             if updates: s.cas_wake(w.id,w.status,expected_version=w.version,**updates)
 
+    def keep_warm(self):
+        """Queue one silent ping per cache touch, just before the chat's prompt cache would expire (#163)."""
+        for w in self.store.list_wakes(status='active'):
+            if is_keep_warm(w): self.evaluate(w,lambda w=w:self._keep_warm(w))
+
+    def _keep_warm(self,w):
+        from .cache import keep_warm_plan, keep_warm_key
+        s,now=self.store,self.clock.now()
+        session=s.get_session(w.session_key)
+        if session is None or not deliverable_platform(session.platform): return
+        plan=keep_warm_plan(s,session,self.policy,now)
+        due=plan.get('due_at')
+        if due!=w.next_due_at:
+            if not s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due): return
+            w=s.get_wake(w.id)
+        if due is None or now<due: return
+        if any(o.state in {'pending','claimed','started'} for o in s.list_occurrences(w.id)): return
+        s.add_occurrence(w.id,keep_warm_key(plan['touch']))
+
     def silence(self):
         s,now=self.store,self.clock.now()
         if not self.policy.source_silence: return
@@ -554,6 +579,11 @@ class Poller:
             return 'episode_ended',False,None
         if w.trigger_json.get('own_time'):
             if not self.policy.own_time_hours: return 'setting_off',False,None
+        elif is_keep_warm(w):
+            from .cache import keep_warm_plan, keep_warm_key
+            plan=keep_warm_plan(self.store,s,self.policy,now)
+            # A real turn since this ping was queued already warmed the cache, or the cache went cold, or the chat rests.
+            if 'due_at' not in plan or o.dedupe_key!=keep_warm_key(plan['touch']): return 'keep_warm_not_needed',False,None
         elif w.trigger_json.get('builtin'):
             if not self.policy.owner_silent_checkin: return 'setting_off',True,None
             after=self.policy.checkin_after_hours*3600*(2 if w.ignored_streak else 1)
@@ -579,7 +609,7 @@ class Poller:
             return 'provider_unavailable',True,health['until'] if health['until']>now else None
         if w.role and self.store.dispatches_today(w.id,self.policy.resolved_timezone())>=self.policy.role_budget(w):
             return 'role_budget',False,None
-        if (not owner_class(w) and self.policy.daily_cost_limit_usd>0
+        if (not owner_class(w) and not is_keep_warm(w) and self.policy.daily_cost_limit_usd>0
                 and self.store.agent_cost_today(w.session_key,self.policy.resolved_timezone())['cost_microusd']/1e6
                     >=self.policy.daily_cost_limit_usd):
             return 'daily_cost_cap',False,None
@@ -593,7 +623,8 @@ class Poller:
         if mute and not message_held: return mute,mute=='held_unanswered',None
         totals=self.daily(s.session_key)
         cap='daily_model_cap' if totals['model_turns']>=self.policy.max_model_wakes_per_day else 'daily_message_cap' if totals['delivered']>=self.policy.max_messages_per_day else ''
-        if cap and not (cap=='daily_message_cap' and message_held) and not (owner_class(w) and one_shot(w)):
+        # Keep-warm pings are silent cache reads the owner turned on: they neither use nor count against wake turns.
+        if cap and not is_keep_warm(w) and not (cap=='daily_message_cap' and message_held) and not (owner_class(w) and one_shot(w)):
             if is_watcher(w):
                 return 'held_daily_cap',True,None
             return cap,False,None
@@ -653,14 +684,17 @@ class Poller:
             cache_line='' if s.connection.in_transaction else self.cache_line(w)
         held_by=o.error  # Claim clears the stored deferral; retain it for this prompt.
         message_held=self.message_hold_reason(w,session)
-        if message_held and (not o.force_silent or o.held_reason.startswith('message_held:')):
+        if is_keep_warm(w):
+            # A keep-warm ping never speaks, whatever holds apply.
+            if not o.force_silent and not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=True): return
+        elif message_held and (not o.force_silent or o.held_reason.startswith('message_held:')):
             if not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=True,
                                        held_reason='message_held:'+message_held): return
         elif not message_held and o.force_silent and o.held_reason.startswith('message_held:'):
             if not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=False,held_reason=''): return
         with s.atomic():
             if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
-            s.set_meta('spend:'+o.id, 'owner' if owner_class(w) else 'agent')
+            s.set_meta('spend:'+o.id, 'owner' if owner_class(w) or is_keep_warm(w) else 'agent')
         o=s.get_occurrence(w.id,o.dedupe_key)
         health=json.loads(s.get_meta('provider_health') or '{}')
         if health:
@@ -687,7 +721,9 @@ class Poller:
             s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))
             flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]
             s.set_meta('injections',json.dumps(flood+[self.clock.now()]))
-            s.cas_session(session.session_key,{'last_wake_turn_at':session.last_wake_turn_at},last_wake_turn_at=self.clock.now())
+            # A silent ping isn't a wake turn: it must not push the chat's real wakes back by wake spacing.
+            if not is_keep_warm(w):
+                s.cas_session(session.session_key,{'last_wake_turn_at':session.last_wake_turn_at},last_wake_turn_at=self.clock.now())
         else:
             if health:
                 health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
@@ -702,10 +738,11 @@ class Poller:
 
     def render_occurrence(self,w,o,session,*,held_by='',message_held='',cache_line='',held_reports=''):
         s=self.store
-        from .wake_text import render_wake, escape_text
+        from .wake_text import render_wake, render_keep_warm, escape_text
         from .desk import render_desk
         from .intake import marker_tag
         tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
+        if is_keep_warm(w): return render_keep_warm(w,o,marker_tag=tag)
         recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
         late=None
         if o.dedupe_key.startswith('t:'):

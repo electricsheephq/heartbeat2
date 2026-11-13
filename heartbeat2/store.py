@@ -406,10 +406,17 @@ class Store:
     def daily_counts(self, key, timezone):
         totals = {'model_turns': 0, 'delivered': 0}
         day = local_day(self.clock.now(), timezone)
+        # Keep-warm pings are silent cache reads, not wake turns or messages (#163).
+        from .policy import is_keep_warm
+        pings = set()
         for w in self.list_wakes(key):
+            if is_keep_warm(w):
+                pings.add(w.id)
+                continue
             row = self.get_ledger(day, w.id) or {}
             for k in totals: totals[k] += row.get(k, 0)
         for o in self.list_occurrences(session_key=key):
+            if o.wake_id in pings: continue
             if o.state in {'claimed', 'started'}:
                 if o.state == 'claimed': totals['model_turns'] += 1
                 if not o.force_silent: totals['delivered'] += 1

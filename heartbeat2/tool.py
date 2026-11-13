@@ -152,6 +152,10 @@ class Tool:
                 created_in = 'wake_turn' if flight or e.intake.in_wake_turn(session_id, s.session_key) else 'human_turn'
                 if action == 'respond':
                     return self.respond(args, flight)
+                if flight is not None and action not in {'list', 'desk'}:
+                    parent = e.store.get_wake(flight.wake_id)
+                    if parent is not None and parent.trigger_json.get('keep_warm'):
+                        return {'error':'keep_warm_turn','detail':'This turn only keeps the cache warm: change nothing and reply [SILENT].'}
                 if action == 'list':
                     return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w)} for w in e.store.list_wakes(s.session_key)]}
                 if action == 'desk':
@@ -226,7 +230,9 @@ class Tool:
                     if action == 'update' and 'role' in args:
                         return {'error':'role_is_fixed'}
                     if action == 'update' and w.trigger_json.get('builtin') and any(k in args for k in ('trigger','until','babysit','pacing')):
-                        return {'error':'builtin_settings_owned','detail':'Own time is set in Settings (own_time_hours).' if w.trigger_json.get('own_time') else 'The check-in is controlled in Settings.'}
+                        return {'error':'builtin_settings_owned','detail':'Own time is set in Settings (own_time_hours).' if w.trigger_json.get('own_time')
+                                else "Keep-warm is the owner's: they turn it on and off with /pulse warm on|off." if w.trigger_json.get('keep_warm')
+                                else 'The check-in is controlled in Settings.'}
                     gate = e.policy.mutation_gate(w, action=action, session_key=s.session_key,
                         created_in=created_in, new_kind=(args.get('trigger') or {}).get('kind'),
                         babysit=args.get('babysit'), untrusted_payload=bool(flight and flight.untrusted))
