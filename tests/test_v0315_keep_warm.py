@@ -264,6 +264,20 @@ def test_probes_run_in_bounded_batches(engine, tmp_path):
     assert len(seen) == poller.PROBES_PER_TICK + 4 and len(set(seen)) == len(seen)
 
 
+def test_probe_batches_serve_the_most_overdue_first(engine, tmp_path):
+    # With more watchers due than a batch holds, the newest ones must not wait behind older ones forever.
+    e = engine
+    from heartbeat2 import poller
+    seen = []
+    e.probe_runner = lambda w: seen.append(w.id) or {'state': 1}
+    now = e.clock.now()
+    old = [arm(e, 'file', trigger_json={'path': str(tmp_path / f'o{i}'), 'check_every': 60}, next_due_at=now)
+           for i in range(poller.PROBES_PER_TICK)]
+    late = arm(e, 'file', trigger_json={'path': str(tmp_path / 'late'), 'check_every': 60}, next_due_at=now - 600)
+    e.tick()
+    assert late.id in seen and len(seen) == poller.PROBES_PER_TICK
+
+
 def test_keep_warm_key_is_per_touch():
     assert keep_warm_key(1.5) == 'k:1.5' and keep_warm_key(1.5) != keep_warm_key(1.25)
 

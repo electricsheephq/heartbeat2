@@ -343,9 +343,9 @@ class Poller:
         s,now=self.store,self.clock.now()
         due=[]
         with s.atomic():
-            for w in s.list_wakes(status='active'):
-                # A bounded batch per tick (four waves of the four-worker pool), so many slow watchers can't hold
-                # back time wakes for long; the rest stay due and run on the next tick.
+            # A bounded batch per tick (four waves of the four-worker pool), so many slow watchers can't hold
+            # back time wakes for long; the rest stay due and run on the next tick, most overdue first.
+            for w in sorted(s.list_wakes(status='active'),key=lambda w: w.next_due_at if w.next_due_at is not None else math.inf):
                 if len(due)>=PROBES_PER_TICK: break
                 if w.kind not in PROBE_KINDS or not self.family_enabled(w): continue
                 session=s.get_session(w.session_key)
