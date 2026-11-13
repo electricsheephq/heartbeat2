@@ -519,7 +519,9 @@ def _warm(engine, key, rest):
         if not session.enabled: raise ValueError('this chat is off; use /pulse on')
         gate = engine.policy.creation_gate(session_key=key, platform=session.platform, chat_type=session.chat_type,
             allow_gateway_injection=engine.injection_allowed(), creator='user', kind='self')
-        if not gate.allowed: raise ValueError(gate.reason + ('\n'+gate.detail if gate.detail else ''))
+        # Keep-warm takes no active-wake slot: only the consent and destination checks apply.
+        if not gate.allowed and gate.reason not in {'max_active','global_max_active'}:
+            raise ValueError(gate.reason + ('\n'+gate.detail if gate.detail else ''))
         if wake is None:
             engine.store.create_wake(Wake(key, 'Keep the prompt cache warm.', 'self', id=wid, platform=session.platform,
                 chat_type=session.chat_type, chat_id=session.chat_id, armed_session_id=session.current_session_id,

@@ -365,3 +365,15 @@ def test_error_pause_card_shows_once_and_off_clears_it(engine, pulse):
         governor.error(e, e.store.get_wake(w.id))
     pulse(e, 'warm off')
     assert 'Keep-warm' not in owner_turn(3)
+
+
+@pytest.mark.parametrize('setting', ['max_active', 'max_active_profile'])
+def test_warm_on_needs_no_active_slot(engine, pulse, setting):
+    # Review (Codex bot): with ordinary wakes capped to zero, the owner can still turn on keep-warm.
+    e = engine
+    e.policy = replace(e.policy, **{setting: 0})
+    warm_chat(e)
+    assert pulse(e, 'warm on').startswith('Keep-warm is on'), pulse(e, 'warm on')
+    e.ctx.allowed = False  # consent still applies
+    assert pulse(e, 'warm off') == 'Keep-warm is off for this chat.'
+    assert 'injection_disabled' in pulse(e, 'warm on')
