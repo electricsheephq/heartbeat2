@@ -88,3 +88,14 @@ def test_a_wake_retrying_after_an_error_neither_runs_nor_goes_first(engine, comm
     e.store.set_meta('eval_not_before:'+first.id, str(e.clock.now()+300))
     assert 'Would run now: yes' in command('test '+second.id)
     assert 'Would run now: no — retrying after an error until ' in command('test '+first.id)
+
+
+def test_evaluation_backoff_comes_before_any_other_verdict(engine, command):
+    # Review (Astra): Poller.evaluate leaves the wake alone until its retry time, before gate or the drop check.
+    e = engine
+    w, o = queued(e, command)
+    e.store.set_meta('accepted:'+o.id, '3')
+    e.store.set_meta('eval_not_before:'+w.id, str(e.clock.now()+300))
+    before = snapshot(e)
+    assert 'Would run now: no — retrying after an error until ' in command('test '+w.id)
+    assert snapshot(e) == before

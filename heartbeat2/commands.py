@@ -251,7 +251,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             ahead=''
             # After an evaluation error a tick leaves the wake alone until its retry time (Poller.evaluate).
             backoff_until=lambda x:float(engine.store.get_meta('eval_not_before:'+x.id) or 0)
-            if not reason and not off and engine.clock.now()<backoff_until(w):
+            if not off and engine.clock.now()<backoff_until(w):  # Before any gate: a tick doesn't reach this wake at all.
                 reason,defer,until='eval_backoff',True,backoff_until(w)
             if not reason:
                 # The tick walks every waiting occurrence in order: an earlier one in this chat that passes takes the turn first.
