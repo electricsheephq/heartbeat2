@@ -377,3 +377,13 @@ def test_warm_on_needs_no_active_slot(engine, pulse, setting):
     e.ctx.allowed = False  # consent still applies
     assert pulse(e, 'warm off') == 'Keep-warm is off for this chat.'
     assert 'injection_disabled' in pulse(e, 'warm on')
+
+
+def test_cache_line_after_new_has_no_stale_or_zero_price(engine, pulse):
+    # Review (Claude, nit): between /new and the first model call, the cache line must not price a 0-token warm cache.
+    e = engine
+    warm_chat(e)
+    e.intake.on_session_reset(old_session_id='sid', new_session_id='sid2')
+    w = arm(e, 'every')
+    line = e.cache_line(w)
+    assert 'no model call yet' in line and '$' not in line
