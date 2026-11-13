@@ -235,9 +235,28 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             # When HeartBeat is off or paused for the whole profile, tick() refuses before gate() and the claim barrier after it: nothing is sent.
             off=(('plugin_off',True,None) if not engine.policy.enabled else ('paused_all',True,None) if engine.paused() else None)
             # Dispatch walks waiting occurrences in order and sends the first that passes; if none passes, the first one's reason applies.
+            # One accepted three times without an acknowledgement passes the gate but is dropped at the claim, and the walk goes on.
+            dies=lambda c:bool(waiting) and int(engine.store.get_meta('accepted:'+c.id) or 0)>=3
             verdicts=[off or engine.gate(w,c,session) for c in candidates]
-            pick=next((n for n,v in enumerate(verdicts) if not v[0]),0)
+            passing=[n for n,v in enumerate(verdicts) if not v[0]]
+            pick=next((n for n in passing if not dies(candidates[n])),passing[0] if passing else 0)
             o,(reason,defer,until)=candidates[pick],verdicts[pick]
+            if not reason and dies(o): reason,defer,until='ack_timeout',False,None
+            ahead=''
+            if not reason:
+                # The tick walks every waiting occurrence in order: an earlier one in this chat that passes takes the turn first.
+                for x in engine.store.list_occurrences(state='pending'):
+                    if x.wake_id==w.id and (not waiting or x.dedupe_key==o.dedupe_key): break
+                    other=engine.store.get_wake(x.wake_id)
+                    if (x.wake_id!=w.id and other is not None and other.session_key==w.session_key
+                            and not engine.gate(other,x,session)[0] and int(engine.store.get_meta('accepted:'+x.id) or 0)<3):
+                        reason,defer,until,ahead='in_flight',True,None,x.wake_id
+                        break
+            retry=None
+            if reason=='not_before':
+                # The stored time is either a failed delivery's retry or an earlier hold's end (for example quiet hours).
+                until=float(engine.store.get_meta('not_before:'+o.id) or 0) or None
+                retry=o.error=='inject_failed' or int(engine.store.get_meta('inject_failures:'+o.id) or 0)>0
             message_held=engine.message_hold_reason(w,session)
             text=engine.render_occurrence(w,replace(o,force_silent=bool(message_held)),session,
                                          held_by=reason if reason and defer and not off else (o.error if waiting else ''),
@@ -250,14 +269,17 @@ def _test(engine,w,session,cache_line,wake_cache=''):
         'wake_inactive':'wake is not active','held_paused':'wake is paused','wake_spacing':'wake spacing',
         'in_flight':'another wake is running','provider_unavailable':'provider unavailable','dm_only':'DMs only',
         'plugin_off':'HeartBeat 2.0 is off in settings','paused_all':'HeartBeat 2.0 is paused',
-        'not_before':'waiting to retry a failed delivery','checkin_not_due':'the owner has not been quiet long enough'}
+        'not_before':'waiting to retry a failed delivery' if retry else 'waiting out an earlier hold',
+        'checkin_not_due':'the owner has not been quiet long enough','ack_timeout':'not acknowledged after three attempts'}
+    if ahead: reasons['in_flight']=f'another wake ({ahead}) takes the turn first'
+
     # A watcher with nothing waiting runs only when what it watches changes; its probe isn't run here.
     label='Would run on a match now: ' if w.kind in PROBE_KINDS|EVENT_KINDS and not waiting else 'Would run now: '
     if w.kind == 'owner_silent' and not w.trigger_json.get('builtin') and not waiting:
         label = 'Would run once the owner has been quiet long enough: '
     verdict=label+('no — '+reasons.get(reason,reason)+
         (' until '+_time(engine,until) if until is not None else '')+
-        (' (held; it would wait)' if defer else ' (it would be skipped)') if reason else 'yes')
+        (' (held; it would wait)' if defer else ' (it would be dropped)' if reason=='ack_timeout' else ' (it would be skipped)') if reason else 'yes')
     next_fire=(_time(engine,w.next_due_at) if w.kind in TIME_KINDS else f'on {w.kind} events' if w.kind in EVENT_KINDS else
                'every '+cache.minutes(float(w.trigger_json["check_every"])) if w.kind in PROBE_KINDS else 'on owner silence')
     return '\n'.join([f'Test {w.id} (dry run: nothing sent, no model call)',verdict,'Next: '+next_fire,
