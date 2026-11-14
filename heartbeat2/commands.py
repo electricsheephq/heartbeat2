@@ -354,10 +354,16 @@ def handle(raw_args, runtime):
                 status = engine.status()
                 q = quiet_until(engine,key)
                 override=json.loads(engine.store.get_meta('quiet:'+key) or '{}')
-                quiet_label='until '+_time(engine,q) if q else 'off now'
+                state='on until '+_time(engine,q) if q else 'off now'
+                # The range and where it comes from are always shown, so the default is known before it first holds a wake (#173).
                 if 'range' in override:
-                    quiet_label=(override['range']+' (chat override)' if override['range'] else 'off for this chat (override)')
-                elif override.get('until',0)>engine.clock.now(): quiet_label+=' (chat override)'
+                    quiet_label=(override['range']+' (chat override), '+state if override['range'] else 'off for this chat (override)')
+                else:
+                    configured=engine.policy.quiet_hours
+                    quiet_label=(f'{configured} ({engine.policy.quiet_hours_source()}), ' if configured else 'off in settings, ')+state
+                    if override.get('until',0)>engine.clock.now(): quiet_label+=' (chat override)'
+                zone_name,zone_source=engine.policy.timezone_source()
+                used,profile_used=cap_counts(engine.store,key)
                 daily = engine.daily(key)
                 counts={}
                 warm={}
@@ -375,9 +381,13 @@ def handle(raw_args, runtime):
                 lines = [f'HeartBeat 2.0: {"on" if session.enabled and engine.policy.enabled else "off"} · poller {status["state"]}'
                          + (f' ({status["reason"]})' if status.get('reason') else ''),
                          f'allow_gateway_injection: {str(engine.injection_allowed()).lower()}',
-                         f'Local time: {_time(engine,engine.clock.now())} · quiet: {quiet_label}',
+                         f'Local time: {_time(engine,engine.clock.now())} · zone {zone_name} ({zone_source}) · quiet: {quiet_label}',
                          f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {messages_count(daily["delivered"],engine.store.messages_in_flight(key),engine.policy.max_messages_per_day)} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
-                         f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
+                         f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}',
+                         # What the create limits count: active and proposed items, not the check-in, own time or keep-warm (#171).
+                         f'Limits: {used} of {engine.policy.max_active} items in this chat, {profile_used} of {engine.policy.max_active_profile} in this profile '
+                         "(check-in, own time and keep-warm don't count; the owner can raise max_active / max_active_profile in settings)"]
+                if engine.policy.timezone_pin_notice(): lines.append(engine.policy.timezone_pin_notice())
                 held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
                 kw=engine.store.get_wake(keep_warm_id(key))
                 if kw is not None and kw.status in {'active','paused'}: lines.append(_keep_warm_line(engine,session,kw,warm))

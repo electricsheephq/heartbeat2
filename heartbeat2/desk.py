@@ -103,6 +103,15 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
     tail.append(f'- Owner last wrote {age} · unanswered {session.unanswered_count} · '
                 f'messages today {messages_count(counts["delivered"], in_flight, policy.max_messages_per_day)} · '
                 f'turns today {counts["model_turns"]}/{policy.max_model_wakes_per_day}' + (' · '+cost if cost else ''))
+    if hasattr(policy, 'max_active'):
+        from .policy import cap_counts
+        used, profile_used = cap_counts(store, key)
+        quiet = policy.quiet_hours
+        source = policy.quiet_hours_source() if hasattr(policy, 'quiet_hours_source') else 'settings'
+        zone_name = policy.timezone_source()[0] if hasattr(policy, 'timezone_source') else str(zone(timezone))
+        # Headroom and the quiet window, so neither is learned only from a refusal or a hold (#171, #173).
+        tail.append(f'- Items {used}/{policy.max_active} in this chat, {profile_used}/{policy.max_active_profile} in the profile · '
+                    + (f'quiet hours {quiet} ({source}, {zone_name})' if quiet else f'quiet hours off ({zone_name})'))
     reports = store.held_reports(key)
     if reports:
         newest = store.get_wake(reports[-1].wake_id)
