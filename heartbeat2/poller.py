@@ -476,19 +476,22 @@ class Poller:
                     self.cancel_occurrences(w.id,'settings',preserve_started=True)
         if not hours: return
         self.cancel_non_gateway_builtins(own_time=True)
-        # Own time is the agent's time with its owner: one direct chat, never a group (even with dm_only off), where it
-        # would multiply per chat and could speak to everyone there.
+        # Own time runs wherever the agent may write: direct chats, and groups and topics too when dm_only is off (#175;
+        # 0.4.1 banned groups). The owner turns it off for one chat or topic with /pulse owntime off; each topic is a chat.
+        def turned_off(key): return s.get_meta('own_time_off:'+key)=='1'
+        def allowed(chat_type,key): return (chat_type=='dm' or not self.policy.dm_only) and not turned_off(key)
         for w in s.list_wakes():
             if not w.trigger_json.get('own_time') or w.status not in {'active','proposed','paused'}: continue
             session=s.get_session(w.session_key)
-            if (session.chat_type if session is not None else w.chat_type)!='dm':
-                if s.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='not_dm'):
-                    self.cancel_occurrences(w.id,'not_dm',preserve_started=True)
+            if not allowed(session.chat_type if session is not None else w.chat_type,w.session_key):
+                reason='chat_off' if turned_off(w.session_key) else 'dm_only'
+                if s.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason=reason):
+                    self.cancel_occurrences(w.id,reason,preserve_started=True)
         floor=max(self.policy.min_interval_minutes,self.policy.agent_ungated_floor_minutes)*60
         interval=max(hours*3600,floor)
         maximum=max(2*hours*3600,floor)
         for session in s.list_sessions():
-            if not deliverable_platform(session.platform) or session.chat_type!='dm': continue
+            if not deliverable_platform(session.platform) or not allowed(session.chat_type,session.session_key): continue
             if session.last_human_at is None or not session.episode_id: continue
             wid='owntime_'+hashlib.sha256(session.session_key.encode()).hexdigest()[:16]
             w=s.get_wake(wid)
@@ -502,7 +505,8 @@ class Poller:
                     pacing_min_s=floor,pacing_max_s=maximum,next_due_at=now+interval))
                 continue
             updates={}
-            reactivate=w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason in {'settings','non_gateway'}
+            # Every reason own time stops on its own comes back here, once this chat may have it again ('not_dm' is 0.4.1's).
+            reactivate=w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason in {'settings','non_gateway','not_dm','dm_only','chat_off'}
             if w.trigger_json.get('hours')!=hours or w.trigger_json.get('floor',floor)!=floor or reactivate:
                 updates.update(base_interval_s=interval,eff_interval_s=interval,pacing_min_s=floor,
                                pacing_max_s=maximum,next_due_at=now+interval,

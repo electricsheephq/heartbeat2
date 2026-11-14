@@ -18,7 +18,7 @@ HELP = ('/pulse status | desk | list [all] | ledger [7d] | why <id> | add in 2h 
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
         'role every 1d [at 09:00] <charter> | role self <charter> | budget <id> <n>/day | '
         'run <id> (queue now, usual checks) | test <id> (preview, nothing sent) | '
-        'pause|resume|cancel <id|all> [for 3d] | off|on | warm on|off (keep this chat\'s cache warm) | '
+        'pause|resume|cancel <id|all> [for 3d] | off|on | warm on|off (keep this chat\'s cache warm) | owntime on|off | '
         'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
 
 
@@ -324,6 +324,7 @@ def handle(raw_args, runtime):
             if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
         if action in {'add','role'}: return _add(engine,session,rest,role=action=='role')
         if action == 'warm' and rest in {'','on','off'}: return _warm(engine,key,rest)
+        if action == 'owntime' and rest in {'','on','off'}: return _owntime(engine,key,rest)
         with engine.store.atomic():
             session=engine.store.get_session(key)
             if action in {'run','test'}:
@@ -383,6 +384,8 @@ def handle(raw_args, runtime):
                 from .desk import cost_line
                 cost=cost_line(engine.store,key,engine.policy.resolved_timezone(),engine.policy)
                 if cost: lines.append(cost)
+                if engine.policy.own_time_hours or engine.store.get_meta('own_time_off:'+key)=='1':
+                    lines.append('Own time: '+own_time_label(engine,key))
                 if held: lines.append(f'Held items: {held}')
                 if engine.settings_notice(): lines.append(engine.settings_notice())
                 if cache.ttl_for_session(engine.store,session)==(300,'hermes'):
@@ -533,6 +536,24 @@ def _keep_warm_line(engine, session, wake, counts):
     if 'due_at' in plan:
         return head + f' · next ping {_time(engine,plan["due_at"])} (cache {cache.minutes(plan["ttl"])}) · it pauses after {engine.policy.keep_warm_idle_hours}h without a message from you'
     return head + ' · no ping now: ' + plan['reason']
+
+
+def own_time_label(engine, key):
+    """Whether own time runs in this chat, for /pulse owntime and status (#175)."""
+    hours = engine.policy.own_time_hours
+    if not hours: return 'off for this profile (own_time_hours is 0 in settings)'
+    if engine.store.get_meta('own_time_off:'+key) == '1': return 'off in this chat (/pulse owntime on turns it back on)'
+    return f'on in this chat, about every {hours:g}h (/pulse owntime off turns it off here)'
+
+
+def _owntime(engine, key, rest):
+    """/pulse owntime on|off: own time in this one chat or topic (#175). Each topic of a group is its own chat."""
+    with engine.store.atomic():
+        if rest:
+            engine.store.set_meta('own_time_off:'+key, '1' if rest == 'off' else '')
+        label = own_time_label(engine, key)
+    if rest: engine.signal()  # The next check cancels or re-arms this chat's own time.
+    return 'Own time: ' + label
 
 
 def _warm(engine, key, rest):
