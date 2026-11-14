@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 — 2026-11-14
+
+- **Cron wakes follow a timezone change right away.** When the plugin's `timezone` setting, the profile's zone or Hermes' zone changed, a cron wake's next time stayed in the old zone until it had fired once. A daily 09:00 role could fire at 07:00 local time. Now, on the next check after the change (or after a restart), cron wakes and daily `every … at HH:MM` wakes move to the new zone's time, counted from their last fire. Times that are the same in both zones, interval wakes and one-time reminders are unchanged. A time that is already due fires once, as before (#170).
+
 ## 0.4.1 — 2026-11-14
 
 - **Own time runs in direct chats only.** With `dm_only` off, own time used to arm in every chat where you had written, group chats included, so it multiplied per chat and could speak to everyone in a group. It now arms only in direct chats. Own-time turns already set up in group chats are cancelled, and nothing else changes.

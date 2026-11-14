@@ -16,7 +16,7 @@ import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm
-from .schedule import time_due, local_day, parse_duration, next_every
+from .schedule import time_due, local_day, parse_duration, next_every, reanchored_due
 from . import governor
 
 LOG = logging.getLogger('heartbeat2')
@@ -406,6 +406,20 @@ class Poller:
         try: return self.probe_runner(w)
         except Exception: return {'error':'probe_failed'}
 
+    def reanchor(self,w,now):
+        """A future cron or daily `every … at` time from an earlier timezone moves to the current zone's time (#170)."""
+        try: due=reanchored_due(w,now=now,timezone=self.policy.resolved_timezone())
+        except ValueError: return w
+        s=self.store
+        if due is None or not s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due): return w
+        # Governor skips are cron times in the old zone; one that coincides with a new-zone time would swallow it.
+        # The slow-down itself is kept: the new time already counts the effective interval from the last fire.
+        for o in s.list_occurrences(w.id,state='skipped'):
+            if o.error=='governor' and o.dedupe_key.startswith('t:') and float(o.dedupe_key[2:])>now:
+                s.connection.execute("DELETE FROM occurrences WHERE wake_id=? AND dedupe_key=? AND state='skipped' AND error='governor'",(w.id,o.dedupe_key))
+        self.log.info('heartbeat2 wake %s moved to the current timezone: next due %.0f (was %.0f)',w.id,due,w.next_due_at)
+        return s.get_wake(w.id)
+
     def times(self):
         for w in self.store.list_wakes(status='active'):
             self.evaluate(w,lambda w=w:self._time(w))
@@ -435,6 +449,7 @@ class Poller:
                     s.cas_wake(w.id,'active',expected_version=w.version,**changes)
                     w=s.get_wake(w.id)
             if w.kind in TIME_KINDS:
+                w=self.reanchor(w,now)
                 due=time_due(w,now=now,catch_up_s=self.policy.catch_up_hours*3600,
                              timezone=self.policy.resolved_timezone(),jitter_unit=self.jitter(),**self.timing(w))
                 if due:

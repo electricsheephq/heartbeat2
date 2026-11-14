@@ -141,6 +141,33 @@ def next_cron(expression: str, *, now: float, timezone: str | tzinfo,
         raise ValueError("invalid cron expression") from exc
 
 
+def reanchored_due(wake, *, now: float, timezone: str | tzinfo) -> float | None:
+    """The new next time of a cron or whole-day `every … at HH:MM` wake whose stored time came from another timezone (#170).
+
+    A stored future time that is still one of the wake's times in `timezone` is kept (None): the zone is unchanged, or both
+    zones share that time. Otherwise the next time is recomputed in `timezone` as if the last fire had happened there:
+    after the last fire (or creation) plus the effective interval for cron, never in the past. Times already due fire as
+    they are; the time after them is computed in the new zone anyway.
+    """
+    due, trigger = wake.next_due_at, wake.trigger_json or {}
+    if wake.status != "active" or due is None or due <= now:
+        return None
+    interval = wake.eff_interval_s or 0
+    if wake.kind == "cron" and trigger.get("cron"):
+        def times(after):
+            return next_cron(trigger["cron"], now=after, timezone=timezone)
+        since = (wake.last_fired_at if wake.last_fired_at is not None else wake.created_at) + interval
+    elif wake.kind == "every" and trigger.get("at") and interval and interval % 86400 == 0:
+        def times(after):
+            return next_every(after, interval, anchor=trigger["at"], timezone=timezone)
+        since = wake.last_fired_at if wake.last_fired_at is not None else wake.created_at
+    else:
+        return None
+    if abs(times(due - 1) - due) < 1:
+        return None
+    moved = times(max(now, since))
+    return None if abs(moved - due) < 1 else moved
+
 def quiet_end(now: float, quiet_hours: str, timezone: str | tzinfo) -> float | None:
     if not quiet_hours:
         return None
