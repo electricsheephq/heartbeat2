@@ -74,7 +74,9 @@ class Runtime:
             try:
                 from hermes_time import get_timezone_name
                 profile=get_timezone_name()
-            except Exception: pass
+            except Exception:
+                # A failed lookup keeps the zone in use: a passing error would move every cron time away and back (#170).
+                if self._last_good is not None: profile=self._last_good.profile_timezone
             errors={}
             try:
                 policy=Policy.from_settings(settings,clock=self.clock,profile_timezone=profile)

@@ -141,6 +141,42 @@ def next_cron(expression: str, *, now: float, timezone: str | tzinfo,
         raise ValueError("invalid cron expression") from exc
 
 
+def local_neighbours(wake: Wake, due: float, timezone: str | tzinfo) -> tuple[float, float] | None:
+    """The wake's own local times just before and just after `due` in `timezone`, or None when `due` is one of them.
+
+    Only cron and whole-day `every … at` wakes have local times. A stored time that is not one of them in the zone in use
+    was set in another zone (#170). The check uses only the stored time, the trigger and the zone, so it needs no record
+    of where a time was set, and a time already on the zone's own schedule is never moved.
+    """
+    tz = zone(timezone)
+    trigger = wake.trigger_json if isinstance(wake.trigger_json, dict) else {}
+    try:
+        if wake.kind == "cron" and isinstance(trigger.get("cron"), str):
+            # The same search the scheduler runs, so its own handling of DST gaps and repeated hours counts as on time.
+            if next_cron(trigger["cron"], now=due - 1, timezone=tz) == due:
+                return None
+            from croniter import croniter
+            before = croniter(trigger["cron"], datetime.fromtimestamp(due, tz)).get_prev(datetime).timestamp()
+            return before, next_cron(trigger["cron"], now=due, timezone=tz)
+        interval = wake.eff_interval_s or 0
+        # Shorter or uneven strides are elapsed time from each day's anchor and follow the zone from the next anchor.
+        if (wake.kind == "every" and isinstance(trigger.get("at"), str) and interval >= 86400
+                and interval % 86400 == 0):
+            hour, minute = _hm(trigger["at"])
+            day = datetime.fromtimestamp(due, tz).date()
+
+            def anchor(date) -> float:
+                return _local_instant(datetime.combine(date, datetime.min.time()).replace(hour=hour, minute=minute), tz)
+
+            today = anchor(day)
+            if today == due:
+                return None
+            return (today, anchor(day + timedelta(days=1))) if today < due else (anchor(day - timedelta(days=1)), today)
+    except (ImportError, ValueError, KeyError, OverflowError, TypeError):
+        return None
+    return None
+
+
 def quiet_end(now: float, quiet_hours: str, timezone: str | tzinfo) -> float | None:
     if not quiet_hours:
         return None
