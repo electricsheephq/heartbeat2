@@ -481,7 +481,8 @@ class Poller:
         def turned_off(key): return s.get_meta('own_time_off:'+key)=='1'
         def allowed(chat_type,key): return (chat_type=='dm' or not self.policy.dm_only) and not turned_off(key)
         for w in s.list_wakes():
-            if not w.trigger_json.get('own_time') or w.status not in {'active','proposed','paused'}: continue
+            # A paused wake is left paused (a governor pause outlasts off and on); dispatch refuses its turns meanwhile.
+            if not w.trigger_json.get('own_time') or w.status not in {'active','proposed'}: continue
             session=s.get_session(w.session_key)
             if not allowed(session.chat_type if session is not None else w.chat_type,w.session_key):
                 reason='chat_off' if turned_off(w.session_key) else 'dm_only'
@@ -591,6 +592,7 @@ class Poller:
             return 'episode_ended',False,None
         if w.trigger_json.get('own_time'):
             if not self.policy.own_time_hours: return 'setting_off',False,None
+            if self.store.get_meta('own_time_off:'+w.session_key)=='1': return 'chat_off',False,None
         elif is_keep_warm(w):
             from .cache import keep_warm_plan, keep_warm_key
             plan=keep_warm_plan(self.store,s,self.policy,now)

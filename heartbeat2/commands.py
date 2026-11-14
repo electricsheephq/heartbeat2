@@ -548,11 +548,23 @@ def own_time_label(engine, key):
 
 def _owntime(engine, key, rest):
     """/pulse owntime on|off: own time in this one chat or topic (#175). Each topic of a group is its own chat."""
+    import hashlib
     with engine.store.atomic():
         if rest:
             engine.store.set_meta('own_time_off:'+key, '1' if rest == 'off' else '')
+        if rest == 'off':
+            # Off takes effect now, not at the next check: a turn queued or handed to the gateway but not yet started never
+            # starts (its turn arrives stale and stays silent). A turn already running finishes. A paused wake stays paused,
+            # so a governor pause survives off and on; its queued turns end here too.
+            wid = 'owntime_'+hashlib.sha256(key.encode()).hexdigest()[:16]
+            wake = engine.store.get_wake(wid)
+            if wake is not None and wake.status in {'active','proposed'}:
+                if not engine.store.cas_wake(wid,wake.status,expected_version=wake.version,status='cancelled',status_reason='chat_off'):
+                    raise ValueError('concurrent item change')
+            if wake is not None and wake.status in {'active','proposed','paused'}:
+                engine.cancel_occurrences(wid,'chat_off',preserve_started=True)
         label = own_time_label(engine, key)
-    if rest: engine.signal()  # The next check cancels or re-arms this chat's own time.
+    if rest: engine.signal()  # The next check re-arms this chat's own time after on.
     return 'Own time: ' + label
 
 

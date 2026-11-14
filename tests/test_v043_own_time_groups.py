@@ -1,6 +1,7 @@
 """Own time runs wherever the agent may write, groups and topics included when dm_only is off, and the owner switches it
 per chat with /pulse owntime (#175; reverts 0.4.1's direct-chat-only rule)."""
 from dataclasses import replace
+from types import SimpleNamespace
 import hashlib
 
 from heartbeat2 import commands
@@ -99,3 +100,76 @@ def test_status_and_help_show_own_time(runtime):
     assert 'owntime on|off' in commands.HELP
     e.policy = replace(e.policy, own_time_hours=0)
     assert commands.handle('owntime', runtime) == 'Own time: off for this profile (own_time_hours is 0 in settings)'
+
+
+def _due(e):
+    e.policy = replace(e.policy, own_time_hours=6)
+    e.tick()
+    e.clock.advance(6 * 3600 + 60)
+
+
+def _own_turns(e, key=KEY):
+    return [c for c in e.ctx.calls if c[1] == key and 'This is your own time' in c[0]]
+
+
+def test_off_between_scheduling_and_dispatch_starts_nothing(runtime, monkeypatch):
+    # The owner switches off while a tick has queued the turn but not yet handed it to the gateway.
+    e = runtime.get_engine()
+    _due(e)
+    real, seen = e.cache_line, []
+    def switch_off_first(w):
+        if w.id == own_id(KEY) and not seen:
+            seen.append(commands.handle('owntime off', runtime))
+        return real(w)
+    monkeypatch.setattr(e, 'cache_line', switch_off_first)
+    e.tick()
+    assert seen and 'off in this chat' in seen[0]
+    assert not e.ctx.injected.wait(timeout=0.3) and not _own_turns(e)
+    assert all(o.state not in {'pending', 'claimed', 'started'} for o in e.store.list_occurrences(own_id(KEY)))
+    w = e.store.get_wake(own_id(KEY))
+    assert (w.status, w.status_reason) == ('cancelled', 'chat_off')
+
+
+def test_off_ends_a_handed_over_turn_but_not_a_running_one(runtime):
+    e = runtime.get_engine()
+    _due(e)
+    e.tick()
+    assert e.ctx.injected.wait(timeout=1) and _own_turns(e)
+    claimed = [o for o in e.store.list_occurrences(own_id(KEY)) if o.state == 'claimed']
+    assert claimed
+    commands.handle('owntime off', runtime)
+    o = e.store.get_occurrence(own_id(KEY), claimed[0].dedupe_key)
+    assert o.state == 'superseded' and o.error == 'chat_off'  # its turn arrives stale and stays silent
+    assert e.store.get_wake(own_id(KEY)).status_reason == 'chat_off'
+    # A turn already running when the owner switches off finishes.
+    commands.handle('owntime on', runtime)
+    e.tick()
+    e.clock.advance(6 * 3600 + 60)
+    e.tick()
+    started = [o for o in e.store.list_occurrences(own_id(KEY)) if o.state == 'claimed']
+    assert started and e.store.start(own_id(KEY), started[0].dedupe_key, attempt=started[0].attempt)
+    commands.handle('owntime off', runtime)
+    assert e.store.get_occurrence(own_id(KEY), started[0].dedupe_key).state == 'started'
+
+
+def test_a_paused_own_time_wake_stays_paused_through_off_and_on(runtime):
+    e = runtime.get_engine()
+    e.policy = replace(e.policy, own_time_hours=6)
+    e.tick()
+    w = e.store.get_wake(own_id(KEY))
+    assert e.store.cas_wake(w.id, 'active', expected_version=w.version, status='paused', status_reason='governor')
+    commands.handle('owntime off', runtime)
+    e.tick()
+    assert (e.store.get_wake(own_id(KEY)).status, e.store.get_wake(own_id(KEY)).status_reason) == ('paused', 'governor')
+    commands.handle('owntime on', runtime)
+    e.tick()
+    assert (e.store.get_wake(own_id(KEY)).status, e.store.get_wake(own_id(KEY)).status_reason) == ('paused', 'governor')
+
+
+def test_dispatch_refuses_own_time_in_a_chat_that_is_off(engine):
+    # Even a turn queued before the switch, by a second poller say, is refused at the claim barrier.
+    e = engine
+    _due(e)
+    e.store.set_meta('own_time_off:' + KEY, '1')
+    w = e.store.get_wake(own_id(KEY))
+    assert e.gate(w, SimpleNamespace(state='pending', held_since=None, error='', dedupe_key='t:1'), e.store.get_session(KEY))[0] == 'chat_off'
