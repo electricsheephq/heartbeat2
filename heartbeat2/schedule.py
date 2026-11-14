@@ -144,7 +144,7 @@ def next_cron(expression: str, *, now: float, timezone: str | tzinfo,
 
 def local_times(wake) -> bool:
     """Wakes whose times are local wall times: cron, and `every` anchored at HH:MM (#170). Intervals and one-time times aren't."""
-    trigger = wake.trigger_json or {}
+    trigger = wake.trigger_json if isinstance(wake.trigger_json, dict) else {}
     return bool(wake.kind == "cron" and trigger.get("cron") or wake.kind == "every" and trigger.get("at"))
 
 
