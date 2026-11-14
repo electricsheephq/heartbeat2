@@ -234,6 +234,8 @@ class Poller:
                    or old.kind==new.kind and old.kind in PROBE_KINDS and target_changed)
         refilter=(old.kind==new.kind and new.kind in EVENT_KINDS
                   and any(old.trigger_json.get(k)!=new.trigger_json.get(k) for k in ('emojis','message_id','task_id','board')))
+        if new.kind in PROBE_KINDS and (old.kind!=new.kind or target_changed):
+            self.store.set_meta('probe_generation:'+new.id,str(int(self.store.get_meta('probe_generation:'+new.id) or 0)+1))
         if not supersede and not refilter: return
         # A wider filter still matches every event folded into a held count; only a narrower one makes it unknowable.
         ot,nt=old.trigger_json,new.trigger_json
@@ -423,7 +425,9 @@ class Poller:
             w=s.get_wake(w.id)
         if result.get('fire'):
             identity=str(result.get('identity') or json.dumps(result.get('state',result.get('message','')),sort_keys=True))
-            digest=hashlib.sha1(identity.encode()).hexdigest()
+            # A retargeted check starts a fresh namespace, so its first result is never deduplicated against the old target (#149).
+            generation=s.get_meta('probe_generation:'+w.id)
+            digest=hashlib.sha1((identity+(':g'+generation if generation else '')).encode()).hexdigest()
             payload=[{'message':result.get('message','')}]
             pending=s.list_occurrences(w.id,state='pending')
             coalesced=bool(pending and s.coalesce(w.id,pending[-1].dedupe_key,payload))
@@ -488,7 +492,8 @@ class Poller:
             elif w.kind in PROBE_KINDS|EVENT_KINDS and w.deadline_at is not None and w.deadline_at<=now:
                 # Deadline fallback is one fire only, and only when no trigger
                 # occurrence has already been produced (including pending).
-                if not s.list_occurrences(w.id):
+                if not [o for o in s.list_occurrences(w.id)
+                        if not (o.state=='superseded' and o.error in {'filter_changed','trigger_changed'})]:
                     s.add_occurrence(w.id,f't:{w.deadline_at:.17g}',payload=[{'message':'deadline passed — nothing happened'}])
                 s.cas_wake(w.id,'active',expected_version=w.version,deadline_at=None)
 

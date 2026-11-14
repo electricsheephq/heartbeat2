@@ -241,3 +241,38 @@ def test_widened_filter_keeps_the_held_count(engine, emojis):
     update(e, w, trigger={'kind': 'reaction', 'emojis': emojis})
     result = e.store.get_occurrence(w.id, old.dedupe_key)
     assert (result.state, result.held_matches) == ('pending', 3)
+
+
+def test_retargeted_probe_queues_the_same_result_from_its_new_target(engine):
+    e = engine
+    trigger = {'kind': 'command', 'command': ['git', 'status'], 'check_every': 60}
+    w = arm(e, 'command', trigger_json=trigger)
+    e.probe_runner = lambda w: {'fire': True, 'message': 'ready', 'state': {'value': 'same'}}
+    e.probes()
+    old, = e.store.list_occurrences(w.id)
+    assert old.state == 'pending' and old.dedupe_key.startswith('e:')
+    update(e, w, trigger={**trigger, 'command': ['git', 'log']})
+    assert e.store.get_occurrence(w.id, old.dedupe_key).error == 'trigger_changed'
+    e.clock.advance(4000)
+    e.probes()
+    queued = e.store.list_occurrences(w.id, state='pending')
+    assert len(queued) == 1 and queued[0].dedupe_key != old.dedupe_key
+    # A cadence-only edit keeps the namespace: the same result folds into the queued row instead of adding one.
+    update(e, w, trigger={**trigger, 'command': ['git', 'log'], 'check_every': 120})
+    e.clock.advance(8000)
+    e.probes()
+    assert [o.dedupe_key for o in e.store.list_occurrences(w.id)] == [old.dedupe_key, queued[0].dedupe_key]
+
+
+def test_deadline_notice_still_fires_after_the_only_match_is_filtered_out(engine):
+    e = engine
+    w = reaction(e, message_id='A')
+    e.store.cas_wake(w.id, 'active', expected_version=w.version, deadline_at=e.clock.now() + 60)
+    react(e, 'A')
+    old, = e.store.list_occurrences(w.id)
+    update(e, w, trigger={'kind': 'reaction', 'message_id': 'B'})
+    assert e.store.get_occurrence(w.id, old.dedupe_key).error == 'filter_changed'
+    e.clock.advance(120)
+    e.tick()
+    notice = [o for o in e.store.list_occurrences(w.id) if o.dedupe_key.startswith('t:')]
+    assert len(notice) == 1 and notice[0].payload_json == [{'message': 'deadline passed — nothing happened'}]

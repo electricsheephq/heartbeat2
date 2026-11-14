@@ -2,7 +2,7 @@
 
 ## 0.4.7 — 2026-11-14
 
-- **Changing a watcher's filter rechecks what it has queued.** After `pulse update` changes a watcher's reaction emojis or message, or its kanban task or board, events queued for its next turn that no longer match are dropped. A turn left with none ends silently. Changing a watcher's kind, or what a check watches (path, URL, command or pattern), ends a turn queued from the old trigger, including a time tick queued before a wake became a watcher. Edits to the note, deadline or check interval leave queued turns alone, and a turn already running is never touched (#149).
+- **Changing a watcher's filter rechecks what it has queued.** After `pulse update` changes a watcher's reaction emojis or message, or its kanban task or board, events queued for its next turn that no longer match are dropped. A turn left with none ends silently, and the watcher's deadline notice still comes if nothing else matches. Changing a watcher's kind, or what a check watches (path, URL, command or pattern), ends a turn queued from the old trigger, including a time tick queued before a wake became a watcher; the same result from the new target then counts as new. Edits to the note, deadline or check interval leave queued turns alone, and a turn already running is never touched (#149).
 
 ## 0.4.6 — 2026-11-14
 
