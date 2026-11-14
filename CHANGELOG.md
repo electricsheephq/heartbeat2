@@ -2,7 +2,7 @@
 
 ## 0.4.6 — 2026-11-14
 
-- **A delegate's calls keep the wake turn's limits.** When a wake turn starts a delegate, the delegate runs under its own session. Its `pulse` calls already counted as part of the wake turn while that turn was running. They now still do after the owner sends `/new`, switches session, or pauses or cancels the wake mid-turn. Before, they counted as the owner's own turn, so wake-turn limits such as the budget clamp didn't apply. Once the wake turn ends, a delegate still running falls back to the earlier rules (#120).
+- **A delegate's calls keep the wake turn's limits.** When a wake turn starts a delegate, the delegate runs under its own session. Its `pulse` calls already counted as part of the wake turn while that turn was running. They now still do after the owner sends `/new`, switches session, or pauses or cancels the wake mid-turn, and after the delegate's own context is compressed. Before, they counted as the owner's own turn, so wake-turn limits such as the budget clamp didn't apply. Once the wake turn ends, a delegate still running falls back to the earlier rules (#120).
 
 ## 0.4.5 — 2026-11-14
 
