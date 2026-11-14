@@ -573,7 +573,7 @@ class Intake:
                             e.interrupt(o,'restart')
                             w=s.get_wake(wid)
                             s.cas_session(key,{'busy_since':None},busy_since=now,busy_epoch=e.epoch)  # this replay turn is running
-                        self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,invalid=True,replay=True)
+                        self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,untrusted=bool(o.payload_json) or bool(w.trigger_json.get('report_back')),invalid=True,replay=True)
                         stamp='resumed_turn:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
                         updates={'model_turns':w.model_turns+1}
                         if w.status!='paused' and (not w.status_reason or w.status in {'failed','done'}):
@@ -601,15 +601,9 @@ class Intake:
                 if w.status!='active': invalid=True
                 if w.cancel_on_reply and session.last_human_at is not None and o.claimed_at is not None and session.last_human_at>o.claimed_at:
                     invalid=True
-                # Held reports shown in this turn carry the untrusted state of the turns that wrote them: a summary
-                # of a payload is still outside text, so it can't arm recurring work here either (#137).
-                untrusted=bool(o.payload_json)
-                shown=s.get_meta('report_shown:'+o.id)
-                if shown and not untrusted:
-                    try:
-                        untrusted=any(r is None or bool(r.payload_json) for r in (s.get_occurrence(a,b) for a,b in json.loads(shown)))
-                    except (ValueError,TypeError):
-                        untrusted=True
+                # A report-back relays watcher results, which come from outside text, so it is fenced like the watcher turns
+                # that wrote them; role and own-time turns are never shown those reports (#137).
+                untrusted=bool(o.payload_json) or bool(w.trigger_json.get('report_back'))
                 flight=Flight(key,session_id,turn_id,wid,dedupe,attempt,untrusted,invalid)
                 existing=self.flights.get(session_id)
                 if existing and existing.wake_id==wid and existing.dedupe_key==dedupe and existing.attempt==attempt:

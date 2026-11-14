@@ -23,8 +23,9 @@ def _plain(text: str) -> str:
     return text.replace('`', "'")
 
 
-def held_report_lines(store, session_key, *, limit=5) -> tuple[list[str], list[tuple[str, str]]]:
-    pending = store.held_reports(session_key)
+def held_report_lines(store, session_key, *, limit=5, payload_ok=True) -> tuple[list[str], list[tuple[str, str]]]:
+    # Results of turns that read outside text go only to the owner and the fenced report-back turn (#137).
+    pending = [o for o in store.held_reports(session_key) if payload_ok or not o.payload_json]
     shown = pending[:limit]
     lines = []
     for o in shown:

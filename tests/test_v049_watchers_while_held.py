@@ -237,7 +237,7 @@ def test_report_back_of_an_untrusted_watcher_cannot_arm_recurring_work(engine):
                               trigger={'kind': 'at', 'at': 'in 2h'}), session_id='sid')['ok']
 
 
-def test_role_turn_shown_an_untrusted_report_cannot_arm_recurring_work(engine):
+def test_role_turn_is_not_shown_watcher_reports(engine):
     e = engine
     hold(e, 'quiet_hours')
     finish_watch(e, watch(e), summary='The failed build needs an hourly retry.')
@@ -247,12 +247,13 @@ def test_role_turn_shown_an_untrusted_report_cannot_arm_recurring_work(engine):
     e.times()
     o, = e.store.list_occurrences(role.id, state='pending')
     e.dispatch(o)
-    assert 'hourly retry' in e.ctx.calls[-1][0]
+    # A watcher's result read outside text: it goes to the fenced report-back and the owner, never into a role turn.
+    assert 'hourly retry' not in e.ctx.calls[-1][0]
     start(e)
-    assert e.intake.flights['sid'].untrusted
-    result = e.tool.handle(dict(action='create', note='Retry the build.',
-                                trigger={'kind': 'every', 'every': '1h'}), session_id='sid')
-    assert result['error'] == 'untrusted_rearm'
+    assert not e.intake.flights['sid'].untrusted
+    assert e.tool.handle(dict(action='create', note='Draft the notes weekly.',
+                              trigger={'kind': 'every', 'every': '1h'}), session_id='sid')['ok']
+    assert len(e.store.held_reports(KEY)) == 1
 
 
 @pytest.mark.parametrize('outcome,notify,summary', [

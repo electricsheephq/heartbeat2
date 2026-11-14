@@ -816,7 +816,7 @@ class Poller:
         from .desk import held_report_lines
         reports=''
         if (w.role or w.trigger_json.get('own_time') or w.trigger_json.get('report_back')) and not message_held and not o.force_silent:
-            report_lines,shown=held_report_lines(s,w.session_key)
+            report_lines,shown=held_report_lines(s,w.session_key,payload_ok=bool(w.trigger_json.get('report_back')))
             if report_lines:
                 reports='\n'.join(['Held for the owner (their limits held these earlier). If you message them this turn, include what still matters:', *report_lines])
                 s.set_meta('report_shown:'+o.id,json.dumps(shown))
