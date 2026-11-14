@@ -475,7 +475,8 @@ class Poller:
             if w.kind in TIME_KINDS:
                 tz=self.policy.resolved_timezone()
                 w=self.follow_zone(w,tz,now)
-                due=time_due(w,now=now,catch_up_s=self.policy.catch_up_hours*3600,
+                # A report-back is due now by design and waits on holds, so the timer catch-up cutoff never misses it (#137).
+                due=time_due(w,now=now,catch_up_s=10**9 if w.trigger_json.get('report_back') else self.policy.catch_up_hours*3600,
                              timezone=tz,jitter_unit=self.jitter(),**self.timing(w))
                 if due:
                     if not (w.kind in RECURRING_KINDS and due.state=='pending' and s.list_occurrences(w.id,state='pending')):

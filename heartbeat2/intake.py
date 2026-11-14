@@ -917,7 +917,8 @@ class Intake:
             silence=(not e.policy.enabled or not session.enabled or e.paused() or
                      o.force_silent or not o.notify) or (
                 o.outcome is None and response_text.strip().casefold() in BARE_SILENCE)
-            if o.notify and o.summary.strip() and o.summary_hash:
+            # Each report-back relays its own batch of held results, so an earlier relay's matching summary is no repeat (#137).
+            if o.notify and o.summary.strip() and o.summary_hash and not s.get_wake(o.wake_id).trigger_json.get('report_back'):
                 silence=silence or any(x.delivered and x.summary.strip() and x.summary_hash==o.summary_hash and x.ended_at is not None and
                     0<=e.clock.now()-x.ended_at<=86400 for x in s.list_occurrences(o.wake_id,state='done'))
             if silence:

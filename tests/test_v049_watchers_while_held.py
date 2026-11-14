@@ -256,6 +256,36 @@ def test_role_turn_is_not_shown_watcher_reports(engine):
     assert len(e.store.held_reports(KEY)) == 1
 
 
+def test_report_back_is_never_missed_without_catch_up(engine):
+    e = engine
+    e.policy = replace(e.policy, catch_up_hours=0)
+    hold(e, 'quiet_hours')
+    finish_watch(e, watch(e))
+    e.clock.advance(1)
+    back, pending = queued_report(e)
+    assert e.store.get_wake(back.id).status == 'active' and pending.state == 'pending'
+    e.clock.advance(1200)
+    e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key))
+    assert SUMMARY in e.ctx.calls[-1][0]
+
+
+def test_report_backs_with_the_same_summary_both_deliver(engine):
+    e = engine
+    for i in range(2):
+        if i: e.clock.advance(4000)
+        hold(e, 'quiet_hours')
+        finish_watch(e, watch(e, str(90 + i)), summary=f'Result {i}.')
+        back, pending = queued_report(e)
+        e.clock.advance(1200)
+        e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key))
+        assert f'Result {i}.' in e.ctx.calls[-1][0]
+        start(e)
+        # The relay's wording repeats, but each report-back carries its own results.
+        assert end(e, 'progress', True, summary='Overnight results are below.') is None
+        assert e.store.get_occurrence(back.id, pending.dedupe_key).delivered
+    assert not e.store.held_reports(KEY)
+
+
 @pytest.mark.parametrize('outcome,notify,summary', [
     ('progress', False, SUMMARY), ('no_change', True, SUMMARY), ('progress', True, '   '),
 ])
