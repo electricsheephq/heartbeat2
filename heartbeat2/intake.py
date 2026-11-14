@@ -601,7 +601,16 @@ class Intake:
                 if w.status!='active': invalid=True
                 if w.cancel_on_reply and session.last_human_at is not None and o.claimed_at is not None and session.last_human_at>o.claimed_at:
                     invalid=True
-                flight=Flight(key,session_id,turn_id,wid,dedupe,attempt,bool(o.payload_json),invalid)
+                # Held reports shown in this turn carry the untrusted state of the turns that wrote them: a summary
+                # of a payload is still outside text, so it can't arm recurring work here either (#137).
+                untrusted=bool(o.payload_json)
+                shown=s.get_meta('report_shown:'+o.id)
+                if shown and not untrusted:
+                    try:
+                        untrusted=any(r is None or bool(r.payload_json) for r in (s.get_occurrence(a,b) for a,b in json.loads(shown)))
+                    except (ValueError,TypeError):
+                        untrusted=True
+                flight=Flight(key,session_id,turn_id,wid,dedupe,attempt,untrusted,invalid)
                 existing=self.flights.get(session_id)
                 if existing and existing.wake_id==wid and existing.dedupe_key==dedupe and existing.attempt==attempt:
                     return None
