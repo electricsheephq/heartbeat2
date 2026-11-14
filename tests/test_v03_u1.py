@@ -29,7 +29,7 @@ def assert_held_turn(e, w, reason, label, *, notify=False):
                  "if the owner should hear about this, respond with notify=true, an outcome other than no_change, and a "
                  "plain-sentence summary: nothing is sent now, but HeartBeat keeps the summary and hands it back on the owner's "
                  "next message or a later role or own-time turn that can send"
-                 + (', or in one report-back turn once messages can be sent' if w.kind in PROBE_KINDS | EVENT_KINDS else '')
+                 + (', or in one report-back turn once messages can be sent' if w.kind in PROBE_KINDS | EVENT_KINDS and reason != 'unanswered' else '')
                  + '. Keep it in your notes too.')
     assert held_line in e.ctx.calls[-1][0]
     # A held turn reserves no message slot, so the count it shows is never off by one.

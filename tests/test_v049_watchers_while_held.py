@@ -265,6 +265,23 @@ def test_report_back_ended_silently_settles_what_it_saw(engine):
     assert e.store.get_occurrence(w.id, o.dedupe_key).held_reason == 'reported:quiet_hours'
 
 
+def test_report_back_without_a_verdict_keeps_what_it_saw(engine):
+    e = engine
+    hold(e, 'quiet_hours')
+    w = watch(e)
+    o = finish_watch(e, w)
+    back, pending = queued_report(e)
+    e.clock.advance(1200)
+    e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key))
+    start(e)
+    # The turn ends without calling respond: no verdict, so the report still waits for the owner.
+    e.intake.post_api_request(session_id='sid', turn_id='turn', usage={})
+    e.intake.transform_llm_output(response_text='', session_id='sid', turn_id='turn')
+    e.intake.on_session_end(session_id='sid', turn_id='turn', completed=True, failed=False, interrupted=False)
+    assert e.store.get_occurrence(back.id, pending.dedupe_key).state == 'done'
+    assert e.store.held_reports(KEY) == [e.store.get_occurrence(w.id, o.dedupe_key)]
+
+
 @pytest.mark.parametrize('reason,promised', [('quiet_hours', True), ('daily_message_cap', True), ('unanswered', False)])
 def test_watcher_text_promises_report_back_only_where_one_can_run(engine, reason, promised):
     e = engine

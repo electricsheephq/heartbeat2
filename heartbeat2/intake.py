@@ -977,8 +977,9 @@ class Intake:
             if shown:
                 try:
                     items=json.loads(shown)
-                    # A report-back turn exists to decide on these: choosing silence (notify=false) settles them too (#137).
-                    if delivered or (w.trigger_json.get('report_back') and not o.notify): s.mark_reported(items)
+                    # A report-back turn exists to decide on these: an explicit silent verdict (respond with notify=false)
+                    # settles them too. A turn that never responded decided nothing, and notify defaults to false (#137).
+                    if delivered or (w.trigger_json.get('report_back') and o.outcome is not None and not o.notify): s.mark_reported(items)
                 except (ValueError,TypeError):
                     pass
                 s.set_meta('report_shown:'+o.id,'')
