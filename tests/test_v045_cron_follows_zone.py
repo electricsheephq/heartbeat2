@@ -230,6 +230,28 @@ def test_a_cron_time_near_a_dst_change_stays_as_written(engine):
         assert [e.store.get_wake(w.id).next_due_at for w in wakes] == before
 
 
+def test_croniter_hour_off_times_beyond_a_day_of_dst_go_to_the_expression_time(engine):
+    # croniter 6.0.0 searching `0 9 * * 1` across a DST change stores Monday 08:00 (spring) or 10:00 (autumn), over a day
+    # after the change. Outside the DST window that time moves to the expression's 09:00 and fires there once (review round 2).
+    e = engine
+    _zone(e, NEW_YORK)
+    for now, stored, nine in ((_at(NEW_YORK, 2026, 3, 7, 12, 0), (2026, 3, 9, 8, 0), (2026, 3, 9, 9, 0)),
+                              (_at(NEW_YORK, 2026, 10, 31, 12, 0), (2026, 11, 2, 10, 0), (2026, 11, 2, 9, 0))):
+        _to(e, now)
+        w = arm(e, 'cron', trigger_json={'cron': '0 9 * * 1'}, next_due_at=_at(NEW_YORK, *stored), expires_at=now + 14 * 86400)
+        e.tick()
+        assert e.store.get_wake(w.id).next_due_at == _at(NEW_YORK, *nine)
+        _to(e, _at(NEW_YORK, *nine) - 1800)
+        e.tick()
+        assert _fires(e, w) == 0
+        _to(e, _at(NEW_YORK, *nine))
+        e.tick()
+        _to(e, _at(NEW_YORK, *nine) + 3600)
+        e.tick()
+        assert _fires(e, w) == 1
+        assert e.store.cas_wake(w.id, 'active', status='cancelled', status_reason='test')
+
+
 def test_the_new_zone_applies_after_a_restart(engine):
     e = engine
     _zone(e, SEOUL)

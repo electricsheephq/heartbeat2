@@ -154,7 +154,8 @@ def local_neighbours(wake: Wake, due: float, timezone: str | tzinfo) -> tuple[fl
         if wake.kind == "cron" and isinstance(trigger.get("cron"), str):
             # Within a day of a DST change, croniter's answer depends on where its search started (croniter 6.0.0, which
             # older Hermes releases pin, is an hour off there; every version moves a time in a skipped hour). Those times
-            # stand as the scheduler wrote them.
+            # stand as the scheduler wrote them. Further out, 6.0.0's hour-off result for a sparse cron (weekly, monthly)
+            # is not one of the expression's local times, and it moves to the one it meant, firing there once.
             if len({datetime.fromtimestamp(due + offset, tz).utcoffset() for offset in (-93600, 0, 93600)}) > 1:
                 return None
             # The same search the scheduler runs, so its own handling of DST gaps and repeated hours counts as on time.

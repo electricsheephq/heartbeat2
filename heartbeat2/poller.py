@@ -480,7 +480,7 @@ class Poller:
             target=after if served else now
         if target==due: return w
         if not self.store.cas_wake(w.id,'active',expected_version=w.version,next_due_at=target): return w
-        self.log.info('heartbeat2 wake %s follows the time zone: next time %.0f -> %.0f',w.id,due,target)
+        self.log.info('heartbeat2 wake %s: next time %.0f is off its local schedule in this zone, now %.0f',w.id,due,target)
         return self.store.get_wake(w.id)
 
     def cancel_non_gateway_builtins(self, *, own_time=False):
