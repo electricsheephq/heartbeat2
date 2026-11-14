@@ -468,9 +468,9 @@ class Poller:
                     self.cancel_occurrences(w.id,'non_gateway',preserve_started=True)
 
     def own_time_refusal(self,chat,key):
-        """Why own time may not run in this chat (a session or wake), or '' (#177). A one-to-one chat has it unless the owner
-        turned it off there; a group, topic or group DM only where the owner turned it on with /pulse owntime on. Each topic
-        is a chat."""
+        """Why own time may not run in this chat (a session or wake), or '' (#177). A chat known to be one-to-one has it
+        unless the owner turned it off there; a group, topic, group DM or a chat whose platform can't tell, only where the
+        owner turned it on with /pulse owntime on. Each topic is a chat."""
         meta=self.store.get_meta
         if meta('own_time_off:'+key)=='1': return 'chat_off'
         if is_direct_chat(chat.platform,chat.chat_type,chat.chat_id): return ''

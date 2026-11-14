@@ -55,14 +55,20 @@ def deliverable_platform(platform) -> bool:
     return platform in MESSAGING_PLATFORMS
 
 
+# Platforms whose Hermes adapter reports 'dm' only for a one-to-one chat (checked at Hermes 04eb00cef7). Matrix can report a
+# multi-person m.direct room as 'dm', and Slack its group DMs (mpim); there, and on any platform not listed, own time needs
+# the owner's opt-in like a group (#177, #169).
+ONE_TO_ONE_DM_PLATFORMS = frozenset({"telegram", "discord", "whatsapp", "signal", "mattermost", "dingtalk", "feishu",
+    "wecom", "wecom_callback", "weixin", "bluebubbles", "yuanbao", "email"})
+
+
 def is_direct_chat(platform, chat_type, chat_id) -> bool:
-    """A one-to-one chat. Hermes reports Slack group DMs (mpim) as 'dm' too; Slack's one-to-one IM channel ids start with
-    D (#177, #169)."""
+    """A chat known to be one-to-one. Slack's one-to-one IM channel ids start with D."""
     if chat_type != "dm":
         return False
     if platform == "slack":
         return str(chat_id or "").startswith("D")
-    return True
+    return platform in ONE_TO_ONE_DM_PLATFORMS
 
 
 def zone_name(tz, now=0.0, *, localtime=False) -> str:

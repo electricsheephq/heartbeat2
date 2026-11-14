@@ -110,3 +110,19 @@ def test_a_slack_group_dm_needs_the_opt_in_too(engine):
     e.store.set_meta('own_time_on:' + mpim, '1')
     e.tick()
     assert e.store.get_wake(own_id(mpim)).status == 'active'
+
+
+def test_where_the_platform_cannot_tell_one_person_from_a_few_own_time_needs_the_opt_in(engine):
+    # Hermes can report a multi-person Matrix m.direct room as 'dm'; an unlisted platform is not trusted either.
+    from heartbeat2.model import Session
+    e = engine
+    _on(e)
+    keys = {'agent:matrix:dm:!room': 'matrix', 'agent:relay:dm:r1': 'relay', 'agent:discord:dm:42': 'discord'}
+    for key, platform in keys.items():
+        e.store.upsert_session(Session(key, platform, 'dm', key.rsplit(':', 1)[1], 'msid', e.clock.now(), e.clock.now(), 'episode'))
+    e.tick()
+    assert {platform: e.store.get_wake(own_id(key)) is not None for key, platform in keys.items()} == \
+        {'matrix': False, 'relay': False, 'discord': True}
+    e.store.set_meta('own_time_on:agent:matrix:dm:!room', '1')
+    e.tick()
+    assert e.store.get_wake(own_id('agent:matrix:dm:!room')).status == 'active'
