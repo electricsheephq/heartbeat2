@@ -593,7 +593,7 @@ class Poller:
         with s.atomic():
             session=s.get_session(session_key)
             if session is None: return
-            wid='report_'+hashlib.sha1(session_key.encode()).hexdigest()[:16]
+            wid='report_'+hashlib.sha256(session_key.encode()).hexdigest()[:16]
             w=s.get_wake(wid)
             if w and any(o.state in {'pending','claimed','started'} for o in s.list_occurrences(wid)): return
             trigger={'at':datetime.fromtimestamp(now,timezone.utc).isoformat(),'builtin':True,'report_back':True}

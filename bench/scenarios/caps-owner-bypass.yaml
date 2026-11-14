@@ -117,7 +117,7 @@ expectations:
       status: done
       wake_fields: {}
     # sha1(agent:telegram:dm:owner)[:16]; held under the cap like a watcher, delivered on the next local day.
-    report_97891b3ee734ead5:
+    report_291272f59da5e318:
       deliveries: 1
       model_wakes: 1
       status: done
@@ -147,7 +147,7 @@ expectations:
     - 1800
     - 1800
   - event: gate
-    ref: report_97891b3ee734ead5
+    ref: report_291272f59da5e318
     reason: held_daily_cap
     window:
     - 3600

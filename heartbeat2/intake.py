@@ -974,12 +974,14 @@ class Intake:
                     and o.notify and not delivered and o.summary.strip() and o.outcome in HELD_REPORT_OUTCOMES):
                 e.arm_report_back(key)
             shown=s.get_meta('report_shown:'+o.id)
+            settled=False
             if shown:
                 try:
                     items=json.loads(shown)
                     # A report-back turn exists to decide on these: an explicit silent verdict (respond with notify=false)
                     # settles them too. A turn that never responded decided nothing, and notify defaults to false (#137).
-                    if delivered or (w.trigger_json.get('report_back') and o.outcome is not None and not o.notify): s.mark_reported(items)
+                    if delivered or (w.trigger_json.get('report_back') and o.outcome is not None and not o.notify):
+                        s.mark_reported(items); settled=True
                 except (ValueError,TypeError):
                     pass
                 s.set_meta('report_shown:'+o.id,'')
@@ -1002,6 +1004,9 @@ class Intake:
                 done=s.get_occurrence(o.wake_id,o.dedupe_key)
                 governor.engagement(e,done,next_check=done.next_check_s)
             governor.finish(e,s.get_wake(o.wake_id),s.get_occurrence(o.wake_id,o.dedupe_key))
+            # A report-back lists at most five reports. Once it settled its list, the next one takes the rest; after
+            # governor.finish, which ends this one-shot (#137).
+            if settled and w.trigger_json.get('report_back') and s.held_reports(key): e.arm_report_back(key)
         e.signal()
         return None
 

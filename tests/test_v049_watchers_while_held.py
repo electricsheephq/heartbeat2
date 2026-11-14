@@ -72,7 +72,7 @@ def test_agent_match_runs_silently_and_report_back_obeys_hold(engine, reason):
     assert o.notify and not o.delivered and o.summary == SUMMARY
     assert e.store.held_reports(KEY) == [o]
     back, pending = queued_report(e)
-    assert back.id == 'report_' + hashlib.sha1(KEY.encode()).hexdigest()[:16]
+    assert back.id == 'report_' + hashlib.sha256(KEY.encode()).hexdigest()[:16]
     assert back.kind == 'at' and back.creator == 'agent' and back.created_in == 'command'
     assert back.title == 'Report back' and back.armed_session_id == 'sid'
     assert (back.platform, back.chat_type, back.chat_id) == ('telegram', 'dm', 'unit')
@@ -152,6 +152,39 @@ def test_two_reports_share_pending_occurrence_and_deliver_together(engine):
     start(e)
     assert end(e, 'done', True) is None
     assert not e.store.held_reports(KEY)
+
+
+def test_report_back_takes_the_rest_of_a_long_backlog(engine):
+    e = engine
+    end_quiet = e.clock.now() + 7200
+    e.store.set_meta('quiet:' + KEY, json.dumps({'until': end_quiet}))
+    for i in range(6):
+        if i: e.clock.advance(601)
+        finish_watch(e, watch(e, str(90 + i)), summary=f'Report {i}.')
+    back, pending = queued_report(e)
+    e.clock.advance(end_quiet - e.clock.now())
+    e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key))
+    text = e.ctx.calls[-1][0]
+    # A report-back lists five; the sixth comes back in the next one instead of waiting for the owner.
+    assert all(f'Report {i}.' in text for i in range(5)) and 'Report 5.' not in text
+    start(e)
+    e.clock.advance(60)
+    assert end(e, 'progress', True, summary='Passed on the five.') is None
+    assert [o.summary for o in e.store.held_reports(KEY)] == ['Report 5.']
+    assert e.store.get_wake(back.id).status == 'active'
+    e.times()
+    again, = e.store.list_occurrences(back.id, state='pending')
+    assert again.dedupe_key != pending.dedupe_key
+    e.clock.advance(601)  # past the wake spacing
+    e.dispatch(again)
+    assert 'Report 5.' in e.ctx.calls[-1][0]
+    start(e)
+    assert end(e, 'progress', True, summary='Passed on the last one.') is None
+    assert not e.store.held_reports(KEY)
+    # Nothing left: no further report-back.
+    assert e.store.get_wake(back.id).status == 'done'
+    e.times()
+    assert not e.store.list_occurrences(back.id, state='pending')
 
 
 def test_owner_receives_reports_before_quiet_end_so_report_back_skips(engine):
