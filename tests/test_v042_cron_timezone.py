@@ -197,7 +197,7 @@ def test_a_due_time_not_yet_fired_moves_too(engine):
 def test_a_moved_time_never_lands_on_a_stale_skip(engine):
     e = engine
     _settled(e, BANGKOK)
-    w = _cron(e, '0 * * * *')
+    w = _cron(e, '0 9 * * *')  # the moved time (09:00 Seoul) is still ahead, so it can only fire if no stale skip blocks it
     due = e.store.get_wake(w.id).next_due_at
     seoul_same = datetime.fromtimestamp(due, zone(BANGKOK)).replace(tzinfo=zone(SEOUL)).timestamp()
     # An old governor skip sits exactly where the moved time lands.
