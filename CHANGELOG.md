@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 — 2026-11-14
+
+- **Own time runs in direct chats only.** With `dm_only` off, own time used to arm in every chat where you had written, group chats included, so it multiplied per chat and could speak to everyone in a group. It now arms only in direct chats. Own-time turns already set up in group chats are cancelled, and nothing else changes.
+
 ## 0.4.0 — 2026-11-13
 
 - **Your reply keeps the agent's own pace.** When you reply to a wake's message within the reply window, a recurring wake no longer drops back to its shortest interval. If it had slowed down for finding nothing, it returns to the next check the agent asked for, counted from your message, and never later than it was already due. Otherwise its schedule stays exactly as the agent's last turn set it. A no-op or ignored pause you haven't been shown yet is lifted by your reply; one you've already seen still waits for `/pulse keep`, `slow` or `stop`. On a slowed cron wake, your reply gives back the cron times it was skipping (#161).
