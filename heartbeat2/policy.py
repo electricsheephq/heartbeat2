@@ -55,6 +55,23 @@ def deliverable_platform(platform) -> bool:
     return platform in MESSAGING_PLATFORMS
 
 
+def zone_name(tz, now=0.0) -> str:
+    """A readable zone name: the IANA key, or for a keyless zone read from /etc/localtime the name it links to (#172)."""
+    key = getattr(tz, "key", None)
+    if isinstance(key, str) and key:
+        return key
+    try:
+        path = os.path.realpath("/etc/localtime")
+        if "/zoneinfo/" in path:
+            return path.split("/zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    try:
+        return datetime.fromtimestamp(now, tz).tzname() or "local"
+    except Exception:
+        return "local"
+
+
 def cap_counts(store, session_key, exclude_id=None) -> tuple[int, int]:
     """Settings-owned built-ins never consume user wake slots."""
     wakes = [w for w in store.list_wakes() if w.id != exclude_id
@@ -233,7 +250,7 @@ class Policy:
             from hermes_time import get_timezone
             tz = get_timezone()
             if tz is not None:
-                return getattr(tz, "key", None) or str(tz), "Hermes"
+                return zone_name(tz, self.clock.now()), "Hermes"
         except Exception:
             pass
         if os.environ.get("TZ"):
@@ -241,8 +258,7 @@ class Policy:
                 return ZoneInfo(os.environ["TZ"].lstrip(":")).key, "TZ"
             except (ZoneInfoNotFoundError, ValueError):
                 pass
-        tz = self.resolved_timezone()
-        return getattr(tz, "key", None) or datetime.fromtimestamp(self.clock.now(), tz).tzname() or "local", "system"
+        return zone_name(self.resolved_timezone(), self.clock.now()), "system"
 
     def timezone_pin_notice(self) -> str:
         """A plugin `timezone` that differs from the zone Hermes sets: shown so a stale pin isn't mistaken for Hermes' zone (#172)."""

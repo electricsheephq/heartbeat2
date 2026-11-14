@@ -86,3 +86,46 @@ def test_the_usage_skill_teaches_the_quiet_default_and_the_owner_commands():
     text = (Path(__file__).resolve().parents[1] / 'skills/heartbeat2-usage/SKILL.md').read_text()
     assert 'by default 22:00-08:00' in text
     assert all(c in text for c in ('/pulse quiet off', '/pulse quiet default', 'Focus'))
+
+
+def _desk(e):
+    return render_desk(e, e.store.get_session(KEY), clock=e.clock, timezone=e.policy.resolved_timezone(), policy=e.policy)
+
+
+def test_the_desk_shows_this_chats_quiet_override(runtime):
+    # The desk shows the window this chat actually has, as status does: a chat override wins over the profile's range.
+    e = runtime.get_engine()
+    e.policy = replace(e.policy, quiet_hours=Policy().quiet_hours)
+    commands.handle('quiet off', runtime)
+    assert 'quiet hours off (chat override, UTC)' in _desk(e) and '22:00-08:00' not in _desk(e)
+    assert 'quiet: off for this chat (override)' in _status(runtime)
+    commands.handle('quiet 01:00-02:00', runtime)
+    assert 'quiet hours 01:00-02:00 (chat override, UTC)' in _desk(e)
+    commands.handle('quiet for 3h', runtime)  # holds messages for 3h; the profile's range stays as it is
+    desk = _desk(e)
+    assert 'quiet hours 22:00-08:00 (default, UTC), quiet until' in desk and '(chat override)' in desk
+    commands.handle('quiet default', runtime)
+    assert 'quiet hours 22:00-08:00 (default, UTC)' in _desk(e) and 'quiet until' not in _desk(e)
+
+
+def test_a_wake_with_an_odd_trigger_still_counts_as_an_item(engine):
+    from heartbeat2.policy import cap_counts
+    e = engine
+    w = arm(e, 'at', next_due_at=e.clock.now() + 600)
+    e.store.connection.execute('UPDATE wakes SET trigger_json=? WHERE id=?', ('[1, 2]', w.id))
+    assert cap_counts(e.store, KEY) == (1, 1)
+
+
+def test_the_zone_source_falls_back_to_tz(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, 'hermes_time', None)  # no Hermes zone resolver: the next source is TZ
+    monkeypatch.setenv('TZ', ':Europe/Paris')
+    assert Policy(timezone='', profile_timezone='').timezone_source() == ('Europe/Paris', 'TZ')
+    assert Policy(timezone='', profile_timezone='Not/AZone').timezone_source() == ('Europe/Paris', 'TZ')
+
+
+def test_a_keyless_zone_gets_a_readable_name():
+    from heartbeat2.policy import zone_name
+    from datetime import timezone, timedelta
+    name = zone_name(timezone(timedelta(hours=9), 'JST'), 0)
+    assert name and '<' not in name and 'ZoneInfo' not in name

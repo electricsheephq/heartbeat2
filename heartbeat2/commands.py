@@ -40,6 +40,18 @@ def quiet_until(engine, session_key, *, urgent=False, now=None):
     return engine.policy.quiet_until(urgent=urgent, now=now)
 
 
+def quiet_window(store, policy, key, now):
+    """The quiet-hours range that applies in this chat and where it comes from, as quiet_until applies it (#173).
+
+    A chat range or off override wins over the profile's range; a `quiet for` override holds messages until its end
+    and leaves the range as it is. Returns (range, source, until): range '' means quiet hours are off."""
+    override = json.loads(store.get_meta('quiet:'+key) or '{}')
+    until = override['until'] if override.get('until', 0) > now else None
+    if 'range' in override: return override['range'], 'chat override', until
+    source = policy.quiet_hours_source() if hasattr(policy, 'quiet_hours_source') else 'settings'
+    return policy.quiet_hours, source, until
+
+
 def _activation(engine, session, wake):
     if not session.enabled: raise ValueError('this chat is off; use /pulse on')
     active_count, global_active_count = cap_counts(engine.store, session.session_key, exclude_id=wake.id)
@@ -353,15 +365,14 @@ def handle(raw_args, runtime):
             if action == 'status' and not rest:
                 status = engine.status()
                 q = quiet_until(engine,key)
-                override=json.loads(engine.store.get_meta('quiet:'+key) or '{}')
                 state='on until '+_time(engine,q) if q else 'off now'
                 # The range and where it comes from are always shown, so the default is known before it first holds a wake (#173).
-                if 'range' in override:
-                    quiet_label=(override['range']+' (chat override), '+state if override['range'] else 'off for this chat (override)')
+                window,source,until=quiet_window(engine.store,engine.policy,key,engine.clock.now())
+                if source=='chat override':
+                    quiet_label=(window+' (chat override), '+state if window else 'off for this chat (override)')
                 else:
-                    configured=engine.policy.quiet_hours
-                    quiet_label=(f'{configured} ({engine.policy.quiet_hours_source()}), ' if configured else 'off in settings, ')+state
-                    if override.get('until',0)>engine.clock.now(): quiet_label+=' (chat override)'
+                    quiet_label=(f'{window} ({source}), ' if window else 'off in settings, ')+state
+                    if until is not None: quiet_label+=' (chat override)'
                 zone_name,zone_source=engine.policy.timezone_source()
                 used,profile_used=cap_counts(engine.store,key)
                 daily = engine.daily(key)

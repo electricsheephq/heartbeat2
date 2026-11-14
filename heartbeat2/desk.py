@@ -1,7 +1,7 @@
 """A bounded, read-only view of this chat's responsibilities and budgets."""
 from types import SimpleNamespace
 
-from .commands import _clip, _oneline, _paused, _time, messages_count, quiet_until
+from .commands import _clip, _oneline, _paused, _time, messages_count, quiet_until, quiet_window
 from .policy import is_watcher, is_keep_warm
 from .schedule import quiet_end, zone
 from .wake_text import _age
@@ -106,12 +106,14 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
     if hasattr(policy, 'max_active'):
         from .policy import cap_counts
         used, profile_used = cap_counts(store, key)
-        quiet = policy.quiet_hours
-        source = policy.quiet_hours_source() if hasattr(policy, 'quiet_hours_source') else 'settings'
+        # The window this chat actually has: a chat override wins, as it does when messages are held.
+        window, source, until = quiet_window(store, policy, key, now)
         zone_name = policy.timezone_source()[0] if hasattr(policy, 'timezone_source') else str(zone(timezone))
+        quiet = f'quiet hours {window} ({source}, {zone_name})' if window else f'quiet hours off ({source}, {zone_name})'
+        if until is not None:
+            quiet += f', quiet until {_time(view, quiet_until(view, key) or until, compact=True)} (chat override)'
         # Headroom and the quiet window, so neither is learned only from a refusal or a hold (#171, #173).
-        tail.append(f'- Items {used}/{policy.max_active} in this chat, {profile_used}/{policy.max_active_profile} in the profile · '
-                    + (f'quiet hours {quiet} ({source}, {zone_name})' if quiet else f'quiet hours off ({zone_name})'))
+        tail.append(f'- Items {used}/{policy.max_active} in this chat, {profile_used}/{policy.max_active_profile} in the profile · ' + quiet)
     reports = store.held_reports(key)
     if reports:
         newest = store.get_wake(reports[-1].wake_id)
