@@ -210,3 +210,54 @@ def test_manifest_declares_every_registered_hook():
     import yaml
     manifest = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] / 'plugin.yaml').read_text())
     assert set(manifest['provides_hooks']) == set(HOOKS)
+
+
+class _InsertsDuringSnapshot(dict):
+    """A child map that registers another parent's delegate right after a prune takes its snapshot."""
+
+    def __init__(self, *args, late=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.late = late
+
+    def items(self):
+        snapshot = list(super().items())
+        if self.late:
+            sid, flight = self.late
+            self.late = None
+            self[sid] = flight
+        return snapshot
+
+
+@pytest.mark.parametrize('end', ['session_end', 'human_pre_llm_call'])
+def test_a_turn_end_keeps_another_parents_new_delegate(engine, end):
+    from heartbeat2.intake import Flight
+    w, flight = running_role(engine)
+    engine.intake.subagent_start(parent_session_id='sid', child_session_id='child')
+    other = Flight('other-session-key', 'other-sid', 'turn', 'other-wake', 't:1', 1)
+    engine.intake.flights['other-sid'] = other
+    engine.intake.children = _InsertsDuringSnapshot(engine.intake.children, late=('child-b', other))
+    if end == 'session_end':
+        engine.intake.on_session_end(session_id='sid', turn_id='turn', completed=True)
+    else:
+        engine.intake.pre_llm_call(session_id='sid', turn_id='turn', user_message='Hello.', platform='telegram')
+    assert 'child' not in engine.intake.children
+    assert engine.intake.children.get('child-b') is other
+
+
+def test_subagent_start_waits_for_the_store_lock(engine):
+    import threading
+    _, flight = running_role(engine)
+    started = threading.Event()
+
+    def register():
+        started.set()
+        engine.intake.subagent_start(parent_session_id='sid', child_session_id='child')
+
+    with engine.store._lock:
+        t = threading.Thread(target=register)
+        t.start()
+        assert started.wait(2)
+        t.join(0.2)
+        assert t.is_alive() and 'child' not in engine.intake.children
+    t.join(2)
+    assert not t.is_alive() and engine.intake.children['child'] is flight
