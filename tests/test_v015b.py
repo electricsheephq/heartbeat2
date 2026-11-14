@@ -7,6 +7,7 @@ import pytest
 
 from heartbeat2.model import KINDS, PROBE_KINDS, EVENT_KINDS
 from heartbeat2.policy import Policy
+from heartbeat2.schedule import next_every
 from heartbeat2.registration import Runtime
 from test_engine import engine, arm, session, pending, start, end, KEY
 from test_v014a import bind
@@ -23,8 +24,9 @@ BOUNDS = {'ledger_days': 36500, 'min_interval_minutes': 525600, 'agent_ungated_f
 def arm_kind(e, kind):
     trigger = {'cron': '* * * * *'} if kind == 'cron' else {}
     if kind == 'every_anchor':
-        return arm(e, 'every', trigger_json={'at': '00:00'},
-                   base_interval_s=86400, eff_interval_s=86400)
+        # Due now, at its anchor: the scheduler only ever stores an anchor time for a daily `every … at` (#170).
+        return arm(e, 'every', trigger_json={'at': '00:00'}, base_interval_s=86400, eff_interval_s=86400,
+                   next_due_at=next_every(e.clock.now() - 86400, 86400, anchor='00:00', timezone=e.policy.resolved_timezone()))
     if kind == 'owner_silent':
         session(e, last_human_at=e.clock.now() - 48*3600)
         trigger = {'after': 3600}

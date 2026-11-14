@@ -196,6 +196,23 @@ def test_dst_gaps_and_repeated_hours_are_on_schedule():
     assert local_neighbours(daily, gap, tz) is None
 
 
+def test_a_cron_time_near_a_dst_change_stays_as_written(engine):
+    # croniter 6.0.0 (older Hermes pins) writes 08:00 for `0 9` across the spring change and 10:00 across the autumn one,
+    # and every version moves a time in the skipped hour. Within a day of a change those times stand: no move, no lost fire.
+    e = engine
+    _zone(e, NEW_YORK)
+    cases = ((_at(NEW_YORK, 2026, 3, 7, 12, 0), (('0 9 * * *', (2026, 3, 8, 8, 0)), ('0 2 * * *', (2026, 3, 8, 3, 0)),
+                                                   ('30 2 * * *', (2026, 3, 8, 3, 30)))),
+             (_at(NEW_YORK, 2026, 10, 31, 12, 0), (('0 9 * * *', (2026, 11, 1, 10, 0)), ('0 3 * * *', (2026, 11, 1, 4, 0)))))
+    for now, crons in cases:
+        _to(e, now)
+        wakes = [arm(e, 'cron', trigger_json={'cron': expression}, next_due_at=_at(NEW_YORK, *when),
+                     expires_at=now + 14 * 86400) for expression, when in crons]
+        before = [e.store.get_wake(w.id).next_due_at for w in wakes]
+        e.tick()
+        assert [e.store.get_wake(w.id).next_due_at for w in wakes] == before
+
+
 def test_the_new_zone_applies_after_a_restart(engine):
     e = engine
     _zone(e, SEOUL)
