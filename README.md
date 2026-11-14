@@ -232,8 +232,8 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Enabled | `enabled` | on | Master switch for wakes and watchers in this profile. |
 | Agent can arm wakes | `agent_can_create` | `yes` | yes · ask_first (the agent's wakes wait for `/pulse ok <id>`) · no |
 | Direct messages only | `dm_only` | on | Refuse group chats. Unknown chat types are refused too. When off, group and topic wakes are recognised behind the gateway's sender prefix. |
-| Time zone | `timezone` | (blank) | IANA name such as Europe/Paris. Blank uses the profile's time zone. |
-| Quiet hours | `quiet_hours` | `22:00-08:00` | HH:MM-HH:MM, may cross midnight; blank for none. Due one-shots wait until the end. Your agent's own recurring work and roles keep running inside them, silently: their messages are held. |
+| Time zone | `timezone` | (blank) | IANA name such as Europe/Paris. Blank uses the profile's time zone. `/pulse status` shows the zone in use and where it comes from, and says when this setting pins a different zone from Hermes'. |
+| Quiet hours | `quiet_hours` | `22:00-08:00` | HH:MM-HH:MM, may cross midnight; blank for none. Due one-shots wait until the end. Your agent's own recurring work and roles keep running inside them, silently: their messages are held. `/pulse status` and the agent's desk show the range and whether it is the default. |
 | Urgent wakes ignore quiet hours | `quiet_hours_urgent` | off | Let wakes marked urgent through quiet hours. |
 | Wake turns per day | `max_model_wakes_per_day` | 24 | Per chat, local day. Each wake turn is a full model turn. |
 | Wake messages per day | `max_messages_per_day` | 6 | Per chat, local day. |
@@ -247,7 +247,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Shortest agent timer without a watcher (minutes) | `agent_ungated_floor_minutes` | 55 | Floor for recurring timers the agent arms without a watcher. |
 | Minutes between wake turns | `wake_spacing_minutes` | 10 | Per chat. |
 | Fastest watcher check (seconds) | `probe_floor_seconds` | 60 | Watchers never check more often than this. |
-| Active wakes per chat | `max_active` | 50 | Active or proposed wakes and watchers in one chat. Check-ins, own time and keep-warm don't count. Turns and messages have their own daily limits. |
+| Active wakes per chat | `max_active` | 50 | Active or proposed wakes and watchers in one chat. Check-ins, own time and keep-warm don't count. Turns and messages have their own daily limits. `/pulse status` shows how many are in use. |
 | Active wakes across the profile | `max_active_profile` | 200 | The same count across all of this profile's chats. |
 | Longest lifetime (days) | `max_lifetime_days` | 14 | Recurring wakes, watchers and agent follow-ups expire by then; agent recurring wakes default to 7 days. Roles and own time have no lifetime limit. |
 | Longest owner one-time reminder (days) | `max_reminder_days` | 365 | Owner-requested one-time reminders, including `/pulse add`, can be due up to this many days out, with `max_lifetime_days` of grace after a long reminder's due time. The hard end is the sum of both settings. If `max_lifetime_days` is larger, its existing bound applies instead; maximum 3650 days. |

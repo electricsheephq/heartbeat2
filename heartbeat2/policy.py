@@ -55,10 +55,29 @@ def deliverable_platform(platform) -> bool:
     return platform in MESSAGING_PLATFORMS
 
 
+def zone_name(tz, now=0.0, *, localtime=False) -> str:
+    """A readable zone name (#172): the IANA key; for the zone read from /etc/localtime (localtime=True), the name that
+    file links to; otherwise the zone's own abbreviation. A missing key alone never says where a zone came from."""
+    key = getattr(tz, "key", None)
+    if isinstance(key, str) and key:
+        return key
+    if localtime:
+        try:
+            path = os.path.realpath("/etc/localtime")
+            if "/zoneinfo/" in path:
+                return path.split("/zoneinfo/", 1)[1]
+        except OSError:
+            pass
+    try:
+        return datetime.fromtimestamp(now, tz).tzname() or "local"
+    except Exception:
+        return "local"
+
+
 def cap_counts(store, session_key, exclude_id=None) -> tuple[int, int]:
     """Settings-owned built-ins never consume user wake slots."""
     wakes = [w for w in store.list_wakes() if w.id != exclude_id
-             and w.status in {'active', 'proposed'} and not w.trigger_json.get('builtin')]
+             and w.status in {'active', 'proposed'} and not (isinstance(w.trigger_json, dict) and w.trigger_json.get('builtin'))]
     return sum(w.session_key == session_key for w in wakes), len(wakes)
 
 
@@ -215,6 +234,54 @@ class Policy:
         quiet_end(result.clock.now(), result.quiet_hours, result.resolved_timezone())
         return result
 
+    def timezone_source(self) -> tuple[str, str]:
+        """The effective zone's name and where it comes from, for status and desk (#172)."""
+        if self.timezone:
+            return self.timezone, "plugin setting"
+        return self.inherited_timezone()
+
+    def inherited_timezone(self) -> tuple[str, str]:
+        """The zone the plugin follows when its own `timezone` setting is blank: Hermes', then TZ, then the system's."""
+        if self.profile_timezone:
+            try:
+                ZoneInfo(self.profile_timezone)
+                return self.profile_timezone, "Hermes"
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
+        try:
+            from hermes_time import get_timezone
+            tz = get_timezone()
+            if tz is not None:
+                return zone_name(tz, self.clock.now()), "Hermes"
+        except Exception:
+            pass
+        if os.environ.get("TZ"):
+            try:
+                return ZoneInfo(os.environ["TZ"].lstrip(":")).key, "TZ"
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
+        # The same system zone resolved_timezone falls back to, read here directly: with a plugin pin set, that pin is what
+        # resolved_timezone returns, not the system zone.
+        try:
+            with open("/etc/localtime", "rb") as source:
+                return zone_name(ZoneInfo.from_file(source), self.clock.now(), localtime=True), "system"
+        except (OSError, ValueError):
+            return zone_name(datetime.fromtimestamp(self.clock.now()).astimezone().tzinfo, self.clock.now()), "system"
+
+    def timezone_pin_notice(self) -> str:
+        """A plugin `timezone` that differs from the zone Hermes sets: shown so a stale pin isn't mistaken for Hermes' zone (#172)."""
+        if not self.timezone:
+            return ""
+        inherited, source = self.inherited_timezone()
+        if source != "Hermes" or inherited == self.timezone:
+            return ""
+        return (f"Time zone: the plugin's `timezone` setting pins {self.timezone}, while Hermes uses {inherited}. "
+                "To follow Hermes, clear plugins.entries.heartbeat2.settings.timezone.")
+
+    def quiet_hours_source(self) -> str:
+        """Where the profile's quiet hours come from: the built-in default or the owner's settings (#173)."""
+        return "default" if self.quiet_hours == type(self).__dataclass_fields__["quiet_hours"].default else "settings"
+
     def resolved_timezone(self) -> tzinfo:
         if self.timezone:
             try:
@@ -284,10 +351,12 @@ class Policy:
     def cap_gate(self, active_count, global_active_count) -> Gate:
         if active_count >= self.max_active:
             return Gate(False, "max_active", f"This chat has reached its limit of {self.max_active} active or proposed wakes "
-                        "(the check-in, own time and keep-warm don't count). Cancel one with /pulse cancel <id> or pulse cancel.")
+                        f"({active_count} in use, reminders included; the check-in, own time and keep-warm don't count). "
+                        "Cancel one with /pulse cancel <id> or pulse cancel. Only the owner can raise the limit, with the max_active setting.")
         if global_active_count >= self.max_active_profile:
             return Gate(False, "global_max_active", f"This profile has reached its limit of {self.max_active_profile} active or proposed wakes "
-                        "across its chats (check-ins, own time and keep-warm don't count). Cancel some with /pulse cancel <id> in their chats.")
+                        f"across its chats ({global_active_count} in use, reminders included; check-ins, own time and keep-warm don't count). "
+                        "Cancel some with /pulse cancel <id> in their chats. Only the owner can raise the limit, with the max_active_profile setting.")
         return Gate(True)
 
     def mutation_gate(self, wake: Wake, *, action: str, session_key: str,
