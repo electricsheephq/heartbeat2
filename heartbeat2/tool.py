@@ -347,7 +347,10 @@ class Tool:
                     elif action in {'resume','cancel'}:
                         e.store.set_meta('resume_after:'+w.id,'')
                     if action == 'resume': e.store.set_meta('card:'+w.id,'')
-                    w=e.store.get_wake(w.id)
+                    updated=e.store.get_wake(w.id)
+                    if action=='update' and (w.kind!=updated.kind or w.trigger_json!=updated.trigger_json):
+                        e.recheck_pending(w,updated)
+                    w=updated
                     if action == 'update' and owner_lowered: e.store.set_owner_budget(w.id,max(1,budget))  # the number the owner asked for
                     item={'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':clamps,'cache':self.cache_result(w)}
                     if action in {'update','resume'}: item['receipt']=self.receipt(w,s)

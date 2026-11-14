@@ -30,6 +30,16 @@ LOCAL_EPOCHS = set()
 CREATED_EPOCHS = set()  # Every poller epoch this process made; never discarded.
 
 
+def event_matches(w,payload) -> bool:
+    filters=w.trigger_json
+    if w.kind=='reaction' and filters.get('emojis') and not set(filters['emojis']) & set(payload.get('emojis',[])): return False
+    if any(filters.get(k) is not None and payload.get(k)!=filters[k] for k in ('task_id','board')): return False
+    if w.kind=='reaction' and filters.get('message_id') is not None:
+        mid=payload.get('message_id')
+        if mid is None or str(mid).strip()!=str(filters['message_id']).strip(): return False
+    return True
+
+
 def check_paused():
     try:
         from agent.estop import check_paused as paused
@@ -216,6 +226,36 @@ class Poller:
                     attempt=o.attempt if o.state!='pending' else None,force_silent=True,
                     error='expired_held' if o.state=='pending' and o.held_since is not None and reason in {'expired','max_fires','max_lifetime_changed'} else reason)
 
+    def recheck_pending(self,old,new):
+        target_changed=any(old.trigger_json.get(k)!=new.trigger_json.get(k)
+                           for k in ('path','url','command','pattern','pid','cwd','fire_on'))
+        watchers=PROBE_KINDS | EVENT_KINDS
+        supersede=(old.kind!=new.kind and (old.kind in watchers or new.kind in watchers)
+                   or old.kind==new.kind and old.kind in PROBE_KINDS and target_changed)
+        refilter=(old.kind==new.kind and new.kind in EVENT_KINDS
+                  and any(old.trigger_json.get(k)!=new.trigger_json.get(k) for k in ('emojis','message_id','task_id','board')))
+        if new.kind in PROBE_KINDS and (old.kind!=new.kind or target_changed):
+            self.store.set_meta('probe_generation:'+new.id,str(int(self.store.get_meta('probe_generation:'+new.id) or 0)+1))
+        if not supersede and not refilter: return
+        # A wider filter still matches every event folded into a held count; only a narrower one makes it unknowable.
+        ot,nt=old.trigger_json,new.trigger_json
+        widened=(all(nt.get(k) is None or nt.get(k)==ot.get(k) for k in ('message_id','task_id','board'))
+                 and (not nt.get('emojis') or bool(ot.get('emojis')) and set(ot['emojis'])<=set(nt['emojis'])))
+        for o in self.store.list_occurrences(old.id,state='pending'):
+            reason='trigger_changed'
+            if refilter:
+                if not o.dedupe_key.startswith('e:'): continue
+                kept=[p for p in o.payload_json if not isinstance(p,dict) or event_matches(new,p)]
+                if kept:
+                    updates={'payload_json':kept} if kept!=o.payload_json else {}
+                    if o.held_since is not None and not widened: updates['held_matches']=len(kept)
+                    if updates: self.store.update_occurrence(old.id,o.dedupe_key,'pending',**updates)
+                    continue
+                reason='filter_changed'
+            if not self.store.cas_occurrence(old.id,o.dedupe_key,'pending','superseded',
+                                             force_silent=True,error=reason):
+                continue  # A claimed/started occurrence is already in flight.
+
     def evaluate(self,w,fn):
         """One wake's invalid stored data cannot roll back healthy siblings."""
         s=self.store
@@ -324,12 +364,7 @@ class Poller:
         if event['session_key'] and event['session_key']!=w.session_key: return
         if event['chat_id'] and event['chat_id']!=w.chat_id: return
         payload=event['payload_json']
-        filters=w.trigger_json
-        if w.kind=='reaction' and filters.get('emojis') and not set(filters['emojis']) & set(payload.get('emojis',[])): return
-        if any(filters.get(k) is not None and payload.get(k)!=filters[k] for k in ('task_id','board')): return
-        if w.kind=='reaction' and filters.get('message_id') is not None:
-            mid=payload.get('message_id')
-            if mid is None or str(mid).strip()!=str(filters['message_id']).strip(): return
+        if not event_matches(w,payload): return
         if w.kind=='api_error':
             last=float(s.get_meta('api_cooldown:'+w.id) or 0)
             if last and self.clock.now()-last<1800: return
@@ -390,7 +425,9 @@ class Poller:
             w=s.get_wake(w.id)
         if result.get('fire'):
             identity=str(result.get('identity') or json.dumps(result.get('state',result.get('message','')),sort_keys=True))
-            digest=hashlib.sha1(identity.encode()).hexdigest()
+            # A retargeted check starts a fresh namespace, so its first result is never deduplicated against the old target (#149).
+            generation=s.get_meta('probe_generation:'+w.id)
+            digest=hashlib.sha1((identity+(':g'+generation if generation else '')).encode()).hexdigest()
             payload=[{'message':result.get('message','')}]
             pending=s.list_occurrences(w.id,state='pending')
             coalesced=bool(pending and s.coalesce(w.id,pending[-1].dedupe_key,payload))
@@ -455,7 +492,8 @@ class Poller:
             elif w.kind in PROBE_KINDS|EVENT_KINDS and w.deadline_at is not None and w.deadline_at<=now:
                 # Deadline fallback is one fire only, and only when no trigger
                 # occurrence has already been produced (including pending).
-                if not s.list_occurrences(w.id):
+                if not [o for o in s.list_occurrences(w.id)
+                        if not (o.state=='superseded' and o.error in {'filter_changed','trigger_changed'})]:
                     s.add_occurrence(w.id,f't:{w.deadline_at:.17g}',payload=[{'message':'deadline passed — nothing happened'}])
                 s.cas_wake(w.id,'active',expected_version=w.version,deadline_at=None)
 
@@ -688,6 +726,9 @@ class Poller:
         # The served set can shrink mid-tick; an unserved home's wake stays untouched for its own gateway.
         if not self.eligible(): return
         s=self.store
+        # The tick lists occurrences before this transaction; act on the stored row, never a stale copy (#149).
+        o=s.get_occurrence(o.wake_id,o.dedupe_key)
+        if o is None or o.state!='pending': return
         w=s.get_wake(o.wake_id)
         session=s.get_session(w.session_key)
         reason,defer,until=self.gate(w,o,session)
