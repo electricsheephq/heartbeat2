@@ -290,18 +290,29 @@ class Intake:
     @fail_open
     def subagent_start(self,parent_session_id='',child_session_id='',**_):
         if not parent_session_id or not child_session_id: return None
-        flight=self.children.get(parent_session_id) or self.flights.get(parent_session_id)
+        flight=self._child(parent_session_id) or self.flights.get(parent_session_id)
         if flight is None:
             key=self.bindings.get(parent_session_id)
             if key: flight=self.flight_for(parent_session_id,key)
         if flight is not None: self.children[child_session_id]=flight
         return None
 
+    def _child(self,sid):
+        """A delegate's flight, following the delegate's own compression to its new session id."""
+        f=self.children.get(sid)
+        if f is None and sid and self.children and sid not in self.bindings and sid not in self.flights:
+            for old in list(self.children):
+                if self.engine.compression_tip(old)!=sid: continue
+                f=self.children.pop(old,None)
+                if f is not None: self.children[sid]=f
+                break
+        return f
+
     def flight_for(self,sid,key):
         # Tools in delegate children inherit the key, but have a different id.
         self._follow(sid)
-        if sid in self.children:
-            f=self.children[sid]
+        f=self._child(sid)
+        if f is not None:
             if f.session_key==key and any(x is f for x in self.flights.values()): return f
             self.children.pop(sid,None)  # A turn end can replace the map from another thread.
         for f in self.flights.values():
@@ -605,7 +616,7 @@ class Intake:
                         self._session_switch(w,session_id)
             # Human turn context never turns a model call into a wake.
             flight=self.flights.pop(session_id,None)
-            self.children={sid:f for sid,f in self.children.items() if f is not flight}
+            self.children={sid:f for sid,f in list(self.children.items()) if f is not flight}
             if not s.get_meta('human_context:'+key): return None
             s.set_meta('human_context:'+key,'')
             lines=[]
@@ -922,7 +933,7 @@ class Intake:
             if session and session.busy_epoch in (None,'',e.epoch):
                 s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             self.flights.pop(session_id,None)
-            self.children={sid:flight for sid,flight in self.children.items() if flight is not f}
+            self.children={sid:flight for sid,flight in list(self.children.items()) if flight is not f}
             shown=s.get_meta('owner_report:'+session_id)
             if shown:
                 if f is None and not (failed or interrupted or completed is False):

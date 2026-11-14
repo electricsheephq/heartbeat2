@@ -170,3 +170,36 @@ def test_child_lookup_discards_stale_mapping(engine, command, stale):
     key = 'other-session-key' if stale == 'different_key' else KEY
     assert engine.intake.flight_for('child', key) is None
     assert 'child' not in engine.intake.children
+
+
+def test_compressed_child_keeps_wake_limits_after_pause(engine, command):
+    w, flight = running_role(engine)
+    engine.intake.subagent_start(parent_session_id='sid', child_session_id='child')
+    assert not command('pause ' + w.id).startswith('Error:')
+    engine.compression_tip = lambda sid: 'child2' if sid == 'child' else None
+    assert engine.intake.flight_for('child2', KEY) is flight
+    assert 'child' not in engine.intake.children and engine.intake.children['child2'] is flight
+    assert_wake_limits(engine, w, sid='child2')
+    engine.intake.subagent_start(parent_session_id='child2', child_session_id='grandchild')
+    assert engine.intake.children['grandchild'] is flight
+    engine.intake.on_session_end(session_id='sid', turn_id='turn', completed=True)
+    assert not engine.intake.children
+
+
+def test_compressed_child_start_follows_before_mapping_a_grandchild(engine, command):
+    w, flight = running_role(engine)
+    engine.intake.subagent_start(parent_session_id='sid', child_session_id='child')
+    assert not command('pause ' + w.id).startswith('Error:')
+    engine.compression_tip = lambda sid: 'child2' if sid == 'child' else None
+    engine.intake.subagent_start(parent_session_id='child2', child_session_id='grandchild')
+    assert engine.intake.children['grandchild'] is flight
+    assert_wake_limits(engine, w, sid='grandchild')
+
+
+def test_unrelated_session_is_not_taken_by_a_child_mapping(engine, command):
+    w, flight = running_role(engine)
+    engine.intake.subagent_start(parent_session_id='sid', child_session_id='child')
+    assert not command('pause ' + w.id).startswith('Error:')
+    engine.compression_tip = lambda sid: None
+    assert engine.intake.flight_for('stranger', KEY) is None
+    assert set(engine.intake.children) == {'child'}
