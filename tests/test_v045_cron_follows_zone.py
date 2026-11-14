@@ -94,7 +94,7 @@ def test_a_move_east_after_the_local_time_fires_once_now(engine):
     assert _fires(e, w) == 1
 
 
-def test_a_local_time_already_served_or_too_late_waits_for_the_next(engine):
+def test_a_local_time_already_served_waits_for_the_next(engine):
     e = engine
     _zone(e, BANGKOK)
     nine = _at(SEOUL, 2025, 10, 13, 9, 0)
@@ -103,13 +103,30 @@ def test_a_local_time_already_served_or_too_late_waits_for_the_next(engine):
     assert e.store.cas_wake(served.id, 'active', expected_version=served.version, last_fired_at=nine)
     keyed = _cron(e, '0 9 * * *')
     e.store.add_occurrence(keyed.id, f't:{nine:.17g}', state='skipped')
-    late = _cron(e, '0 9 * * *')
     _zone(e, SEOUL)
-    e.policy = replace(e.policy, catch_up_hours=0)
     e.tick()
     tomorrow = _at(SEOUL, 2025, 10, 14, 9, 0)
-    assert [e.store.get_wake(w.id).next_due_at for w in (served, keyed, late)] == [tomorrow] * 3
-    assert [_fires(e, w) for w in (served, keyed, late)] == [0, 1, 0]
+    assert [e.store.get_wake(w.id).next_due_at for w in (served, keyed)] == [tomorrow] * 2
+    assert [_fires(e, w) for w in (served, keyed)] == [0, 1]
+
+
+def test_a_big_move_east_noticed_late_still_fires_that_day(engine):
+    # London to Singapore (+8), noticed at 15:30 there: 09:00 passed 6.5 hours ago, past catch_up_hours, and the stored
+    # 09:00 London is 17:00. It fires now rather than waiting a day (review round 1).
+    e = engine
+    _zone(e, 'Europe/London')
+    _to(e, _at('Europe/London', 2025, 11, 10, 12, 0))
+    w = _cron(e, '0 9 * * *')
+    _to(e, _at('Asia/Singapore', 2025, 11, 11, 15, 30))
+    e.tick()
+    assert _fires(e, w) == 0
+    _zone(e, 'Asia/Singapore')
+    e.tick()
+    assert _fires(e, w) == 1
+    assert _local(e.store.get_wake(w.id).next_due_at, 'Asia/Singapore') == '2025-11-12 09:00'
+    _to(e, _at('Asia/Singapore', 2025, 11, 11, 17, 0))
+    e.tick()
+    assert _fires(e, w) == 1
 
 
 def test_a_move_west_just_after_a_fire_does_not_fire_again_that_day(engine):

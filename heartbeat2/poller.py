@@ -476,7 +476,8 @@ class Poller:
             if due<=now: return w  # Due either way: it fires now.
             served=((w.last_fired_at is not None and w.last_fired_at>=target)
                     or self.store.get_occurrence(w.id,f't:{target:.17g}') is not None)
-            target=now if not served and now-target<=self.policy.catch_up_hours*3600 else after
+            # However late, like any overdue recurring time: the move is at most the zone shift, and waiting loses the day.
+            target=after if served else now
         if target==due: return w
         if not self.store.cas_wake(w.id,'active',expected_version=w.version,next_due_at=target): return w
         self.log.info('heartbeat2 wake %s follows the time zone: next time %.0f -> %.0f',w.id,due,target)
