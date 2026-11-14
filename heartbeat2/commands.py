@@ -564,7 +564,8 @@ def own_time_label(engine, key):
     hours = engine.policy.own_time_hours
     if not hours: return 'off for this profile (own_time_hours is 0 in settings)'
     session = engine.store.get_session(key)
-    refusal = engine.own_time_refusal(session.chat_type if session is not None else 'dm', key)
+    if session is None: return 'off: this chat has no session yet'
+    refusal = engine.own_time_refusal(session, key)
     if refusal == 'chat_off': return 'off in this chat (/pulse owntime on turns it back on)'
     if refusal == 'not_opted_in': return 'off in this group or topic until you turn it on (/pulse owntime on runs it here)'
     if refusal == 'dm_only': return 'off here: dm_only is on, so own time runs only in direct chats'

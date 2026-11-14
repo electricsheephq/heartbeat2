@@ -53,9 +53,11 @@ def test_own_time_already_armed_in_a_group_stops_until_turned_on(runtime, monkey
                              trigger_json={'builtin': True, 'own_time': True, 'hours': 6, 'floor': 3300},
                              base_interval_s=21600, eff_interval_s=21600, pacing_min_s=3300, pacing_max_s=43200,
                              next_due_at=e.clock.now()))
+    e.store.add_occurrence(own_id(GROUP), 't:queued-before-upgrade')  # a turn 0.4.2 had already queued
     e.tick()
     w = e.store.get_wake(own_id(GROUP))
     assert (w.status, w.status_reason) == ('cancelled', 'not_opted_in')
+    assert e.store.get_occurrence(own_id(GROUP), 't:queued-before-upgrade').state == 'superseded'
     assert not [c for c in e.ctx.calls if c[1] == GROUP]  # its due turn never went out
     assert all(o.state not in {'pending', 'claimed', 'started'} for o in e.store.list_occurrences(own_id(GROUP)))
     _in(monkeypatch, GROUP)
@@ -90,4 +92,21 @@ def test_dispatch_refuses_own_time_in_a_group_not_turned_on(engine):
     w = e.store.get_wake(own_id(GROUP))
     occurrence = SimpleNamespace(state='pending', held_since=None, error='', dedupe_key='t:1')
     assert e.gate(w, occurrence, e.store.get_session(GROUP))[0] == 'not_opted_in'
-    assert e.own_time_refusal('dm', KEY) == ''  # a direct chat needs no opt-in
+    assert e.own_time_refusal(e.store.get_session(KEY), KEY) == ''  # a direct chat needs no opt-in
+
+
+def test_a_slack_group_dm_needs_the_opt_in_too(engine):
+    # Hermes reports a Slack group DM (mpim) as 'dm'; only a one-to-one IM (channel id D...) has own time by default.
+    from heartbeat2.model import Session
+    e = engine
+    _on(e)
+    im, mpim = 'agent:slack:dm:D111', 'agent:slack:dm:G222'
+    for key, chat in ((im, 'D111'), (mpim, 'G222')):
+        e.store.upsert_session(Session(key, 'slack', 'dm', chat, 'ssid', e.clock.now(), e.clock.now(), 'episode'))
+    e.tick()
+    assert e.store.get_wake(own_id(im)).status == 'active'
+    assert e.store.get_wake(own_id(mpim)) is None
+    assert e.own_time_refusal(e.store.get_session(mpim), mpim) == 'not_opted_in'
+    e.store.set_meta('own_time_on:' + mpim, '1')
+    e.tick()
+    assert e.store.get_wake(own_id(mpim)).status == 'active'

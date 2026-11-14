@@ -15,7 +15,7 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm
+from .policy import MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat
 from .schedule import time_due, local_day, parse_duration, next_every
 from . import governor
 
@@ -467,13 +467,14 @@ class Poller:
                 if self.store.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='non_gateway'):
                     self.cancel_occurrences(w.id,'non_gateway',preserve_started=True)
 
-    def own_time_refusal(self,chat_type,key):
-        """Why own time may not run in this chat, or '' (#177). Direct chats have it unless the owner turned it off there;
-        a group or topic only where the owner turned it on with /pulse owntime on (and dm_only is off). Each topic is a chat."""
+    def own_time_refusal(self,chat,key):
+        """Why own time may not run in this chat (a session or wake), or '' (#177). A one-to-one chat has it unless the owner
+        turned it off there; a group, topic or group DM only where the owner turned it on with /pulse owntime on. Each topic
+        is a chat."""
         meta=self.store.get_meta
         if meta('own_time_off:'+key)=='1': return 'chat_off'
-        if chat_type=='dm': return ''
-        if self.policy.dm_only: return 'dm_only'
+        if is_direct_chat(chat.platform,chat.chat_type,chat.chat_id): return ''
+        if self.policy.dm_only and chat.chat_type!='dm': return 'dm_only'
         return '' if meta('own_time_on:'+key)=='1' else 'not_opted_in'
 
     def own_time(self):
@@ -489,14 +490,14 @@ class Poller:
             # A paused wake is left paused (a governor pause outlasts off and on); dispatch refuses its turns meanwhile.
             if not w.trigger_json.get('own_time') or w.status not in {'active','proposed'}: continue
             session=s.get_session(w.session_key)
-            reason=self.own_time_refusal(session.chat_type if session is not None else w.chat_type,w.session_key)
+            reason=self.own_time_refusal(session if session is not None else w,w.session_key)
             if reason and s.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason=reason):
                 self.cancel_occurrences(w.id,reason,preserve_started=True)
         floor=max(self.policy.min_interval_minutes,self.policy.agent_ungated_floor_minutes)*60
         interval=max(hours*3600,floor)
         maximum=max(2*hours*3600,floor)
         for session in s.list_sessions():
-            if not deliverable_platform(session.platform) or self.own_time_refusal(session.chat_type,session.session_key): continue
+            if not deliverable_platform(session.platform) or self.own_time_refusal(session,session.session_key): continue
             if session.last_human_at is None or not session.episode_id: continue
             wid='owntime_'+hashlib.sha256(session.session_key.encode()).hexdigest()[:16]
             w=s.get_wake(wid)
@@ -596,7 +597,7 @@ class Poller:
             return 'episode_ended',False,None
         if w.trigger_json.get('own_time'):
             if not self.policy.own_time_hours: return 'setting_off',False,None
-            refusal=self.own_time_refusal(s.chat_type if s is not None else w.chat_type,w.session_key)
+            refusal=self.own_time_refusal(s if s is not None else w,w.session_key)
             if refusal in {'chat_off','not_opted_in'}: return refusal,False,None
         elif is_keep_warm(w):
             from .cache import keep_warm_plan, keep_warm_key
