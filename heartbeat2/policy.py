@@ -30,7 +30,7 @@ def is_watcher(wake):
 
 
 def holds_messages(wake):
-    return not is_owner(wake) and wake.kind in RECURRING_KINDS and not is_watcher(wake)
+    return not is_owner(wake) and (wake.kind in RECURRING_KINDS or is_watcher(wake))
 
 
 def one_shot(wake):
@@ -380,6 +380,8 @@ class Policy:
                       babysit: bool | None = None, untrusted_payload: bool = False) -> Gate:
         if wake.session_key != session_key:
             return Gate(False, "wrong_session")
+        if wake.trigger_json.get('report_back'):
+            return Gate(False, 'builtin_settings_owned', "A report-back turn is HeartBeat's; it ends on its own.")
         if wake.trigger_json.get('own_time') and action in {'pause','cancel','off'}:
             return Gate(False, 'builtin_settings_owned', 'Own time is set in Settings (own_time_hours).')
         if is_keep_warm(wake):

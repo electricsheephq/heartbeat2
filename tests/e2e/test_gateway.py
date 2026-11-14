@@ -403,11 +403,10 @@ def test_invalid_setting_does_not_halt_wakes(make_rig):
     rig.assert_tools_ok()
 
 
-def test_mute_holds_watcher_until_reply(make_rig):
+def test_mute_lets_agent_watcher_work_silently(make_rig):
     from tests.fakes.fake_llm_provider import Text, ToolCall
 
     rig = make_rig()
-    wall_offset = time.time()-time.monotonic()
     watched = rig.gateway.home / "watched.log"
     watched.write_text("baseline\n")
     # One owner turn arms both nudges and the watcher, without clearing the
@@ -434,45 +433,41 @@ def test_mute_holds_watcher_until_reply(make_rig):
     before = rig.visible_ids()
     starts, openers = len(rig.director.wake_starts), len(rig.wake_openers())
 
-    # Observe each change on a real probe tick so two observed matches (rather
-    # than two writes seen as one) must coalesce while the mute is still set.
+    # Under the mute an agent watcher still looks right away; its turn is silent and its report is held (#137).
     with watched.open("a") as stream:
         stream.write("MATCH-FIRST\n")
-    first = rig.wait(lambda: (o if (o := rig.occurrence(watcher)) and o["error"] else None),
-                     "first file match gated", 20)
-    assert first["state"] == "pending" and first["held_reason"] == "held_unanswered", first
-    assert first["held_since"] is not None and first["held_matches"] == 1, first
-    assert json.loads(first["payload_json"]) == [{"message": "MATCH-FIRST"}], first
-    with watched.open("a") as stream:
-        stream.write("MATCH-LATEST\n")
-    rig.wait(lambda: json.loads(next(w for w in rig.rows("wakes")
-                                    if w["id"] == watcher)["probe_state_json"])["generation"] == 2,
-             "second file match observed", 20)
+    done = rig.wait(lambda: (o if (o := rig.occurrence(watcher)) and o["state"] == "done" else None),
+                    "silent watcher turn done", 60)
+    assert done["delivered"] == 0 and done["force_silent"] == 1 and done["notify"] == 1, done
+    assert done["held_reason"] == "message_held:unanswered" and done["summary"] == "E2E verdict", done
+    assert json.loads(done["payload_json"]) == [{"message": "MATCH-FIRST"}], done
+    assert len(rig.director.wake_starts) == starts + 1
+    opened = rig.wake_openers()[openers:]
+    assert len(opened) == 1, opened
+    text = rig.director._text(opened[0]["messages"][-1])
+    assert f"watcher {watcher}" in text and "MATCH-FIRST" in text, text
+    assert "Messages are held right now" in text, text
+    # The report-back the turn set up is skipped under the mute; the report waits for the owner.
+    back = rig.wait(lambda: next((w for w in rig.rows("wakes") if w["id"].startswith("report_")), None),
+                    "report-back armed", 20)
+    skipped = rig.wait(lambda: (o if (o := rig.occurrence(back["id"])) and o["state"] == "skipped" else None),
+                       "report-back skipped", 30)
+    assert skipped["error"] == "unanswered", skipped
     rig.tick_barrier()
-    held = rig.rows("occurrences", "WHERE wake_id=?", (watcher,))
-    assert len(held) == 1, held
-    row = held[0]
-    assert row["state"] == "pending" and row["held_reason"] == "held_unanswered", row
-    assert row["held_since"] == first["held_since"] and row["held_matches"] == 2, row
-    assert row["dedupe_key"] == first["dedupe_key"], row
-    assert json.loads(row["payload_json"]) == [{"message": "MATCH-LATEST"}], row
-    assert len(rig.director.wake_starts) == starts == 2
-    assert len(rig.wake_openers()) == openers == 2
+    assert len(rig.director.wake_starts) == starts + 1
     assert rig.new_visible(before) == [], rig.new_visible(before)
 
+    # The owner's next turn is handed the held report and answers for it; nothing else is sent.
     rig.owner("I am back [in:watcher-returned]", "reply to watcher-returned")
-    done = rig.settled(watcher)
+    turn = next(r for r in rig.llm.main_requests() if "watcher-returned" in json.dumps(r["messages"][-1]))
+    handed = json.dumps(turn)
+    assert "while the owner's limits held your messages" in handed and "E2E verdict" in handed, handed[-2000:]
     rig.tick_barrier()
-    assert done["state"] == "done" and done["delivered"] == 1 and done["attempt"] == 1, done
+    row = rig.occurrence(watcher)
+    assert row["held_reason"] == "reported:unanswered" and row["delivered"] == 0, row
     assert len(rig.rows("occurrences", "WHERE wake_id=?", (watcher,))) == 1
     assert len(rig.director.wake_starts) == starts + 1
-    released = rig.wake_openers()[openers:]
-    assert len(released) == 1, released
-    text = rig.director._text(released[0]["messages"][-1])
-    assert f"watcher {watcher}" in text and "you hadn't replied" in text, text
-    assert "MATCH-LATEST" in text and "MATCH-FIRST" not in text, text
-    assert sum("WAKE-DELIVERED" in t for t in rig.new_visible(before)) == 1
-    record_latency(rig, first['matched_at'], wall_offset)
+    assert sum("WAKE-DELIVERED" in t for t in rig.new_visible(before)) == 0
     rig.assert_tools_ok()
 
 

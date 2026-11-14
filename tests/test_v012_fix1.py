@@ -75,12 +75,12 @@ def test_final_rule_owner_watcher_bypasses_mute_but_holds_caps(engine, kind):
 
 
 def test_R2_url_held_match_survives_five_errors_pause_resume(engine):
-    session(engine, unanswered_count=2)
+    engine.policy = replace(engine.policy, max_model_wakes_per_day=0)
     w = arm(engine, 'url', trigger_json={'check_every': 60}, probe_state_json={'fingerprint': 'v1'})
     engine.probe_runner = lambda _: {'fire': True, 'identity': 'v2', 'state': {'fingerprint': 'v2'}, 'payload': {'message': 'Changed'}}
     engine.tick()
     o, = engine.store.list_occurrences(w.id)
-    assert o.state == 'pending' and o.error == 'held_unanswered'
+    assert o.state == 'pending' and o.error == 'held_daily_cap'
     engine.probe_runner = lambda _: {'fire': False, 'error': 'URLError'}
     for _ in range(5):
         engine.clock.advance(61)
@@ -90,6 +90,7 @@ def test_R2_url_held_match_survives_five_errors_pause_resume(engine):
     assert held.state == 'pending' and held.error == 'held_paused'
     assert not engine.store.get_meta('not_before:' + o.id)
     admit(engine, text='Keep checking')
+    engine.policy = replace(engine.policy, max_model_wakes_per_day=24)
     assert governor.owner_answer(engine, engine.store.get_wake(w.id), 'keep')['ok']
     engine.probe_runner = lambda _: {'fire': False, 'state': {'fingerprint': 'v2'}}
     engine.tick()
@@ -102,7 +103,7 @@ def test_R2_url_held_match_survives_five_errors_pause_resume(engine):
 
 
 def test_R2_explicit_pause_preserves_held_match(engine):
-    session(engine, unanswered_count=2)
+    engine.policy = replace(engine.policy, max_model_wakes_per_day=0)
     w = arm(engine, 'subagent_done')
     o = pending(engine, w, 'e:match')
     engine.dispatch(o)
@@ -117,7 +118,7 @@ def test_R3_cap_reservation_releases_next_tick_before_midnight(engine):
     engine.ledger(timer, delivered=5)
     engine.tick()
     start(engine)
-    watcher = arm(engine, 'subagent_done')
+    watcher = arm(engine, 'subagent_done', creator='user', agent_edited=False)
     o = pending(engine, watcher, 'e:match')
     engine.tick()
     held = engine.store.get_occurrence(watcher.id, o.dedupe_key)
@@ -180,19 +181,20 @@ def test_N1_why_migrated_timestamp_is_before_v012(engine, monkeypatch):
 
 
 def test_N2_released_text_uses_latest_hold_reason(engine):
-    session(engine, unanswered_count=2)
-    w = arm(engine, 'subagent_done')
+    w = arm(engine, 'subagent_done', status='paused')
     o = pending(engine, w, 'e:match')
     engine.dispatch(o)
-    session(engine, unanswered_count=0)
-    engine.policy = replace(engine.policy, max_messages_per_day=0)
+    assert engine.store.get_occurrence(w.id, o.dedupe_key).held_reason == 'held_paused'
+    assert engine.tool.handle({'action': 'resume', 'id': w.id})['ok']
+    engine.policy = replace(engine.policy, max_model_wakes_per_day=0)
     engine.dispatch(engine.store.get_occurrence(w.id, o.dedupe_key))
     assert engine.store.get_occurrence(w.id, o.dedupe_key).held_reason == 'held_daily_cap'
-    engine.policy = replace(engine.policy, max_messages_per_day=6)
+    engine.policy = replace(engine.policy, max_model_wakes_per_day=24)
     engine.clock.advance(86400)
     engine.dispatch(engine.store.get_occurrence(w.id, o.dedupe_key))
     text = engine.ctx.calls[-1][0]
     assert 'daily cap' in text and "you hadn't replied" not in text
+    assert 'wake was paused' not in text
 
 
 def test_N3_released_started_expiry_keeps_normal_reason(engine):

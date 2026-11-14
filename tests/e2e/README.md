@@ -103,18 +103,18 @@ not prove real Telegram server/client rendering, notification delivery, live
 model quality/cost, long-running reliability, or customer readiness.
 
 E15 arms two agent nudges and a file watcher in one owner turn. After two
-unanswered deliveries, two observed file matches coalesce into one held pending
-occurrence retaining the latest match. An owner reply releases it once, with
-the hold reason in the model's wake text and one visible delivery. E16 checks
+unanswered deliveries, a file match still runs the watcher's turn, silently, with
+the hold in its wake text; its report is held, the report-back turn is skipped
+under the mute, and the owner's next turn is handed the report. Nothing visible
+is sent before the owner writes. E16 checks
 real prompt-usage route/cache touches, the create tool's cache line, and exactly
 one bounded `Cache:` line in the injected wake text. The fake route has unknown
 TTL; neither test establishes real cache warmth or price.
 
-The owner-at and muted-watcher cells print `E2E_LATENCY` JSON with raw
-due/match-to-visible seconds from the stand-in's receiving timestamp. A sampled
-wall/monotonic offset relates its clock to the DB timestamp. Watcher timing starts
-at the first observed match; designed gate holds are included. No latency
-threshold gates these cells yet; retain stdout to collect the samples.
+The owner-at cell prints `E2E_LATENCY` JSON with raw due-to-visible seconds
+from the stand-in's receiving timestamp. A sampled wall/monotonic offset relates
+its clock to the DB timestamp. No latency
+threshold gates this cell yet; retain stdout to collect the samples.
 
 `test_upstream.py` separately reproduces automatic background review after a
 stock plugin injects a turn. It disables heartbeat2, enables memory/skill tools,

@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import datetime
 
+from heartbeat2.model import PROBE_KINDS, EVENT_KINDS
 import pytest
 
 from heartbeat2 import governor
@@ -27,7 +28,10 @@ def assert_held_turn(e, w, reason, label, *, notify=False):
     held_line = (f'Messages are held right now ({label}). Your work still counts; '
                  "if the owner should hear about this, respond with notify=true, an outcome other than no_change, and a "
                  "plain-sentence summary: nothing is sent now, but HeartBeat keeps the summary and hands it back on the owner's "
-                 "next message or a later role or own-time turn that can send. Keep it in your notes too.")
+                 "next message"
+                 + ((', or in one report-back turn once messages can be sent' if reason != 'unanswered' else '')
+                    if w.kind in PROBE_KINDS | EVENT_KINDS else ' or a later role or own-time turn that can send')
+                 + '. Keep it in your notes too.')
     assert held_line in e.ctx.calls[-1][0]
     # A held turn reserves no message slot, so the count it shows is never off by one.
     delivered = e.store.daily_counts(KEY, e.policy.resolved_timezone())['delivered']
@@ -74,7 +78,7 @@ def test_silent_no_change_still_slows_and_pauses(engine):
     assert current.status == 'paused' and current.status_reason == 'governor:noop'
 
 
-def test_unanswered_holds_only_agent_recurring_messages(engine):
+def test_unanswered_holds_agent_recurring_and_watcher_messages(engine):
     e = engine
     session(e, unanswered_count=e.policy.max_unanswered)
     w = arm(e, 'every')
@@ -87,11 +91,11 @@ def test_unanswered_holds_only_agent_recurring_messages(engine):
     assert not e.store.list_occurrences(owner.id)[0].force_silent
     start(e)
     end(e)
+    e.clock.advance(600)
     watcher = arm(e, 'file', next_due_at=None)
     e.dispatch(pending(e, watcher))
-    o, = e.store.list_occurrences(watcher.id)
-    assert o.state == 'pending' and o.held_reason == 'held_unanswered'
-    assert len(e.ctx.calls) == 2
+    assert len(e.ctx.calls) == 3
+    assert_held_turn(e, watcher, 'unanswered', "the owner hasn't replied yet")
     e.policy = replace(e.policy, owner_silent_checkin=True)
     session(e, last_human_at=e.clock.now() - e.policy.checkin_after_hours * 3600 - 1)
     for kind, changes in [('at', {}), ('owner_silent', {'trigger_json': {'builtin': True}})]:

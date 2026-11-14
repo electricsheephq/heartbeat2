@@ -573,7 +573,7 @@ class Intake:
                             e.interrupt(o,'restart')
                             w=s.get_wake(wid)
                             s.cas_session(key,{'busy_since':None},busy_since=now,busy_epoch=e.epoch)  # this replay turn is running
-                        self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,invalid=True,replay=True)
+                        self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,untrusted=bool(o.payload_json) or bool(w.trigger_json.get('report_back')),invalid=True,replay=True)
                         stamp='resumed_turn:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
                         updates={'model_turns':w.model_turns+1}
                         if w.status!='paused' and (not w.status_reason or w.status in {'failed','done'}):
@@ -601,7 +601,10 @@ class Intake:
                 if w.status!='active': invalid=True
                 if w.cancel_on_reply and session.last_human_at is not None and o.claimed_at is not None and session.last_human_at>o.claimed_at:
                     invalid=True
-                flight=Flight(key,session_id,turn_id,wid,dedupe,attempt,bool(o.payload_json),invalid)
+                # A report-back relays watcher results, which come from outside text, so it is fenced like the watcher turns
+                # that wrote them; role and own-time turns are never shown those reports (#137).
+                untrusted=bool(o.payload_json) or bool(w.trigger_json.get('report_back'))
+                flight=Flight(key,session_id,turn_id,wid,dedupe,attempt,untrusted,invalid)
                 existing=self.flights.get(session_id)
                 if existing and existing.wake_id==wid and existing.dedupe_key==dedupe and existing.attempt==attempt:
                     return None
@@ -914,7 +917,8 @@ class Intake:
             silence=(not e.policy.enabled or not session.enabled or e.paused() or
                      o.force_silent or not o.notify) or (
                 o.outcome is None and response_text.strip().casefold() in BARE_SILENCE)
-            if o.notify and o.summary.strip() and o.summary_hash:
+            # Each report-back relays its own batch of held results, so an earlier relay's matching summary is no repeat (#137).
+            if o.notify and o.summary.strip() and o.summary_hash and not s.get_wake(o.wake_id).trigger_json.get('report_back'):
                 silence=silence or any(x.delivered and x.summary.strip() and x.summary_hash==o.summary_hash and x.ended_at is not None and
                     0<=e.clock.now()-x.ended_at<=86400 for x in s.list_occurrences(o.wake_id,state='done'))
             if silence:
@@ -968,11 +972,20 @@ class Intake:
             silenced=o.force_silent or not o.notify or not e.policy.enabled or not session.enabled or e.paused()
             delivered=bool(o.notify and not silenced and not f.owner_replied)
             if not s.finish(o.wake_id,o.dedupe_key,attempt=o.attempt,outcome=o.outcome or 'unreported',delivered=delivered,force_silent=silenced): return None
+            from .policy import is_watcher, holds_messages
+            from .store import HELD_REPORT_OUTCOMES
+            if (is_watcher(w) and holds_messages(w) and o.held_reason.startswith('message_held:')
+                    and o.notify and not delivered and o.summary.strip() and o.outcome in HELD_REPORT_OUTCOMES):
+                e.arm_report_back(key)
             shown=s.get_meta('report_shown:'+o.id)
+            settled=False
             if shown:
                 try:
                     items=json.loads(shown)
-                    if delivered: s.mark_reported(items)
+                    # A report-back turn exists to decide on these: an explicit silent verdict (respond with notify=false)
+                    # settles them too. A turn that never responded decided nothing, and notify defaults to false (#137).
+                    if delivered or (w.trigger_json.get('report_back') and o.outcome is not None and not o.notify):
+                        s.mark_reported(items); settled=True
                 except (ValueError,TypeError):
                     pass
                 s.set_meta('report_shown:'+o.id,'')
@@ -995,6 +1008,9 @@ class Intake:
                 done=s.get_occurrence(o.wake_id,o.dedupe_key)
                 governor.engagement(e,done,next_check=done.next_check_s)
             governor.finish(e,s.get_wake(o.wake_id),s.get_occurrence(o.wake_id,o.dedupe_key))
+            # A report-back lists at most five reports. Once it settled its list, the next one takes the rest; after
+            # governor.finish, which ends this one-shot (#137).
+            if settled and w.trigger_json.get('report_back') and s.held_reports(key): e.arm_report_back(key)
         e.signal()
         return None
 
