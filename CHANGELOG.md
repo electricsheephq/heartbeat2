@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.5 — 2026-11-14
+
+- **Cron and `every … at` wakes follow a time-zone change.** After the profile's time zone changes, each recurring wake with a local time moves to that local time in the new zone on the next check, rather than firing once at the old zone's time. After a move west it waits for the local time; after a move east it moves earlier, and when that local time has already passed today without a fire it fires once now. A wake fires once for each local time; a time already on the new zone's schedule never moves. One-time reminders keep their instant, and plain intervals keep their spacing. A failed read of the Hermes time zone keeps the zone in use rather than switching to the system's. `pulse update` is no longer needed after changing the zone (#170).
+
 ## 0.4.4 — 2026-11-14
 
 - **Own time in groups and topics runs only where you turn it on.** Each topic is a separate conversation with its own full context, so own time on by default in every topic multiplied the cost by the number of topics: in one group with 16 topics it ran in 9 of them within 12 hours and sent one message. Direct chats keep own time by default. In a group or topic, send `/pulse owntime on` where you want it. The same goes for a Matrix direct room, where Hermes can't tell one person from a few, and for a chat on a platform not yet checked; a Slack group DM can't be turned on yet (#169). `/pulse owntime off` turns it off anywhere. After upgrading, own time already armed in a group or topic you haven't turned on stops, and comes back when you turn it on there. If you sent `/pulse owntime on` in a topic with 0.4.2, send it again (#177).

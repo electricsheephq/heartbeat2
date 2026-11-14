@@ -16,7 +16,7 @@ import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat
-from .schedule import time_due, local_day, parse_duration, next_every
+from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every
 from . import governor
 
 LOG = logging.getLogger('heartbeat2')
@@ -435,8 +435,10 @@ class Poller:
                     s.cas_wake(w.id,'active',expected_version=w.version,**changes)
                     w=s.get_wake(w.id)
             if w.kind in TIME_KINDS:
+                tz=self.policy.resolved_timezone()
+                w=self.follow_zone(w,tz,now)
                 due=time_due(w,now=now,catch_up_s=self.policy.catch_up_hours*3600,
-                             timezone=self.policy.resolved_timezone(),jitter_unit=self.jitter(),**self.timing(w))
+                             timezone=tz,jitter_unit=self.jitter(),**self.timing(w))
                 if due:
                     if not (w.kind in RECURRING_KINDS and due.state=='pending' and s.list_occurrences(w.id,state='pending')):
                         s.add_occurrence(w.id,due.dedupe_key,state=due.state)
@@ -456,6 +458,30 @@ class Poller:
                 if not s.list_occurrences(w.id):
                     s.add_occurrence(w.id,f't:{w.deadline_at:.17g}',payload=[{'message':'deadline passed — nothing happened'}])
                 s.cas_wake(w.id,'active',expected_version=w.version,deadline_at=None)
+
+    def follow_zone(self,w,tz,now):
+        """A cron or `every … at` time set in another zone moves to the nearest of the wake's local times in this one (#170).
+
+        West, the stored time comes early: it moves on to the local time, which hasn't come yet. East, the local time comes
+        first: the wake moves back to it, or, when it has already passed and wasn't served, fires once now in its place.
+        Either way the wake fires once for that local time, then the scheduler carries on in the new zone.
+        """
+        due=w.next_due_at
+        if due is None: return w
+        around=local_neighbours(w,due,tz)
+        if around is None: return w
+        before,after=around
+        target=before if due-before<after-due else after
+        if target<=now:
+            if due<=now: return w  # Due either way: it fires now.
+            served=((w.last_fired_at is not None and w.last_fired_at>=target)
+                    or self.store.get_occurrence(w.id,f't:{target:.17g}') is not None)
+            # However late, like any overdue recurring time: the move is at most the zone shift, and waiting loses the day.
+            target=after if served else now
+        if target==due: return w
+        if not self.store.cas_wake(w.id,'active',expected_version=w.version,next_due_at=target): return w
+        self.log.info('heartbeat2 wake %s: next time %.0f is off its local schedule in this zone, now %.0f',w.id,due,target)
+        return self.store.get_wake(w.id)
 
     def cancel_non_gateway_builtins(self, *, own_time=False):
         for w in self.store.list_wakes():
