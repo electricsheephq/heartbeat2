@@ -16,7 +16,7 @@ import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm
-from .schedule import time_due, local_day, parse_duration, next_every, reanchored_due
+from .schedule import time_due, local_day, parse_duration, next_every, local_times, zone_key, same_local_time
 from . import governor
 
 LOG = logging.getLogger('heartbeat2')
@@ -262,6 +262,7 @@ class Poller:
             if not self.eligible(): return  # Probes can block; the home may be unserved by now.
             with s.atomic():
                 for w in s.list_wakes(): self.terminal_one_shot(w)
+                self.follow_timezone()
                 self.own_time()
                 self.keep_warm()
                 self.times()
@@ -406,19 +407,32 @@ class Poller:
         try: return self.probe_runner(w)
         except Exception: return {'error':'probe_failed'}
 
-    def reanchor(self,w,now):
-        """A future cron or daily `every … at` time from an earlier timezone moves to the current zone's time (#170)."""
-        try: due=reanchored_due(w,now=now,timezone=self.policy.resolved_timezone())
-        except ValueError: return w
+    def follow_timezone(self):
+        """Cron and `every … at` times are local wall times. When the effective zone changes (the plugin's setting, Hermes'
+        zone, TZ or the system's), each future one keeps its local date and time in the new zone (#170). Nothing is
+        recomputed, so every scheduling decision behind the time stays: minimum intervals, a governor slow-down and its
+        skipped times, multi-day strides. A time the move puts in the past fires on the next check, once."""
         s=self.store
-        if due is None or not s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due): return w
-        # Governor skips are cron times in the old zone; one that coincides with a new-zone time would swallow it.
-        # The slow-down itself is kept: the new time already counts the effective interval from the last fire.
-        for o in s.list_occurrences(w.id,state='skipped'):
-            if o.error=='governor' and o.dedupe_key.startswith('t:') and float(o.dedupe_key[2:])>now:
+        new=zone_key(self.policy.resolved_timezone())
+        old=s.get_meta('schedule_zone')
+        if old==new: return
+        s.set_meta('schedule_zone',new)
+        if not old or not new: return  # First check after an upgrade, or a zone without a name: nothing to translate from.
+        now,moved=self.clock.now(),0
+        for w in s.list_wakes():
+            if w.status not in {'active','paused','proposed'} or not local_times(w): continue
+            if w.next_due_at is not None and w.next_due_at>now:
+                due=same_local_time(w.next_due_at,old,new)
+                if due!=w.next_due_at and s.cas_wake(w.id,w.status,expected_version=w.version,next_due_at=due): moved+=1
+            # Governor skips are future cron times too; each keeps its local time so the slow-down skips the same fires.
+            for o in s.list_occurrences(w.id,state='skipped'):
+                if o.error!='governor' or not o.dedupe_key.startswith('t:') or float(o.dedupe_key[2:])<=now: continue
+                key=f't:{same_local_time(float(o.dedupe_key[2:]),old,new):.17g}'
+                if key==o.dedupe_key: continue
                 s.connection.execute("DELETE FROM occurrences WHERE wake_id=? AND dedupe_key=? AND state='skipped' AND error='governor'",(w.id,o.dedupe_key))
-        self.log.info('heartbeat2 wake %s moved to the current timezone: next due %.0f (was %.0f)',w.id,due,w.next_due_at)
-        return s.get_wake(w.id)
+                if s.add_occurrence(w.id,key,state='skipped'):
+                    s.connection.execute("UPDATE occurrences SET error='governor' WHERE wake_id=? AND dedupe_key=? AND state='skipped'",(w.id,key))
+        if moved: self.log.info('heartbeat2 time zone %s -> %s: %d wake times keep their local time',old,new,moved)
 
     def times(self):
         for w in self.store.list_wakes(status='active'):
@@ -449,7 +463,6 @@ class Poller:
                     s.cas_wake(w.id,'active',expected_version=w.version,**changes)
                     w=s.get_wake(w.id)
             if w.kind in TIME_KINDS:
-                w=self.reanchor(w,now)
                 due=time_due(w,now=now,catch_up_s=self.policy.catch_up_hours*3600,
                              timezone=self.policy.resolved_timezone(),jitter_unit=self.jitter(),**self.timing(w))
                 if due:

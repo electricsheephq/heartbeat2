@@ -2,7 +2,7 @@
 
 ## 0.4.2 — 2026-11-14
 
-- **Cron wakes follow a timezone change right away.** When the plugin's `timezone` setting, the profile's zone or Hermes' zone changed, a cron wake's next time stayed in the old zone until it had fired once. A daily 09:00 role could fire at 07:00 local time. Now, on the next check after the change (or after a restart), cron wakes and daily `every … at HH:MM` wakes move to the new zone's time, counted from their last fire. Times that are the same in both zones, interval wakes and one-time reminders are unchanged. A time that is already due fires once, as before (#170).
+- **Cron wakes follow a time-zone change right away.** When the plugin's `timezone` setting, Hermes' zone or the system's changed, a cron wake's next time stayed in the old zone until it had fired once, so a daily 09:00 role could fire at 07:00 local time. Now, on the next check after the change (or after a restart), each upcoming cron time and `every … at HH:MM` time keeps its local date and time in the new zone. Paused wakes and a slowed-down wake's skipped times move the same way. A time the change puts in the past fires on that check, once. Interval wakes and one-time reminders are unchanged. The zone is recorded on the first check after you upgrade, so a change made in the same restart as the upgrade isn't seen (#170).
 
 ## 0.4.1 — 2026-11-14
 
