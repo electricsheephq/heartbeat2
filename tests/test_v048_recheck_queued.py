@@ -257,7 +257,8 @@ def test_retargeted_probe_queues_the_same_result_from_its_new_target(engine):
     e.probes()
     queued = e.store.list_occurrences(w.id, state='pending')
     assert len(queued) == 1 and queued[0].dedupe_key != old.dedupe_key
-    # A cadence-only edit keeps the namespace: the same result folds into the queued row instead of adding one.
+    # A cadence-only edit keeps the namespace: with the queued row ended, the same result is still a duplicate.
+    assert e.store.cas_occurrence(w.id, queued[0].dedupe_key, 'pending', 'skipped')
     update(e, w, trigger={**trigger, 'command': ['git', 'log'], 'check_every': 120})
     e.clock.advance(8000)
     e.probes()
