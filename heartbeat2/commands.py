@@ -405,7 +405,7 @@ def handle(raw_args, runtime):
                 from .desk import cost_line
                 cost=cost_line(engine.store,key,engine.policy.resolved_timezone(),engine.policy)
                 if cost: lines.append(cost)
-                if engine.policy.own_time_hours or engine.store.get_meta('own_time_off:'+key)=='1':
+                if engine.policy.own_time_hours or engine.store.get_meta('own_time_off:'+key)=='1' or engine.store.get_meta('own_time_on:'+key)=='1':
                     lines.append('Own time: '+own_time_label(engine,key))
                 if held: lines.append(f'Held items: {held}')
                 if engine.settings_notice(): lines.append(engine.settings_notice())
@@ -560,19 +560,27 @@ def _keep_warm_line(engine, session, wake, counts):
 
 
 def own_time_label(engine, key):
-    """Whether own time runs in this chat, for /pulse owntime and status (#175)."""
+    """Whether own time runs in this chat, for /pulse owntime and status (#175, #177)."""
     hours = engine.policy.own_time_hours
     if not hours: return 'off for this profile (own_time_hours is 0 in settings)'
-    if engine.store.get_meta('own_time_off:'+key) == '1': return 'off in this chat (/pulse owntime on turns it back on)'
+    session = engine.store.get_session(key)
+    if session is None: return 'off: this chat has no session yet'
+    refusal = engine.own_time_refusal(session, key)
+    if refusal == 'chat_off': return 'off in this chat (/pulse owntime on turns it back on)'
+    if refusal == 'not_opted_in': return 'off in this group or topic until you turn it on (/pulse owntime on runs it here)'
+    if refusal == 'dm_only': return 'off here: dm_only is on, so own time runs only in direct chats'
     return f'on in this chat, about every {hours:g}h (/pulse owntime off turns it off here)'
 
 
 def _owntime(engine, key, rest):
-    """/pulse owntime on|off: own time in this one chat or topic (#175). Each topic of a group is its own chat."""
+    """/pulse owntime on|off: own time in this one chat or topic (#175). Each topic of a group is its own chat.
+
+    Direct chats have own time unless the owner turns it off; a group or topic only once the owner turns it on (#177)."""
     import hashlib
     with engine.store.atomic():
         if rest:
             engine.store.set_meta('own_time_off:'+key, '1' if rest == 'off' else '')
+            engine.store.set_meta('own_time_on:'+key, '1' if rest == 'on' else '')
         if rest == 'off':
             # Off takes effect now, not at the next check: a turn queued or handed to the gateway but not yet started never
             # starts (its turn arrives stale and stays silent). A turn already running finishes. A paused wake stays paused,

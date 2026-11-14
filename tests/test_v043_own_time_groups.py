@@ -1,5 +1,5 @@
-"""Own time runs wherever the agent may write, groups and topics included when dm_only is off, and the owner switches it
-per chat with /pulse owntime (#175; reverts 0.4.1's direct-chat-only rule)."""
+"""Own time runs in direct chats, and in groups and topics where the owner turned it on, when dm_only is off; the owner
+switches it per chat with /pulse owntime (#175 reverts 0.4.1's direct-chat-only rule; #177 makes groups opt-in)."""
 from dataclasses import replace
 from types import SimpleNamespace
 import hashlib
@@ -16,8 +16,9 @@ def own_id(key):
     return 'owntime_' + hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
-def group_chat(e, key=GROUP):
+def group_chat(e, key=GROUP, on=True):
     e.store.upsert_session(Session(key, 'telegram', 'group', 'team', 'gsid', e.clock.now(), e.clock.now(), 'episode'))
+    if on: e.store.set_meta('own_time_on:' + key, '1')  # the owner sent /pulse owntime on there (#177)
 
 
 def cancelled_by_041(e):
