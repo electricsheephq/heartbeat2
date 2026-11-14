@@ -2,7 +2,7 @@
 
 ## 0.4.4 — 2026-11-14
 
-- **Own time in groups and topics runs only where you turn it on.** Each topic is a separate conversation with its own full context, so own time on by default in every topic multiplied the cost by the number of topics: in one group with 16 topics it ran in 9 of them within 12 hours and sent one message. Direct chats keep own time by default. In a group or topic, send `/pulse owntime on` where you want it. The same goes for a Matrix direct room and a few platforms where Hermes can't tell a one-to-one chat from a small group; a Slack group DM can't be turned on yet (#169). `/pulse owntime off` turns it off anywhere. After upgrading, own time already armed in a group or topic you haven't turned on stops, and comes back when you turn it on there. If you sent `/pulse owntime on` in a topic with 0.4.2, send it again (#177).
+- **Own time in groups and topics runs only where you turn it on.** Each topic is a separate conversation with its own full context, so own time on by default in every topic multiplied the cost by the number of topics: in one group with 16 topics it ran in 9 of them within 12 hours and sent one message. Direct chats keep own time by default. In a group or topic, send `/pulse owntime on` where you want it. The same goes for a Matrix direct room, where Hermes can't tell one person from a few, and for a chat on a platform not yet checked; a Slack group DM can't be turned on yet (#169). `/pulse owntime off` turns it off anywhere. After upgrading, own time already armed in a group or topic you haven't turned on stops, and comes back when you turn it on there. If you sent `/pulse owntime on` in a topic with 0.4.2, send it again (#177).
 
 ## 0.4.3 — 2026-11-14
 
