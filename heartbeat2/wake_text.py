@@ -5,7 +5,7 @@ import json
 import re
 
 from .clock import Clock
-from .model import Wake, Occurrence, Session, TIME_KINDS
+from .model import Wake, Occurrence, Session, TIME_KINDS, PROBE_KINDS, EVENT_KINDS
 from .policy import owner_requested
 from .schedule import zone
 
@@ -98,7 +98,8 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
                     'daily_message_cap':"today's message limit"}
     if message_held in message_labels:
         lines.append(f'Messages are held right now ({message_labels[message_held]}). Your work still counts; '
-                     "if the owner should hear about this, respond with notify=true, an outcome other than no_change, and a plain-sentence summary: nothing is sent now, but HeartBeat keeps the summary and hands it back on the owner's next message or a later role or own-time turn that can send. Keep it in your notes too.")
+                     "if the owner should hear about this, respond with notify=true, an outcome other than no_change, and a plain-sentence summary: nothing is sent now, but HeartBeat keeps the summary and hands it back on the owner's next message or a later role or own-time turn that can send"
+                     + (", or in one report-back turn once messages can be sent" if wake.kind in PROBE_KINDS | EVENT_KINDS else '') + ". Keep it in your notes too.")
     if not wake.trigger_json.get('report_back') and (not session.first_notice_sent or wake.trigger_json.get('builtin')):
         lines.append('If you notify, end with one line saying they can say "stop checking in" or use /pulse off.')
     if cache_line: lines.append(escape_text(cache_line))

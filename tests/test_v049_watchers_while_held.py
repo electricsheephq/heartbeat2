@@ -79,18 +79,26 @@ def test_agent_match_runs_silently_and_report_back_obeys_hold(engine, reason):
     assert not e.store.get_meta(f'children:{w.id}/{o.dedupe_key}:{o.attempt}')
     expected = {'quiet_hours': ('quiet_hours', True, e.clock.now() + 1200),
                 'unanswered': ('unanswered', False, None),
-                'daily_message_cap': ('daily_message_cap', False, None)}[reason]
+                'daily_message_cap': ('held_daily_cap', True, None)}[reason]
     assert e.gate(back, pending, e.store.get_session(KEY)) == expected
     e.dispatch(pending)
     pending = e.store.get_occurrence(back.id, pending.dedupe_key)
     assert len(e.ctx.calls) == 1
-    assert pending.state == ('pending' if reason == 'quiet_hours' else 'skipped')
-    if reason != 'quiet_hours':
+    assert pending.state == ('skipped' if reason == 'unanswered' else 'pending')
+    if reason == 'unanswered':
+        # The mute skips it; the report waits for the owner's next message.
         assert e.store.get_wake(back.id).status == 'failed'
         assert e.store.held_reports(KEY) == [o]
         return
-    e.clock.advance(1200)
-    e.dispatch(pending)
+    if reason == 'daily_message_cap':
+        # The message cap holds it to the next local day, like a watcher, so the result still arrives.
+        assert pending.held_reason == 'held_daily_cap'
+        e.clock.advance(86400)
+        e.policy = replace(e.policy, max_messages_per_day=6)
+        assert e.gate(back, e.store.get_occurrence(back.id, pending.dedupe_key), e.store.get_session(KEY))[0] == ''
+    else:
+        e.clock.advance(1200)
+    e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key))
     text = e.ctx.calls[-1][0]
     assert SUMMARY in text and 'Held for the owner' in text
     assert 'stop checking in' not in text

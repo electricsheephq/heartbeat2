@@ -24,13 +24,16 @@ def test_realism_scenario(tmp_path, name):
         occurrence, = [o for o in profile['occurrences'] if o['wake_id'] == watcher['id']]
         assert occurrence['state'] == 'done' and occurrence['force_silent']
         assert occurrence['notify'] and occurrence['summary'] == 'Complete.' and not occurrence['delivered']
-        # The skipped report stays held past midnight; the human turn receives the muted report.
-        assert occurrence['held_reason'] == ('message_held:daily_message_cap' if name == 'caps-owner-bypass'
+        # Under the message cap the report-back waits for the next local day and delivers the report; under the mute it
+        # is skipped and the human turn receives the report.
+        assert occurrence['held_reason'] == ('reported:daily_message_cap' if name == 'caps-owner-bypass'
                                               else 'reported:unanswered')
         report, = [w for w in profile['wakes'] if w['trigger_json'].get('report_back')]
-        skipped, = [o for o in profile['occurrences'] if o['wake_id'] == report['id']]
-        assert skipped['state'] == 'skipped' and not skipped['delivered']
-        assert skipped['error'] == ('daily_message_cap' if name == 'caps-owner-bypass' else 'unanswered')
+        back, = [o for o in profile['occurrences'] if o['wake_id'] == report['id']]
+        if name == 'caps-owner-bypass':
+            assert back['state'] == 'done' and back['delivered']
+        else:
+            assert back['state'] == 'skipped' and not back['delivered'] and back['error'] == 'unanswered'
 
 
 def test_new_observation_and_state_bars_are_hard(tmp_path):

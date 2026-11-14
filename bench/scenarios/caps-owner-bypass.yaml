@@ -93,7 +93,6 @@ expectations:
     - 735
   forbidden_deliveries:
   - wake: watcher
-  - wake: report_97891b3ee734ead5
   bars:
     owner:
       deliveries: 1
@@ -117,13 +116,12 @@ expectations:
       model_wakes: 1
       status: done
       wake_fields: {}
-    # sha1(agent:telegram:dm:owner)[:16]; skipped under the cap, so no turn at midnight.
+    # sha1(agent:telegram:dm:owner)[:16]; held under the cap like a watcher, delivered on the next local day.
     report_97891b3ee734ead5:
-      deliveries: 0
-      model_wakes: 0
-      status: failed
-      wake_fields:
-        status_reason: skipped:daily_message_cap
+      deliveries: 1
+      model_wakes: 1
+      status: done
+      wake_fields: {}
     model-owner:
       deliveries: 1
       model_wakes: 1
@@ -150,7 +148,7 @@ expectations:
     - 1800
   - event: gate
     ref: report_97891b3ee734ead5
-    reason: daily_message_cap
+    reason: held_daily_cap
     window:
     - 3600
     - 3600

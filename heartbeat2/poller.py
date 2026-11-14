@@ -696,7 +696,8 @@ class Poller:
         cap='daily_model_cap' if totals['model_turns']>=self.policy.max_model_wakes_per_day else 'daily_message_cap' if totals['delivered']>=self.policy.max_messages_per_day else ''
         # Keep-warm pings are silent cache reads the owner turned on: they neither use nor count against wake turns.
         if cap and not is_keep_warm(w) and not (cap=='daily_message_cap' and message_held) and not (owner_class(w) and one_shot(w)):
-            if is_watcher(w):
+            # A report-back turn waits for the next local day like a watcher, so what was held still arrives (#137).
+            if is_watcher(w) or w.trigger_json.get('report_back'):
                 return 'held_daily_cap',True,None
             return cap,False,None
         flood=json.loads(self.store.get_meta('injections') or '[]')
