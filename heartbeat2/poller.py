@@ -476,11 +476,19 @@ class Poller:
                     self.cancel_occurrences(w.id,'settings',preserve_started=True)
         if not hours: return
         self.cancel_non_gateway_builtins(own_time=True)
+        # Own time is the agent's time with its owner: one direct chat, never a group (even with dm_only off), where it
+        # would multiply per chat and could speak to everyone there.
+        for w in s.list_wakes():
+            if not w.trigger_json.get('own_time') or w.status not in {'active','proposed','paused'}: continue
+            session=s.get_session(w.session_key)
+            if (session.chat_type if session is not None else w.chat_type)!='dm':
+                if s.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='not_dm'):
+                    self.cancel_occurrences(w.id,'not_dm',preserve_started=True)
         floor=max(self.policy.min_interval_minutes,self.policy.agent_ungated_floor_minutes)*60
         interval=max(hours*3600,floor)
         maximum=max(2*hours*3600,floor)
         for session in s.list_sessions():
-            if not deliverable_platform(session.platform): continue
+            if not deliverable_platform(session.platform) or session.chat_type!='dm': continue
             if session.last_human_at is None or not session.episode_id: continue
             wid='owntime_'+hashlib.sha256(session.session_key.encode()).hexdigest()[:16]
             w=s.get_wake(wid)
