@@ -1,6 +1,7 @@
 """Status and desk show the settings that shape what happens: item headroom (#171), the time zone and where it comes from (#172),
 and the quiet-hours range before it first holds a wake (#173)."""
 from dataclasses import replace
+from types import SimpleNamespace
 
 from heartbeat2 import commands
 from heartbeat2.desk import render_desk
@@ -103,7 +104,10 @@ def test_the_desk_shows_this_chats_quiet_override(runtime):
     assert 'quiet hours 01:00-02:00 (chat override, UTC)' in _desk(e)
     commands.handle('quiet for 3h', runtime)  # holds messages for 3h; the profile's range stays as it is
     desk = _desk(e)
-    assert 'quiet hours 22:00-08:00 (default, UTC), quiet until' in desk and '(chat override)' in desk
+    assert 'quiet hours 22:00-08:00 (default, UTC), quiet until 15:00 (chat override)' in desk  # the clock is 12:00
+    e.clock.advance(9 * 3600)  # 21:00: a 3h hold runs into the profile's quiet hours and lasts until they end at 08:00
+    commands.handle('quiet for 3h', runtime)
+    assert 'quiet until Mon 08:00 (chat override)' in _desk(e)  # the next morning
     commands.handle('quiet default', runtime)
     assert 'quiet hours 22:00-08:00 (default, UTC)' in _desk(e) and 'quiet until' not in _desk(e)
 
@@ -124,8 +128,18 @@ def test_the_zone_source_falls_back_to_tz(monkeypatch):
     assert Policy(timezone='', profile_timezone='Not/AZone').timezone_source() == ('Europe/Paris', 'TZ')
 
 
-def test_a_keyless_zone_gets_a_readable_name():
-    from heartbeat2.policy import zone_name
+def test_a_keyless_zone_is_named_for_itself_not_for_the_host(monkeypatch):
+    # A fixed zone from Hermes keeps its own name even when the host's /etc/localtime links elsewhere.
+    import os, sys
     from datetime import timezone, timedelta
-    name = zone_name(timezone(timedelta(hours=9), 'JST'), 0)
-    assert name and '<' not in name and 'ZoneInfo' not in name
+    real = os.path.realpath
+    monkeypatch.setattr(os.path, 'realpath', lambda p, *a, **k: '/usr/share/zoneinfo/Europe/Paris' if p == '/etc/localtime' else real(p, *a, **k))
+    jst = timezone(timedelta(hours=9), 'JST')
+    monkeypatch.setitem(sys.modules, 'hermes_time', SimpleNamespace(get_timezone=lambda: jst))
+    policy = Policy(timezone='', profile_timezone='')
+    assert policy.timezone_source() == ('JST', 'Hermes') and policy.resolved_timezone() is jst
+    # The system zone is named by the file it was read from.
+    monkeypatch.setitem(sys.modules, 'hermes_time', None)
+    monkeypatch.delenv('TZ', raising=False)
+    if os.path.exists('/etc/localtime'):
+        assert policy.timezone_source() == ('Europe/Paris', 'system')

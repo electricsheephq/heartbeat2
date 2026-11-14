@@ -55,17 +55,19 @@ def deliverable_platform(platform) -> bool:
     return platform in MESSAGING_PLATFORMS
 
 
-def zone_name(tz, now=0.0) -> str:
-    """A readable zone name: the IANA key, or for a keyless zone read from /etc/localtime the name it links to (#172)."""
+def zone_name(tz, now=0.0, *, localtime=False) -> str:
+    """A readable zone name (#172): the IANA key; for the zone read from /etc/localtime (localtime=True), the name that
+    file links to; otherwise the zone's own abbreviation. A missing key alone never says where a zone came from."""
     key = getattr(tz, "key", None)
     if isinstance(key, str) and key:
         return key
-    try:
-        path = os.path.realpath("/etc/localtime")
-        if "/zoneinfo/" in path:
-            return path.split("/zoneinfo/", 1)[1]
-    except OSError:
-        pass
+    if localtime:
+        try:
+            path = os.path.realpath("/etc/localtime")
+            if "/zoneinfo/" in path:
+                return path.split("/zoneinfo/", 1)[1]
+        except OSError:
+            pass
     try:
         return datetime.fromtimestamp(now, tz).tzname() or "local"
     except Exception:
@@ -258,7 +260,13 @@ class Policy:
                 return ZoneInfo(os.environ["TZ"].lstrip(":")).key, "TZ"
             except (ZoneInfoNotFoundError, ValueError):
                 pass
-        return zone_name(self.resolved_timezone(), self.clock.now()), "system"
+        # The same system zone resolved_timezone falls back to, read here directly: with a plugin pin set, that pin is what
+        # resolved_timezone returns, not the system zone.
+        try:
+            with open("/etc/localtime", "rb") as source:
+                return zone_name(ZoneInfo.from_file(source), self.clock.now(), localtime=True), "system"
+        except (OSError, ValueError):
+            return zone_name(datetime.fromtimestamp(self.clock.now()).astimezone().tzinfo, self.clock.now()), "system"
 
     def timezone_pin_notice(self) -> str:
         """A plugin `timezone` that differs from the zone Hermes sets: shown so a stale pin isn't mistaken for Hermes' zone (#172)."""
