@@ -203,3 +203,10 @@ def test_unrelated_session_is_not_taken_by_a_child_mapping(engine, command):
     engine.compression_tip = lambda sid: None
     assert engine.intake.flight_for('stranger', KEY) is None
     assert set(engine.intake.children) == {'child'}
+
+
+def test_manifest_declares_every_registered_hook():
+    import pathlib
+    import yaml
+    manifest = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] / 'plugin.yaml').read_text())
+    assert set(manifest['provides_hooks']) == set(HOOKS)
