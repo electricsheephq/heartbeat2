@@ -6,7 +6,7 @@ import json
 import pytest
 
 from heartbeat2.policy import cap_counts
-from heartbeat2.schedule import parse_at
+from heartbeat2.schedule import local_day, parse_at
 from test_engine import KEY, admit, arm, end, engine, session, start
 from test_v038 import react
 
@@ -20,7 +20,10 @@ def hold(e, reason):
     elif reason == 'unanswered':
         session(e, unanswered_count=e.policy.max_unanswered)
     else:
-        e.policy = replace(e.policy, max_messages_per_day=0)
+        # A positive cap another wake already spent today; the policy stays as it is across midnight.
+        e.policy = replace(e.policy, max_messages_per_day=1)
+        sent = arm(e, 'at', next_due_at=None, status='done')
+        e.store.add_ledger(local_day(e.clock.now(), 'UTC'), sent.id, delivered=1)
 
 
 def watch(e, message='90', **changes):
@@ -94,7 +97,6 @@ def test_agent_match_runs_silently_and_report_back_obeys_hold(engine, reason):
         # The message cap holds it to the next local day, like a watcher, so the result still arrives.
         assert pending.held_reason == 'held_daily_cap'
         e.clock.advance(86400)
-        e.policy = replace(e.policy, max_messages_per_day=6)
         assert e.gate(back, e.store.get_occurrence(back.id, pending.dedupe_key), e.store.get_session(KEY))[0] == ''
     else:
         e.clock.advance(1200)
@@ -245,3 +247,30 @@ def test_report_back_is_not_agent_mutable(engine):
         result = engine.tool.handle(dict(id=back.id, **request), session_id='sid')
         assert result == {'error': 'builtin_settings_owned', 'detail': detail}
     assert engine.store.get_wake(back.id) == back
+
+
+def test_report_back_ended_silently_settles_what_it_saw(engine):
+    e = engine
+    hold(e, 'quiet_hours')
+    w = watch(e)
+    o = finish_watch(e, w)
+    back, pending = queued_report(e)
+    e.clock.advance(1200)
+    e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key))
+    assert SUMMARY in e.ctx.calls[-1][0]
+    start(e)
+    # Nothing still mattered: the turn ends silently, and the owner's next message isn't handed the same report again.
+    assert end(e, 'no_change', False) == '[SILENT]'
+    assert not e.store.held_reports(KEY)
+    assert e.store.get_occurrence(w.id, o.dedupe_key).held_reason == 'reported:quiet_hours'
+
+
+@pytest.mark.parametrize('reason,promised', [('quiet_hours', True), ('daily_message_cap', True), ('unanswered', False)])
+def test_watcher_text_promises_report_back_only_where_one_can_run(engine, reason, promised):
+    e = engine
+    hold(e, reason)
+    w = watch(e)
+    match(e, w, muted=reason == 'unanswered')
+    text = e.ctx.calls[-1][0]
+    assert 'Messages are held right now' in text
+    assert ('one report-back turn once messages can be sent' in text) is promised
