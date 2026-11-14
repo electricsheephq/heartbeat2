@@ -74,7 +74,7 @@ def test_silent_no_change_still_slows_and_pauses(engine):
     assert current.status == 'paused' and current.status_reason == 'governor:noop'
 
 
-def test_unanswered_holds_only_agent_recurring_messages(engine):
+def test_unanswered_holds_agent_recurring_and_watcher_messages(engine):
     e = engine
     session(e, unanswered_count=e.policy.max_unanswered)
     w = arm(e, 'every')
@@ -87,11 +87,11 @@ def test_unanswered_holds_only_agent_recurring_messages(engine):
     assert not e.store.list_occurrences(owner.id)[0].force_silent
     start(e)
     end(e)
+    e.clock.advance(600)
     watcher = arm(e, 'file', next_due_at=None)
     e.dispatch(pending(e, watcher))
-    o, = e.store.list_occurrences(watcher.id)
-    assert o.state == 'pending' and o.held_reason == 'held_unanswered'
-    assert len(e.ctx.calls) == 2
+    assert len(e.ctx.calls) == 3
+    assert_held_turn(e, watcher, 'unanswered', "the owner hasn't replied yet")
     e.policy = replace(e.policy, owner_silent_checkin=True)
     session(e, last_human_at=e.clock.now() - e.policy.checkin_after_hours * 3600 - 1)
     for kind, changes in [('at', {}), ('owner_silent', {'trigger_json': {'builtin': True}})]:

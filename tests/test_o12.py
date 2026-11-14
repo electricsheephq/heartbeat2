@@ -117,7 +117,7 @@ def test_T5_requested_watcher_stays_owner_and_match_fires(engine, runtime, tmp_p
     assert len(engine.ctx.calls) == 1
 
 
-def test_T6_note_edit_revokes_requested_conversion_and_match_is_held(engine, runtime):
+def test_T6_note_edit_revokes_requested_conversion_and_holds_messages(engine, runtime):
     changed = conversion(engine, runtime, extra={'note': 'Agent instructions'})
     assert changed.agent_edited and not is_owner(changed)
     assert engine.tool.handle({'action': 'resume', 'id': changed.id}, session_id='sid')['ok']
@@ -125,8 +125,9 @@ def test_T6_note_edit_revokes_requested_conversion_and_match_is_held(engine, run
     engine.probe_runner = lambda _: {'fire': True, 'identity': 'match', 'message': 'Changed'}
     engine.tick()
     occurrence, = engine.store.list_occurrences(changed.id)
-    assert occurrence.state == 'pending' and occurrence.held_reason == 'held_unanswered'
-    assert engine.ctx.calls == []
+    assert occurrence.state == 'claimed' and occurrence.force_silent
+    assert occurrence.held_reason == 'message_held:unanswered'
+    assert len(engine.ctx.calls) == 1
 
 
 def test_T7_token_is_single_use(engine, runtime):

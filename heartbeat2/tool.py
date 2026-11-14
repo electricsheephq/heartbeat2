@@ -236,6 +236,7 @@ class Tool:
                     if action == 'update' and w.trigger_json.get('builtin') and any(k in args for k in ('trigger','until','babysit','pacing')):
                         return {'error':'builtin_settings_owned','detail':'Own time is set in Settings (own_time_hours).' if w.trigger_json.get('own_time')
                                 else "Keep-warm is the owner's: they turn it on and off with /pulse warm on|off." if w.trigger_json.get('keep_warm')
+                                else "A report-back turn is HeartBeat's; it ends on its own." if w.trigger_json.get('report_back')
                                 else 'The check-in is controlled in Settings.'}
                     gate = e.policy.mutation_gate(w, action=action, session_key=s.session_key,
                         created_in=created_in, new_kind=(args.get('trigger') or {}).get('kind'),
@@ -462,6 +463,8 @@ class Tool:
         text=' '.join(parts)
         if len(text)>240: text=text.replace('Wakes are at least ','Wakes at least ').replace(' min apart, so it can land a few minutes late.',' min apart; may land a few minutes late.')
         if len(text)>240: text=' '.join(x for x in parts if not x.startswith('Wakes are at least '))
+        if len(text)>240 and watcher and holds_messages(w):
+            text=text.replace('; if nothing happens by ', '; if no match by ')
         if len(text)>240 and w.status=='proposed' and watcher and len(parts)>2:
             # Before approval the filters matter most: drop the other notes first.
             text=' '.join(parts[:2])

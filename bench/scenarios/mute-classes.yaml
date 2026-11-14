@@ -1,6 +1,5 @@
 id: mute-classes
-title: Mute exempts owner classes, holds watcher once, and drops agent timer and built-in
-  check-in
+title: Mute exempts owner classes, silences watcher messages, and drops agent timer and built-in check-in
 cites:
 - 'B1 realism: Mute exempts owner classes, holds watcher once, and drops agent timer
   and built-in check-in'
@@ -73,9 +72,11 @@ expectations:
     - 735
   - wake: watcher
     window:
-    - 3700
-    - 3715
-  forbidden_deliveries: []
+    - 1800
+    - 1815
+  forbidden_deliveries:
+  - wake: watcher
+  - wake: report_97891b3ee734ead5
   bars:
     owner:
       deliveries: 1
@@ -95,10 +96,17 @@ expectations:
       wake_fields:
         status_reason: skipped:unanswered
     watcher:
-      deliveries: 1
+      deliveries: 0
       model_wakes: 1
       status: done
       wake_fields: {}
+    # The muted report-back is skipped; the owner's message receives the held summary.
+    report_97891b3ee734ead5:
+      deliveries: 0
+      model_wakes: 0
+      status: failed
+      wake_fields:
+        status_reason: skipped:unanswered
     checkin:
       deliveries: 0
       model_wakes: 0
@@ -113,10 +121,16 @@ expectations:
     - 1380
   - event: gate
     ref: watcher
-    reason: held_unanswered
+    reason: ''
     window:
     - 1800
     - 1800
+  - event: gate
+    ref: report_97891b3ee734ead5
+    reason: unanswered
+    window:
+    - 3600
+    - 3600
   - event: gate
     ref: checkin
     reason: unanswered

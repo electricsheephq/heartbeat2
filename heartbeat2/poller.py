@@ -5,6 +5,7 @@ cron/monitor.py; estop and busy ordering follows gateway/run_goals.py.
 """
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -23,7 +24,7 @@ LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
 PROBES_PER_TICK = 16
 FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
-    'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires'})
+    'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires','nothing_to_report'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
 # by another (for a startup replay: the crashed) process.
 LOCAL_EPOCHS = set()
@@ -548,6 +549,28 @@ class Poller:
                                fires=0,max_fires=None,babysit=False)
             if updates: s.cas_wake(w.id,w.status,expected_version=w.version,**updates)
 
+    def arm_report_back(self,session_key):
+        """One report-back turn per chat, shared by its held watcher results."""
+        s,now=self.store,self.clock.now()
+        with s.atomic():
+            session=s.get_session(session_key)
+            if session is None: return
+            wid='report_'+hashlib.sha1(session_key.encode()).hexdigest()[:16]
+            w=s.get_wake(wid)
+            if w and any(o.state in {'pending','claimed','started'} for o in s.list_occurrences(wid)): return
+            trigger={'at':datetime.fromtimestamp(now,timezone.utc).isoformat(),'builtin':True,'report_back':True}
+            if w is None:
+                s.create_wake(Wake(session_key,
+                    'Messages were held while you worked. Pass on what still matters from the list below in one short message, or end silently if nothing does.',
+                    'at',id=wid,platform=session.platform,chat_type=session.chat_type,chat_id=session.chat_id,
+                    armed_session_id=session.current_session_id,creator='agent',created_in='command',title='Report back',
+                    reason="An agent watcher's turn left a report while messages were held.",
+                    trigger_json=trigger,next_due_at=now))
+            elif w.status in {'active','done','failed','cancelled','expired'}:
+                # A skipped one-shot has status failed; a later watcher report can arm it again.
+                s.cas_wake(w.id,w.status,expected_version=w.version,status='active',status_reason='',
+                           next_due_at=now,armed_session_id=session.current_session_id,trigger_json=trigger)
+
     def keep_warm(self):
         """Queue one silent ping per cache touch, just before the chat's prompt cache would expire (#163)."""
         for w in self.store.list_wakes(status='active'):
@@ -603,7 +626,7 @@ class Poller:
             s.add_occurrence(w.id,'s:'+session.episode_id)
 
     def message_hold_reason(self,w,s):
-        """Agent recurring work may continue while its messages are held."""
+        """Agent recurring work and watchers may continue while their messages are held."""
         if s is None or not holds_messages(w):
             return ''
         from .commands import quiet_until
@@ -630,6 +653,8 @@ class Poller:
             plan=keep_warm_plan(self.store,s,self.policy,now)
             # A real turn since this ping was queued already warmed the cache, or the cache went cold, or the chat rests.
             if 'due_at' not in plan or o.dedupe_key!=keep_warm_key(plan['touch']): return 'keep_warm_not_needed',False,None
+        elif w.trigger_json.get('report_back'):
+            if not self.store.held_reports(w.session_key): return 'nothing_to_report',False,None
         elif w.trigger_json.get('builtin'):
             if not self.policy.owner_silent_checkin: return 'setting_off',True,None
             after=self.policy.checkin_after_hours*3600*(2 if w.ignored_streak else 1)
@@ -659,7 +684,7 @@ class Poller:
                 and self.store.agent_cost_today(w.session_key,self.policy.resolved_timezone())['cost_microusd']/1e6
                     >=self.policy.daily_cost_limit_usd):
             return 'daily_cost_cap',False,None
-        # Message gates silence agent recurring work; spend and dispatch gates
+        # Message gates silence agent recurring work and watchers; spend and dispatch gates
         # still apply. Other wakes retain the existing hold/drop ordering.
         message_held=self.message_hold_reason(w,s)
         from .commands import quiet_until
@@ -748,7 +773,7 @@ class Poller:
             s.set_meta('provider_health',json.dumps(health))
         from .desk import held_report_lines
         reports=''
-        if (w.role or w.trigger_json.get('own_time')) and not message_held and not o.force_silent:
+        if (w.role or w.trigger_json.get('own_time') or w.trigger_json.get('report_back')) and not message_held and not o.force_silent:
             report_lines,shown=held_report_lines(s,w.session_key)
             if report_lines:
                 reports='\n'.join(['Held for the owner (their limits held these earlier). If you message them this turn, include what still matters:', *report_lines])

@@ -40,7 +40,7 @@ Put your agent in charge of something and it keeps working on it on its own time
 
 - **Roles it owns.** "You're in charge of the release notes." A role is a standing responsibility with a charter, a notebook the agent keeps between turns, and a rhythm the agent sets itself. It doesn't expire on a timer. You can hand one over, or the agent can take one on and tell you.
 - **Its own time.** Turn on own time and the agent gets regular turns with no assigned task. It looks at its desk (its roles, what's due, what it noticed, what budget is left) and decides: work on a role, follow something up, set up a watcher, tidy its notes or memory, or rest.
-- **Follow-ups and watchers.** A follow-up at a set time, a recurring check, a check-in after a long silence, or a deterministic watcher on a file, process, URL, read-only command or Hermes event. A watcher costs no model call until its condition is met.
+- **Follow-ups and watchers.** A follow-up at a set time, a recurring check, a check-in after a long silence, or a deterministic watcher on a file, process, URL, read-only command or Hermes event. A watcher costs no model call until its condition is met. An agent watcher still looks right away while messages are held, then reports what matters once messages can be sent. Owner watchers wait as before.
 - **Same conversation, same model.** Every wake is a turn in the chat it belongs to, on that chat's own model. There is no side model, separate cron session or subagent.
 - **Quiet work counts.** A turn that researches, writes or prepares something without messaging you is real progress. Only wakes that keep finding nothing to do slow down, then pause and ask you once.
 - **You set the budgets.** Turns per day, an optional daily priced-spend limit, turns per role, messages per day, the unanswered mute and quiet hours are your settings. They hold back messages and spending, not initiative: while you're away or asleep the agent can keep working, and it tells you what matters when you're back. That work still uses turns: the agent's recurring work, roles and own time keep running (and billing) under the mute and quiet hours. Turn limits and the priced-spend check apply before each turn; the spend limit cannot stop a turn already running, and unpriced calls are not counted. Roles and own time don't expire on a timer. The agent can tighten its own limits but never widen yours.
@@ -87,7 +87,7 @@ The wake runs inside your conversation. If you had written "sent it" at 15:10, t
 >
 > *02:10, after 14 unchanged checks that cost no model turns:* **Agent:** The nightly build failed in `tests/test_api.py` (3 failures, all timeouts). Want me to dig in this morning?
 
-During quiet hours that message waits until they end, unless you marked the watcher urgent and allowed urgent wakes through.
+During quiet hours the agent still looks right away, silently, within its turn and spend limits. One report-back turn per chat passes on what still matters once messages can be sent. Owner watchers wait until quiet hours end as before, unless you marked the watcher urgent and allowed urgent wakes through.
 
 **A pointless wake that catches itself.** Say the agent set up an hourly "check the inbox" wake. After three empty checks it starts stretching the interval, and after six it pauses itself. The next time you talk:
 > **Agent:** I paused "check the inbox": six checks in a row found nothing. Keep, slow, stop, or turn it into a watcher? (`/pulse keep|slow|stop|watch w_3f2a`)

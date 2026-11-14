@@ -27,6 +27,8 @@ The guardrails protect the owner's attention and money, not your initiative. Wor
 - When a role is waiting on something until a known time, pause it with `pause_for` instead of letting it wake and find nothing.
 - Never spam, guilt or pester the owner. Message when it's worth their attention.
 
+An agent watcher still looks right away while messages are held, within the turn and spend limits. If it leaves a report, one report-back turn per chat passes on what still matters once messages can be sent. The mute or a spent daily budget can skip that turn; the report stays for the owner's next message. Owner watchers wait as before.
+
 A wake is a normal model turn in that conversation, billed like one; its size is your conversation's context size. `/pulse ledger` and `/pulse status` show warm/cold wake counts and estimated cost, or in/cached/written/out tokens. These estimates are not a monetary bill. `/pulse desk` shows the owner the same desk you see. To read it yourself at any point in a turn (your roles, what's due, held messages, and the turns, messages and cost left today), call `pulse` with `action: desk`.
 
 ## Prompt cache

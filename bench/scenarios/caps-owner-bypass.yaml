@@ -1,6 +1,5 @@
 id: caps-owner-bypass
-title: Saturated daily messages preserve owner classes and hold watcher until the
-  next local day
+title: Saturated daily messages preserve owner classes while agent watcher works silently
 cites:
 - 'B1 realism: Saturated daily messages preserve owner classes and hold watcher until
   the next local day'
@@ -82,8 +81,8 @@ expectations:
     - 735
   - wake: watcher
     window:
-    - 43200
-    - 43215
+    - 1800
+    - 1815
   - wake: model-owner
     window:
     - 60
@@ -92,7 +91,9 @@ expectations:
     window:
     - 720
     - 735
-  forbidden_deliveries: []
+  forbidden_deliveries:
+  - wake: watcher
+  - wake: report_97891b3ee734ead5
   bars:
     owner:
       deliveries: 1
@@ -112,10 +113,17 @@ expectations:
       wake_fields:
         status_reason: skipped:daily_message_cap
     watcher:
-      deliveries: 1
+      deliveries: 0
       model_wakes: 1
       status: done
       wake_fields: {}
+    # sha1(agent:telegram:dm:owner)[:16]; skipped under the cap, so no turn at midnight.
+    report_97891b3ee734ead5:
+      deliveries: 0
+      model_wakes: 0
+      status: failed
+      wake_fields:
+        status_reason: skipped:daily_message_cap
     model-owner:
       deliveries: 1
       model_wakes: 1
@@ -136,10 +144,16 @@ expectations:
     - 1380
   - event: gate
     ref: watcher
-    reason: held_daily_cap
+    reason: ''
     window:
     - 1800
     - 1800
+  - event: gate
+    ref: report_97891b3ee734ead5
+    reason: daily_message_cap
+    window:
+    - 3600
+    - 3600
 heartbeat_checklist:
 - ref: owner
   session: owner

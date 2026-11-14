@@ -18,6 +18,19 @@ def test_realism_scenario(tmp_path, name):
     assert scenario['baseline_interval_s'] > 0
     result = simulate(scenario, tmp_path)
     assert not result['failures'], result['failures']
+    if name in {'caps-owner-bypass', 'mute-classes'}:
+        profile, = result['database'].values()
+        watcher, = [w for w in profile['wakes'] if w['ref'] == 'watcher']
+        occurrence, = [o for o in profile['occurrences'] if o['wake_id'] == watcher['id']]
+        assert occurrence['state'] == 'done' and occurrence['force_silent']
+        assert occurrence['notify'] and occurrence['summary'] == 'Complete.' and not occurrence['delivered']
+        # The skipped report stays held past midnight; the human turn receives the muted report.
+        assert occurrence['held_reason'] == ('message_held:daily_message_cap' if name == 'caps-owner-bypass'
+                                              else 'reported:unanswered')
+        report, = [w for w in profile['wakes'] if w['trigger_json'].get('report_back')]
+        skipped, = [o for o in profile['occurrences'] if o['wake_id'] == report['id']]
+        assert skipped['state'] == 'skipped' and not skipped['delivered']
+        assert skipped['error'] == ('daily_message_cap' if name == 'caps-owner-bypass' else 'unanswered')
 
 
 def test_new_observation_and_state_bars_are_hard(tmp_path):

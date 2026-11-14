@@ -931,6 +931,11 @@ class Intake:
             silenced=o.force_silent or not o.notify or not e.policy.enabled or not session.enabled or e.paused()
             delivered=bool(o.notify and not silenced and not f.owner_replied)
             if not s.finish(o.wake_id,o.dedupe_key,attempt=o.attempt,outcome=o.outcome or 'unreported',delivered=delivered,force_silent=silenced): return None
+            from .policy import is_watcher, holds_messages
+            from .store import HELD_REPORT_OUTCOMES
+            if (is_watcher(w) and holds_messages(w) and o.held_reason.startswith('message_held:')
+                    and o.notify and not delivered and o.summary.strip() and o.outcome in HELD_REPORT_OUTCOMES):
+                e.arm_report_back(key)
             shown=s.get_meta('report_shown:'+o.id)
             if shown:
                 try:
