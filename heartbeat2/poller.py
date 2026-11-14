@@ -229,11 +229,16 @@ class Poller:
     def recheck_pending(self,old,new):
         target_changed=any(old.trigger_json.get(k)!=new.trigger_json.get(k)
                            for k in ('path','url','command','pattern','pid','cwd','fire_on'))
-        supersede=(old.kind!=new.kind and old.kind in PROBE_KINDS | EVENT_KINDS
+        watchers=PROBE_KINDS | EVENT_KINDS
+        supersede=(old.kind!=new.kind and (old.kind in watchers or new.kind in watchers)
                    or old.kind==new.kind and old.kind in PROBE_KINDS and target_changed)
         refilter=(old.kind==new.kind and new.kind in EVENT_KINDS
                   and any(old.trigger_json.get(k)!=new.trigger_json.get(k) for k in ('emojis','message_id','task_id','board')))
         if not supersede and not refilter: return
+        # A wider filter still matches every event folded into a held count; only a narrower one makes it unknowable.
+        ot,nt=old.trigger_json,new.trigger_json
+        widened=(all(nt.get(k) is None or nt.get(k)==ot.get(k) for k in ('message_id','task_id','board'))
+                 and (not nt.get('emojis') or bool(ot.get('emojis')) and set(ot['emojis'])<=set(nt['emojis'])))
         for o in self.store.list_occurrences(old.id,state='pending'):
             reason='trigger_changed'
             if refilter:
@@ -241,7 +246,7 @@ class Poller:
                 kept=[p for p in o.payload_json if not isinstance(p,dict) or event_matches(new,p)]
                 if kept:
                     updates={'payload_json':kept} if kept!=o.payload_json else {}
-                    if o.held_since is not None: updates['held_matches']=len(kept)
+                    if o.held_since is not None and not widened: updates['held_matches']=len(kept)
                     if updates: self.store.update_occurrence(old.id,o.dedupe_key,'pending',**updates)
                     continue
                 reason='filter_changed'
@@ -716,6 +721,9 @@ class Poller:
         # The served set can shrink mid-tick; an unserved home's wake stays untouched for its own gateway.
         if not self.eligible(): return
         s=self.store
+        # The tick lists occurrences before this transaction; act on the stored row, never a stale copy (#149).
+        o=s.get_occurrence(o.wake_id,o.dedupe_key)
+        if o is None or o.state!='pending': return
         w=s.get_wake(o.wake_id)
         session=s.get_session(w.session_key)
         reason,defer,until=self.gate(w,o,session)

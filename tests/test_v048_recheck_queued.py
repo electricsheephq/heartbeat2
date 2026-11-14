@@ -195,3 +195,49 @@ def test_held_count_survives_a_trigger_edit_that_keeps_the_filters(engine):
     assert e.store.get_wake(w.id).trigger_json != w.trigger_json
     result = e.store.get_occurrence(w.id, old.dedupe_key)
     assert (result.state, result.held_matches, result.payload_json) == ('pending', 2, old.payload_json)
+
+
+def test_dispatch_uses_the_stored_occurrence_not_the_ticks_copy(engine):
+    e = engine
+    e.policy = replace(e.policy, max_model_wakes_per_day=0)
+    w = reaction(e, emojis=['yes', 'no'])
+    react(e, 'A', 'yes')
+    react(e, 'B', 'no')
+    stale = e.store.list_occurrences(w.id, state='pending')[0]
+    assert [p['message_id'] for p in stale.payload_json] == ['A', 'B']
+    update(e, w, trigger={'kind': 'reaction', 'emojis': ['yes']})
+    e.dispatch(stale)
+    result = e.store.get_occurrence(w.id, stale.dedupe_key)
+    assert result.state == 'pending' and result.held_reason == 'held_daily_cap'
+    assert [p['message_id'] for p in result.payload_json] == ['A'] and result.held_matches == 1
+    superseded = e.store.get_occurrence(w.id, stale.dedupe_key)
+    e.store.cas_occurrence(w.id, superseded.dedupe_key, 'pending', 'superseded', error='test')
+    e.dispatch(stale)
+    assert e.store.get_occurrence(w.id, stale.dedupe_key).state == 'superseded' and not e.ctx.calls
+
+
+def test_time_wake_turned_watcher_drops_its_queued_time(engine):
+    e = engine
+    w = arm(e, 'every', trigger_json={'kind': 'every', 'every': '1h'}, next_due_at=e.clock.now() + 3000)
+    o = pending(e, w, 't:manual')
+    update(e, w, trigger={'kind': 'reaction', 'emojis': ['yes']})
+    result = e.store.get_occurrence(w.id, o.dedupe_key)
+    assert (result.state, result.error, result.force_silent) == ('superseded', 'trigger_changed', True)
+    e.tick()
+    assert not e.ctx.calls
+
+
+@pytest.mark.parametrize('emojis', [['yes', 'no'], ['no', 'yes'], []])
+def test_widened_filter_keeps_the_held_count(engine, emojis):
+    e = engine
+    e.policy = replace(e.policy, max_model_wakes_per_day=0)
+    w = reaction(e, emojis=['yes'])
+    react(e, 'A', 'yes')
+    e.dispatch(e.store.list_occurrences(w.id)[0])
+    react(e, 'B', 'yes')
+    react(e, 'C', 'yes')
+    old = e.store.list_occurrences(w.id)[0]
+    assert old.held_matches == 3
+    update(e, w, trigger={'kind': 'reaction', 'emojis': emojis})
+    result = e.store.get_occurrence(w.id, old.dedupe_key)
+    assert (result.state, result.held_matches) == ('pending', 3)
