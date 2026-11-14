@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.7 — 2026-11-14
+
+- **Changing a watcher's filter rechecks what it has queued.** After `pulse update` changes a watcher's reaction emojis or message, or its kanban task or board, events queued for its next turn that no longer match are dropped. A turn left with none ends silently, and the watcher's deadline notice still comes if nothing else matches. Changing a watcher's kind, or what a check watches (path, URL, command or pattern), ends a turn queued from the old trigger, including a time tick queued before a wake became a watcher; the same result from the new target then counts as new. Edits to the note, deadline or check interval leave queued turns alone, and a turn already running is never touched (#149).
+
+## 0.4.6 — 2026-11-14
+
+- **A delegate's calls keep the wake turn's limits.** When a wake turn starts a delegate, the delegate runs under its own session. Its `pulse` calls already counted as part of the wake turn while that turn was running. They now still do after the owner sends `/new`, switches session, or pauses or cancels the wake mid-turn, and after the delegate's own context is compressed. Before, they counted as the owner's own turn, so wake-turn limits such as the budget clamp didn't apply. Once the wake turn ends, a delegate still running falls back to the earlier rules (#120).
+
 ## 0.4.5 — 2026-11-14
 
 - **Cron and `every … at` wakes follow a time-zone change.** After the profile's time zone changes, each recurring wake with a local time moves to that local time in the new zone on the next check, rather than firing once at the old zone's time. After a move west it waits for the local time; after a move east it moves earlier, and when that local time has already passed today without a fire it fires once now. A wake fires once for each local time; a time already on the new zone's schedule never moves. One-time reminders keep their instant, and plain intervals keep their spacing. A failed read of the Hermes time zone keeps the zone in use rather than switching to the system's. `pulse update` is no longer needed after changing the zone (#170).

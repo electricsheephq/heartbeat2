@@ -280,15 +280,50 @@ class Intake:
     def __init__(self,engine):
         self.engine=engine
         self.flights={}
+        self.children={}
         self.bindings={}
         self.turns={}
         self.anchors={}
         self.inbounds=set()
         self.owner_turns={}
 
+    @fail_open
+    def subagent_start(self,parent_session_id='',child_session_id='',**_):
+        if not parent_session_id or not child_session_id: return None
+        # Delegates start on their own threads: hold the in-process lock that flight_for and the turn-end prunes run
+        # under, without a SQLite transaction another process could keep waiting.
+        with self.engine.store.thread_lock:
+            flight=self._child(parent_session_id) or self.flights.get(parent_session_id)
+            if flight is None:
+                key=self.bindings.get(parent_session_id)
+                if key: flight=self.flight_for(parent_session_id,key)
+            if flight is not None: self.children[child_session_id]=flight
+        return None
+
+    def _drop_children(self,flight):
+        """Forget the delegates of one ended flight, in place, so another parent's new delegate is never lost."""
+        if flight is None: return
+        for sid,f in list(self.children.items()):
+            if f is flight: self.children.pop(sid,None)
+
+    def _child(self,sid):
+        """A delegate's flight, following the delegate's own compression to its new session id."""
+        f=self.children.get(sid)
+        if f is None and sid and self.children and sid not in self.bindings and sid not in self.flights:
+            for old in list(self.children):
+                if self.engine.compression_tip(old)!=sid: continue
+                f=self.children.pop(old,None)
+                if f is not None: self.children[sid]=f
+                break
+        return f
+
     def flight_for(self,sid,key):
         # Tools in delegate children inherit the key, but have a different id.
         self._follow(sid)
+        f=self._child(sid)
+        if f is not None:
+            if f.session_key==key and any(x is f for x in self.flights.values()): return f
+            self.children.pop(sid,None)  # Its flight ended or belongs to another chat.
         for f in self.flights.values():
             if f.session_key!=key: continue
             o=self.engine.store.get_occurrence(f.wake_id,f.dedupe_key)
@@ -589,7 +624,8 @@ class Intake:
                     elif tip is not None:
                         self._session_switch(w,session_id)
             # Human turn context never turns a model call into a wake.
-            self.flights.pop(session_id,None)
+            flight=self.flights.pop(session_id,None)
+            self._drop_children(flight)
             if not s.get_meta('human_context:'+key): return None
             s.set_meta('human_context:'+key,'')
             lines=[]
@@ -906,6 +942,7 @@ class Intake:
             if session and session.busy_epoch in (None,'',e.epoch):
                 s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             self.flights.pop(session_id,None)
+            self._drop_children(f)
             shown=s.get_meta('owner_report:'+session_id)
             if shown:
                 if f is None and not (failed or interrupted or completed is False):

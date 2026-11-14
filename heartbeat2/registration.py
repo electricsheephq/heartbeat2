@@ -18,7 +18,7 @@ _GUARD=threading.RLock()
 HOOKS=('pre_gateway_dispatch','gateway_platform_event','pre_llm_call',
        'pre_api_request','post_api_request','transform_llm_output','on_session_end','agent_loop_stopped',
        'on_session_reset','kanban_task_completed','kanban_task_blocked',
-       'on_kanban_worker_exited','subagent_stop','api_request_error')
+       'on_kanban_worker_exited','subagent_start','subagent_stop','api_request_error')
 EVENTS={'kanban_task_completed':'kanban_completed','kanban_task_blocked':'kanban_blocked',
         'on_kanban_worker_exited':'kanban_worker_exited','subagent_stop':'subagent_done',
         'api_request_error':'api_error'}
