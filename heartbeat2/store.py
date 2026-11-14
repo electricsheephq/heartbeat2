@@ -217,6 +217,11 @@ class Store:
         with self._lock:
             self.connection.close()
 
+    @property
+    def thread_lock(self):
+        """The in-process lock atomic() holds, for in-memory state that must never wait on SQLite."""
+        return self._lock
+
     @contextmanager
     def atomic(self):
         """Compose table writes atomically; nested calls use rollback savepoints."""

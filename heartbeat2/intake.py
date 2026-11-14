@@ -290,8 +290,9 @@ class Intake:
     @fail_open
     def subagent_start(self,parent_session_id='',child_session_id='',**_):
         if not parent_session_id or not child_session_id: return None
-        # Delegates start on their own threads: hold the store lock that flight_for and the turn-end prunes run under.
-        with self.engine.store.atomic():
+        # Delegates start on their own threads: hold the in-process lock that flight_for and the turn-end prunes run
+        # under, without a SQLite transaction another process could keep waiting.
+        with self.engine.store.thread_lock:
             flight=self._child(parent_session_id) or self.flights.get(parent_session_id)
             if flight is None:
                 key=self.bindings.get(parent_session_id)

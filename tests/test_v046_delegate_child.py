@@ -261,3 +261,21 @@ def test_subagent_start_waits_for_the_store_lock(engine):
         assert t.is_alive() and 'child' not in engine.intake.children
     t.join(2)
     assert not t.is_alive() and engine.intake.children['child'] is flight
+
+
+def test_subagent_start_does_not_wait_on_another_processs_database_lock(engine, command):
+    import sqlite3
+    import time
+    w, flight = running_role(engine)
+    other = sqlite3.connect(str(engine.store.path), timeout=0, isolation_level=None)
+    try:
+        other.execute('BEGIN IMMEDIATE')
+        began = time.monotonic()
+        engine.intake.subagent_start(parent_session_id='sid', child_session_id='child')
+        assert time.monotonic() - began < 1
+        assert engine.intake.children.get('child') is flight
+    finally:
+        other.execute('ROLLBACK')
+        other.close()
+    assert not command('pause ' + w.id).startswith('Error:')
+    assert_wake_limits(engine, w)
