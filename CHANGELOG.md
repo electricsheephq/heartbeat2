@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 — 2026-11-14
+
+- **Own time runs in groups and topics again, and you choose where.** 0.4.1 limited own time to direct chats, which took it away from owners who run their agent in a private group with topics. Own time now follows `dm_only` again: with `dm_only` off, it runs in groups and topics too, under the same message caps, quiet hours and spend limits. `/pulse owntime off` turns it off in one chat or topic, and `/pulse owntime on` turns it back on. Each topic counts as its own chat. `/pulse status` shows whether own time is on in the chat. Own-time turns that 0.4.1 cancelled come back on their own (#175).
+
 ## 0.4.1 — 2026-11-14
 
 - **Own time runs in direct chats only.** With `dm_only` off, own time used to arm in every chat where you had written, group chats included, so it multiplied per chat and could speak to everyone in a group. It now arms only in direct chats. Own-time turns already set up in group chats are cancelled, and nothing else changes.
