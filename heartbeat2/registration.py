@@ -70,7 +70,9 @@ class Runtime:
         with self._policy_lock,home_scope(self.home):
             settings={f.name:self.ctx.get_config(f.name,getattr(Policy(),f.name))
                       for f in fields(Policy) if f.name not in {'clock','profile_timezone'}}
-            profile=''
+            # A failed lookup keeps the last zone rather than flapping to the system's: every cron and `every … at` time
+            # follows a zone change (#170), so a transient one would move them.
+            profile=self._last_good.profile_timezone if self._last_good is not None else ''
             try:
                 from hermes_time import get_timezone_name
                 profile=get_timezone_name()

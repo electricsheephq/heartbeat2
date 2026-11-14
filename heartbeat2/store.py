@@ -21,7 +21,7 @@ from typing import Any
 from .clock import Clock
 from .model import (Wake, Occurrence, Session, KINDS, WAKE_STATUSES,
                     TERMINAL_OCCURRENCE_STATES)
-from .schedule import local_day
+from .schedule import local_day, local_times
 
 SCHEMA_VERSION = 1
 HELD_REPORT_OUTCOMES = frozenset({'progress', 'done', 'needs_attention', 'blocked'})
@@ -311,12 +311,23 @@ class Store:
                                     (candidate,))
             return self.get_meta('marker_secret')
 
+    # Set by the poller: the effective zone's name. A cron or `every … at` time is a local wall time, so each write of one
+    # records the zone it was computed in; a later zone change then moves exactly the times computed elsewhere (#170).
+    write_zone = None
+
+    def _stamp_zone(self, wake: Wake):
+        if self.write_zone is None or wake.next_due_at is None or not local_times(wake): return
+        try: name = self.write_zone()
+        except Exception: return
+        self.set_meta('zone:' + wake.id, name)
+
     def create_wake(self, wake: Wake) -> Wake:
         _validate_wake(wake)
         now = self.clock.now()
         wake = replace(wake, created_at=now, updated_at=now, version=0)
         with self.atomic():
             self._insert_record("wakes", wake)
+            self._stamp_zone(wake)
         return wake
 
     def get_wake(self, wake_id: str) -> Wake | None:
@@ -343,11 +354,14 @@ class Store:
             if wake is None or wake.status != expected_status or (expected_version is not None and wake.version != expected_version):
                 return False
             _validate_wake(replace(wake, **updates))
+            changed = replace(wake, **updates)
             updates["updated_at"] = self.clock.now()
             assignments = ",".join(f"{name}=?" for name in updates)
             values = [_encode(k, v) for k, v in updates.items()]
-            return self.connection.execute(f"UPDATE wakes SET {assignments},version=version+1 WHERE id=? AND status=? AND version=?",
+            done = self.connection.execute(f"UPDATE wakes SET {assignments},version=version+1 WHERE id=? AND status=? AND version=?",
                 values + [wake_id, expected_status, wake.version]).rowcount == 1
+            if done and ("next_due_at" in updates or "trigger_json" in updates): self._stamp_zone(changed)
+            return done
 
     @staticmethod
     def _payload(payload):

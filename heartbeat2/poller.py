@@ -45,6 +45,7 @@ class Poller:
     def __init__(self,ctx,store,policy,clock,*,paused=check_paused,jitter=None,
                  compression_tip=None,session_key_fn=None,probe_runner=None,boot_at=None):
         self.ctx,self.store,self.policy,self.clock=ctx,store,policy,clock
+        store.write_zone=lambda: zone_key(self.policy.resolved_timezone())  # Each local wall time records its zone (#170).
         self.boot_at=clock.now() if boot_at is None else boot_at
         self.paused,self.jitter=paused,jitter or (lambda: random.uniform(-1,1))
         self.compression_tip=compression_tip or self._compression_tip
@@ -408,31 +409,42 @@ class Poller:
         except Exception: return {'error':'probe_failed'}
 
     def follow_timezone(self):
-        """Cron and `every … at` times are local wall times. When the effective zone changes (the plugin's setting, Hermes'
-        zone, TZ or the system's), each future one keeps its local date and time in the new zone (#170). Nothing is
-        recomputed, so every scheduling decision behind the time stays: minimum intervals, a governor slow-down and its
-        skipped times, multi-day strides. A time the move puts in the past fires on the next check, once."""
+        """Cron and `every … at` times are local wall times. A wake whose next time was computed in another zone than the
+        effective one (the plugin's setting, Hermes', TZ or the system's) keeps that local date and time in the new zone
+        (#170). Nothing is recomputed, so the decisions behind the time stay: minimum intervals, a governor slow-down and its
+        skipped times, multi-day strides. Each wake records its own zone on every write, so a time already computed in the
+        new zone is never moved twice. A time the move puts in the past fires on this check, once."""
         s=self.store
         new=zone_key(self.policy.resolved_timezone())
-        old=s.get_meta('schedule_zone')
-        if old==new: return
-        s.set_meta('schedule_zone',new)
-        if not old or not new: return  # First check after an upgrade, or a zone without a name: nothing to translate from.
-        now,moved=self.clock.now(),0
+        if not new: return
         for w in s.list_wakes():
-            if w.status not in {'active','paused','proposed'} or not local_times(w): continue
-            if w.next_due_at is not None and w.next_due_at>now:
-                due=same_local_time(w.next_due_at,old,new)
-                if due!=w.next_due_at and s.cas_wake(w.id,w.status,expected_version=w.version,next_due_at=due): moved+=1
-            # Governor skips are future cron times too; each keeps its local time so the slow-down skips the same fires.
-            for o in s.list_occurrences(w.id,state='skipped'):
-                if o.error!='governor' or not o.dedupe_key.startswith('t:') or float(o.dedupe_key[2:])<=now: continue
-                key=f't:{same_local_time(float(o.dedupe_key[2:]),old,new):.17g}'
-                if key==o.dedupe_key: continue
-                s.connection.execute("DELETE FROM occurrences WHERE wake_id=? AND dedupe_key=? AND state='skipped' AND error='governor'",(w.id,o.dedupe_key))
-                if s.add_occurrence(w.id,key,state='skipped'):
-                    s.connection.execute("UPDATE occurrences SET error='governor' WHERE wake_id=? AND dedupe_key=? AND state='skipped'",(w.id,key))
-        if moved: self.log.info('heartbeat2 time zone %s -> %s: %d wake times keep their local time',old,new,moved)
+            if w.status not in {'active','paused','proposed'} or w.next_due_at is None or not local_times(w): continue
+            old=s.get_meta('zone:'+w.id)
+            if old==new: continue
+            try:
+                with s.atomic():
+                    if old: self._follow_zone(w,old,new)
+                    s.set_meta('zone:'+w.id,new)  # Written before 0.4.2 (no record): this zone is its zone from now on.
+            except Exception as exc:
+                self.log.warning('heartbeat2 wake %s kept its time across a zone change (%s)',w.id,type(exc).__name__)
+                s.set_meta('zone:'+w.id,new)
+
+    def _follow_zone(self,w,old,new):
+        s,now=self.store,self.clock.now()
+        due=same_local_time(w.next_due_at,old,new)
+        if due!=w.next_due_at:
+            if not s.cas_wake(w.id,w.status,expected_version=w.version,next_due_at=due): return
+            if due<=now: s.set_meta('zone_catch_up:'+w.id,'1')  # Its catch-up is the zone move, not a stalled scheduler.
+        # Governor skips are cron times in the old zone, past ones included, or a new time could land on a stale skip
+        # and be swallowed. Re-key them all at once, so an old key can't collide with a translated one.
+        skips=[o.dedupe_key for o in s.list_occurrences(w.id,state='skipped') if o.error=='governor' and o.dedupe_key.startswith('t:')]
+        for key in skips:
+            s.connection.execute("DELETE FROM occurrences WHERE wake_id=? AND dedupe_key=? AND state='skipped' AND error='governor'",(w.id,key))
+        for key in skips:
+            moved=f't:{same_local_time(float(key[2:]),old,new):.17g}'
+            if s.add_occurrence(w.id,moved,state='skipped'):
+                s.connection.execute("UPDATE occurrences SET error='governor' WHERE wake_id=? AND dedupe_key=? AND state='skipped'",(w.id,moved))
+        self.log.info('heartbeat2 wake %s keeps its local time across the zone change %s -> %s',w.id,old,new)
 
     def times(self):
         for w in self.store.list_wakes(status='active'):
@@ -473,7 +485,9 @@ class Poller:
                             s.set_meta('recovered:'+pending.id,'1')
                         s.set_meta('restart_due:'+w.id,'')
                     s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due.next_due_at)
-                    if due.state=='pending' and getattr(self,'_tick_started_wall',now)-float(due.dedupe_key[2:])>15:
+                    moved_zone=s.get_meta('zone_catch_up:'+w.id)
+                    if moved_zone: s.set_meta('zone_catch_up:'+w.id,'')
+                    if due.state=='pending' and not moved_zone and getattr(self,'_tick_started_wall',now)-float(due.dedupe_key[2:])>15:
                         self.notice(w.session_key,'Some wakes were late / scheduler was stalled.')
                     if due.state=='missed':
                         self.terminal_one_shot(s.get_wake(w.id))

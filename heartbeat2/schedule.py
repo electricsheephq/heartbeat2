@@ -149,10 +149,11 @@ def local_times(wake) -> bool:
 
 
 def zone_key(tz: tzinfo) -> str:
-    """An IANA name for a zone, or "" when it has none (a fixed offset)."""
-    key = getattr(tz, "key", None)
-    if key:
-        return key
+    """The IANA name of a zone, or "" when it has none: a fixed offset is not a place, so nothing translates to or from it."""
+    if not isinstance(tz, ZoneInfo):
+        return ""
+    if tz.key:
+        return tz.key
     try:  # The system zone is read from /etc/localtime, which keeps no name; its link target does.
         path = os.path.realpath("/etc/localtime")
         if "zoneinfo/" in path:
@@ -165,8 +166,11 @@ def zone_key(tz: tzinfo) -> str:
 
 
 def same_local_time(stamp: float, old: str | tzinfo, new: str | tzinfo) -> float:
-    """The instant showing, in `new`, the local date and time `stamp` shows in `old` (#170)."""
-    return _local_instant(datetime.fromtimestamp(stamp, zone(old)).replace(tzinfo=None), zone(new))
+    """The instant showing, in `new`, the local date and time `stamp` shows in `old` (#170). A repeated hour keeps its
+    fold; a time the new zone skips moves to the first valid minute after it."""
+    local = datetime.fromtimestamp(stamp, zone(old))
+    return _local_instant(local.replace(tzinfo=None), zone(new), later=bool(local.fold))
+
 
 def quiet_end(now: float, quiet_hours: str, timezone: str | tzinfo) -> float | None:
     if not quiet_hours:
