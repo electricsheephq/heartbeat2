@@ -525,6 +525,49 @@ def test_role_takes_its_own_turn(make_rig):
     assert sum("WAKE-DELIVERED" in t for t in rig.texts()) == 1
 
 
+def test_role_hands_off_to_another_role(make_rig):
+    # #138: a role names a follow-on role in this chat. Its silent progress summary is queued for
+    # that role, which is brought forward and shows the summary in its own wake text.
+    from tests.fakes.fake_llm_provider import Text, ToolCall
+
+    rig = make_rig()
+    roles = []
+    # The source runs on its own minute: a /pulse run turn carries a payload, so it can't hand off.
+    for rhythm, note in (("every 1d at 09:00", "Draft the release notes"), ("every 1m", "Research the changes")):
+        before = {w["id"] for w in rig.rows("wakes")}
+        rig.owner(f"/pulse role {rhythm} {note}", "w_")
+        new = [w for w in rig.rows("wakes") if w["id"] not in before]
+        assert len(new) == 1 and new[0]["role"], new
+        roles.append(new[0]["id"])
+    target, source = roles
+    rig.director.script("handoff", ToolCall("pulse", {"action": "update", "id": source, "handoff_to": target}),
+                        Text("SET-handoff"))
+    rig.owner("hand research off to drafting [in:handoff]", "SET-handoff")
+    rig.assert_tools_ok()
+    assert rig.rows("meta", "WHERE key=?", ("handoff_to:" + source,))[0]["value"] == target
+    target_due = rig.rows("wakes", "WHERE id=?", (target,))[0]["next_due_at"]
+
+    rig.director.respond = lambda: ToolCall("pulse", {"action": "respond", "outcome": "progress", "notify": False,
+                                                      "summary": "E2E research result"})
+    shown_before = rig.visible_ids()
+    row = rig.settled(source)
+    rig.assert_tools_ok()
+    assert row["state"] == "done" and row["outcome"] == "progress" and row["delivered"] == 0, row
+    rig.owner(f"/pulse pause {source}", source)
+    handed = rig.settled(target)
+    rig.assert_tools_ok()
+    assert handed["state"] == "done" and handed["delivered"] == 0, handed
+    assert float(handed["dedupe_key"][2:]) < target_due, (handed, target_due)
+    openers = [rig.director._text(r["messages"][-1]) for r in rig.wake_openers()]
+    mine = [t for t in openers if f"· role {target} · " in t]
+    assert len(mine) == 1, openers
+    assert "Handed off to you by another role in this chat" in mine[0], mine[0]
+    assert f"({source}): E2E research result" in mine[0], mine[0]
+    assert rig.rows("meta", "WHERE key=?", ("handoff_in:" + target,))[0]["value"] == "[]"
+    shown = [t for t in rig.new_visible(shown_before) if "HeartBeat 2.0:" not in t and source not in t]
+    assert shown == [], shown
+
+
 def test_pulse_through_tool_search_bridge(make_rig):
     # Hermes's default `tools.tool_search.enabled: auto` defers plugin tools behind the
     # tool_search / tool_describe / tool_call bridge. Arming and the silent verdict must work
