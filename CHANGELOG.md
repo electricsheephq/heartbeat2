@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.13 — 2026-11-15
+
+- **A turn claimed before a trigger change no longer fires on the new trigger.** Changing a wake to or from a watcher, or changing what a check watches, already dropped the turns it had queued. A turn that was already handed to the agent but never started was left alone, and if it was handed back (no acknowledgement, a restart, or a failed hand-off) it fired once on the new trigger, with the next matching event added to it. Now it is retired the same way as the queued turns, so the new trigger's first turn comes from its own first match. (#191)
+
 ## 0.4.12 — 2026-11-15
 
 - **A role you run with `/pulse run` can hand off.** `/pulse run` queues the turn with a fixed line from HeartBeat ("The owner asked to run this now"), and any turn with such a line counted as one that read outside text. So a role run that way couldn't hand its result to its follow-on role, set a handoff, or arm recurring work, though the same role on its own schedule could. That line alone no longer counts; a turn carrying anything else, such as a watcher event added after the wake became a watcher, still does. Watcher events, check output, a watcher's deadline notice and the report-back stay fenced as before (#190).

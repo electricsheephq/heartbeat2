@@ -147,7 +147,8 @@ def _validate_wake(wake: Wake):
 # Nor is children:<occurrence id>:<attempt>: a recovered turn can stay bound to an old occurrence after gc removes its row,
 # and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
 OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'ignored:', 'inject_failures:',
-                            'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:')
+                            'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
+                            'supersede_on_refund:')
 
 
 class Store:
