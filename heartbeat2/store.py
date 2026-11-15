@@ -144,6 +144,8 @@ def _validate_wake(wake: Wake):
 # Meta keys of the form '<prefix><occurrence id>' that gc removes with their occurrence (#54). Each is read only while its row
 # exists, except spend:, which a replayed turn's usage falls back from to the wake's class (gc already removed it before #54).
 # Keys that guard owner input against replay (human:, nonhuman:), and keys per wake, session or day, are never pruned here.
+# Nor is children:<occurrence id>:<attempt>: a recovered turn can bind an old occurrence after gc removed its row, and its child
+# limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
 OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'ignored:', 'inject_failures:', 'model_refunded:',
                             'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:')
 
@@ -647,11 +649,4 @@ class Store:
                     AND NOT EXISTS (SELECT 1 FROM occurrences o
                      WHERE o.wake_id=substr(meta.key,{n+1},instr(substr(meta.key,{n+1}),'/')-1)
                        AND o.dedupe_key=substr(meta.key,{n+1}+instr(substr(meta.key,{n+1}),'/')))""", (prefix,))
-            # children:<occurrence id>:<attempt> counts what a wake turn armed. The turn's row outlives the turn (rows claimed in
-            # the last two days are kept above), so a counter whose row is gone has no turn left to read it.
-            for (key,) in self.connection.execute("SELECT key FROM meta WHERE substr(key,1,9)='children:'").fetchall():
-                occurrence, colon, attempt = key[9:].rpartition(':')
-                wake_id, slash, dedupe_key = occurrence.partition('/')
-                if colon and slash and attempt.isdigit() and self.get_occurrence(wake_id, dedupe_key) is None:
-                    self.connection.execute("DELETE FROM meta WHERE key=?", (key,))
             self.set_meta("last_gc_at", str(now))
