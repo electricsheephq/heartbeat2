@@ -8,7 +8,7 @@ import json
 import re
 import uuid
 
-from .model import Session
+from .model import Session, reads_outside_text
 from . import governor
 from .policy import is_keep_warm
 
@@ -573,7 +573,7 @@ class Intake:
                             e.interrupt(o,'restart')
                             w=s.get_wake(wid)
                             s.cas_session(key,{'busy_since':None},busy_since=now,busy_epoch=e.epoch)  # this replay turn is running
-                        self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,untrusted=bool(o.payload_json) or bool(w.trigger_json.get('report_back')),invalid=True,replay=True)
+                        self.flights[session_id]=Flight(key,session_id,turn_id,wid,dedupe,attempt,untrusted=reads_outside_text(o) or bool(w.trigger_json.get('report_back')),invalid=True,replay=True)
                         stamp='resumed_turn:'+hashlib.sha256((session_id+':'+turn_id).encode()).hexdigest()
                         updates={'model_turns':w.model_turns+1}
                         if w.status!='paused' and (not w.status_reason or w.status in {'failed','done'}):
@@ -603,7 +603,7 @@ class Intake:
                     invalid=True
                 # A report-back relays watcher results, which come from outside text, so it is fenced like the watcher turns
                 # that wrote them; role and own-time turns are never shown those reports (#137).
-                untrusted=bool(o.payload_json) or bool(w.trigger_json.get('report_back'))
+                untrusted=reads_outside_text(o) or bool(w.trigger_json.get('report_back'))
                 flight=Flight(key,session_id,turn_id,wid,dedupe,attempt,untrusted,invalid)
                 existing=self.flights.get(session_id)
                 if existing and existing.wake_id==wid and existing.dedupe_key==dedupe and existing.attempt==attempt:

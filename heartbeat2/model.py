@@ -15,6 +15,8 @@ WAKE_STATUSES = frozenset({"active", "paused", "proposed", "done", "cancelled",
 FINISHED_WAKE_STATUSES = frozenset({"done", "cancelled", "expired", "failed", "orphaned"})
 TERMINAL_OCCURRENCE_STATES = frozenset({"done", "skipped", "missed", "dead",
                                       "interrupted", "orphaned", "superseded"})
+RUN_KEY_PREFIX = "r:"
+RUN_PAYLOAD = {'message': 'The owner asked to run this now (/pulse run).'}
 
 
 def agent_authored(wake) -> bool:
@@ -124,6 +126,11 @@ class Occurrence:
     @property
     def id(self) -> str:
         return f"{self.wake_id}/{self.dedupe_key}"
+
+
+def reads_outside_text(o: Occurrence) -> bool:
+    # A run row is HeartBeat's own only with exactly its run line; appended or overwritten text is outside text.
+    return bool(o.payload_json) and not (o.dedupe_key.startswith(RUN_KEY_PREFIX) and o.payload_json == [RUN_PAYLOAD])
 
 
 @dataclass(frozen=True)

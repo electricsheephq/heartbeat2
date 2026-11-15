@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.12 — 2026-11-15
+
+- **A role you run with `/pulse run` can hand off.** `/pulse run` queues the turn with a fixed line from HeartBeat ("The owner asked to run this now"), and any turn with such a line counted as one that read outside text. So a role run that way couldn't hand its result to its follow-on role, set a handoff, or arm recurring work, though the same role on its own schedule could. That line alone no longer counts; a turn carrying anything else, such as a watcher event added after the wake became a watcher, still does. Watcher events, check output, a watcher's deadline notice and the report-back stay fenced as before (#190).
+
 ## 0.4.11 — 2026-11-15
 
 - **Roles hand off work to each other.** A role can name a follow-on role in the same chat with `handoff_to`. When the role ends a turn with progress or done and a summary, the follow-on role is brought forward and its next turn shows that summary, so "when research makes progress, drafting continues" needs no extra wake. The follow-on turn still keeps every limit: its own daily turn budget, the daily turn and cost caps, wake spacing and message holds. It shows up to three handoffs at a time and the rest on later turns. A turn that read outside text can't set or pass a handoff. The desk shows which role hands off to which, and when a handoff is waiting (#138).
