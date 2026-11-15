@@ -241,9 +241,11 @@ def test_file_becomes_blocked_after_arming(engine, tmp_path, monkeypatch, hermes
     result = engine.tool.handle({'action': 'create', 'note': 'observe', 'trigger': {'kind': 'file', 'path': str(path)}})
     assert result.get('ok')
     files.get_read_block_error = lambda path: 'Hermes fixture read block'
-    monkeypatch.setattr(os, 'open', lambda *a, **k: pytest.fail('blocked path was opened'))
-    for _ in range(5):
-        engine.tick(); engine.clock.advance(61)
+    # Scoped, so pytest's own tmp_path cleanup (which opens files) runs with the real os.open.
+    with monkeypatch.context() as m:
+        m.setattr(os, 'open', lambda *a, **k: pytest.fail('blocked path was opened'))
+        for _ in range(5):
+            engine.tick(); engine.clock.advance(61)
     current = engine.store.get_wake(result['wake']['id'])
     assert current.error_streak == 5 and current.status == 'paused'
     assert current.probe_state_json is None
