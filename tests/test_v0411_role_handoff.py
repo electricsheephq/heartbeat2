@@ -327,12 +327,12 @@ def test_tool_schema_describes_handoff(engine):
 
 
 def test_handoff_to_is_refused_for_update_all(engine):
-    """Setting a handoff on every wake at once would reach non-roles and the target itself; one role at a time."""
+    """update needs one id, so a handoff can't be set on every wake at once (non-roles, the target itself)."""
     e = engine
     source, target = pair(e)
     plain = arm(e, 'every')
     result = e.tool.handle({'action': 'update', 'id': 'all', 'handoff_to': target.id}, session_id='sid')
-    assert result.get('error') == 'handoff_needs_id'
+    assert result.get('error') == 'update_requires_id'
     assert e.store.get_meta('handoff_to:' + plain.id) in (None, '')
     assert e.store.get_meta('handoff_to:' + target.id) in (None, '')
     assert e.store.get_meta('handoff_to:' + source.id) == target.id
