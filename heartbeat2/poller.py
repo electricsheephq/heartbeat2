@@ -163,7 +163,7 @@ class Poller:
                             noticed.add(w.session_key)
             for o in s.list_occurrences() if self.process_start else []:
                 if o.state=='claimed':
-                    s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error='restart_refund')
+                    self.refund_claimed(o,'restart_refund')
                     s.set_meta('recovered:'+o.id,'1')
                 elif o.state=='started': self.interrupt(o,'restart')
             for session in s.list_sessions() if self.process_start else []:
@@ -242,6 +242,9 @@ class Poller:
         ot,nt=old.trigger_json,new.trigger_json
         widened=(all(nt.get(k) is None or nt.get(k)==ot.get(k) for k in ('message_id','task_id','board'))
                  and (not nt.get('emojis') or bool(ot.get('emojis')) and set(ot['emojis'])<=set(nt['emojis'])))
+        if supersede:
+            for o in self.store.list_occurrences(old.id,state='claimed'):
+                self.store.set_meta('supersede_on_refund:'+o.id,'trigger_changed')
         for o in self.store.list_occurrences(old.id,state='pending'):
             reason='trigger_changed'
             if refilter:
@@ -256,6 +259,17 @@ class Poller:
             if not self.store.cas_occurrence(old.id,o.dedupe_key,'pending','superseded',
                                              force_silent=True,error=reason):
                 continue  # A claimed/started occurrence is already in flight.
+
+    def refund_claimed(self,o,error):
+        """A claim invalidated by a trigger edit must never return to the queue."""
+        s=self.store
+        with s.atomic():
+            if s.get_meta('supersede_on_refund:'+o.id):
+                # Like an unsent refund, release the daily dispatch reservation.
+                # Model turns/spend are charged only after start/API usage.
+                return s.cas_occurrence(o.wake_id,o.dedupe_key,'claimed','superseded',attempt=o.attempt,
+                    epoch=None,pid=None,claimed_at=None,force_silent=True,error='trigger_changed')
+            return s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error=error)
 
     def evaluate(self,w,fn):
         """One wake's invalid stored data cannot roll back healthy siblings."""
@@ -344,7 +358,7 @@ class Poller:
                 self.notice(s.get_wake(o.wake_id).session_key,'A wake was not acknowledged after three attempts.')
                 self.terminal_one_shot(s.get_wake(o.wake_id))
                 governor.error(self,s.get_wake(o.wake_id))
-            else: s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error='ack_timeout')
+            else: self.refund_claimed(o,'ack_timeout')
 
     def family_enabled(self,w):
         family='silence' if w.kind=='owner_silent' else 'events' if w.kind in EVENT_KINDS else w.kind if w.kind in PROBE_KINDS else None
@@ -871,7 +885,7 @@ class Poller:
             # Lost the home after claiming: give the claim back unsent, as it was.
             if health:
                 health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
-            s.refund(w.id,o.dedupe_key,attempt=o.attempt,error=held_by)
+            self.refund_claimed(o,held_by)
             return
         try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
         except Exception: accepted=False
@@ -892,7 +906,7 @@ class Poller:
                 s.cas_occurrence(w.id,o.dedupe_key,'claimed','dead',attempt=o.attempt,error='inject_failed')
                 self.terminal_one_shot(s.get_wake(w.id))
                 governor.error(self,s.get_wake(w.id))
-            else: s.refund(w.id,o.dedupe_key,attempt=o.attempt,error='inject_failed')
+            else: self.refund_claimed(o,'inject_failed')
 
     def render_occurrence(self,w,o,session,*,held_by='',message_held='',cache_line='',handoffs='',held_reports=''):
         s=self.store
