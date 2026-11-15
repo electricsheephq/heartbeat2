@@ -141,6 +141,12 @@ def _validate_wake(wake: Wake):
     _json(wake.probe_state_json, 16384)
 
 
+# Meta keys of the form '<prefix><occurrence id>' that only mean something while that occurrence exists (#54). Keys that
+# guard owner input against replay (human:, nonhuman:), and keys per wake, session or day, are not listed and never pruned here.
+OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'ignored:', 'inject_failures:', 'model_refunded:',
+                            'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:')
+
+
 class Store:
     def __init__(self, path: str | Path, clock: Clock):
         self.path, self.clock = Path(path), clock
@@ -631,9 +637,13 @@ class Store:
             self.connection.execute("DELETE FROM events WHERE consumed_at IS NOT NULL AND consumed_at<?", (now - 7 * 86400,))
             self.connection.execute("DELETE FROM ledger WHERE day<?", (ledger_cutoff,))
             self.connection.execute("DELETE FROM meta WHERE key LIKE 'agent_spend:%' AND substr(key,-10)<?", (ledger_cutoff,))
-            # Split 'spend:<wake_id>/<dedupe_key>' (wake ids never contain '/') so the lookup uses the primary key.
-            self.connection.execute("""DELETE FROM meta WHERE key LIKE 'spend:%' AND NOT EXISTS
-                (SELECT 1 FROM occurrences o
-                 WHERE o.wake_id=substr(meta.key,7,instr(substr(meta.key,7),'/')-1)
-                   AND o.dedupe_key=substr(meta.key,7+instr(substr(meta.key,7),'/')))""")
+            # Per-occurrence markers go with their occurrence (#54). Split '<prefix><wake_id>/<dedupe_key>' (wake ids never
+            # contain '/') so the lookup uses the primary key. Prefixes match exactly: '_' is a LIKE wildcard. A key with no
+            # '/' after its prefix isn't an occurrence marker and stays.
+            for prefix in OCCURRENCE_META_PREFIXES:
+                n = len(prefix)
+                self.connection.execute(f"""DELETE FROM meta WHERE substr(key,1,{n})=? AND instr(substr(key,{n+1}),'/')>0
+                    AND NOT EXISTS (SELECT 1 FROM occurrences o
+                     WHERE o.wake_id=substr(meta.key,{n+1},instr(substr(meta.key,{n+1}),'/')-1)
+                       AND o.dedupe_key=substr(meta.key,{n+1}+instr(substr(meta.key,{n+1}),'/')))""", (prefix,))
             self.set_meta("last_gc_at", str(now))
