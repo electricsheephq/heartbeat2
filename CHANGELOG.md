@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.15 — 2026-11-15
+
+- **The "how to stop" line now appears once, not on every check-in.** The wake text used to ask the agent to end with "say \"stop checking in\" or use /pulse off" on the first wake in each chat and on every built-in check-in. A new owner setting, `stop_hint`, decides when: `once` (the default) offers it on the first notifying wake this profile delivers, then never again; `first_per_chat` offers it once in each chat; `always` keeps the old rule; `off` never offers it. In `once` and `first_per_chat`, own-time and message-held turns never carry it, and own-time or report-back deliveries don't use it up. Report-back turns never carry it in any mode. A turn that stays silent or is never delivered doesn't use it up. Profiles and chats that already sent a wake message count as having shown it on upgrade, so upgrading doesn't bring it back. `/pulse off` and "stop checking in" keep working whatever the setting. (#195)
+
 ## 0.4.14 — 2026-11-15
 
 - **Voice plugins can register as HeartBeat's voice bridge.** A new owner setting, `voice_bridge` (blank by default), names the voice plugin HeartBeat trusts. That plugin registers its four transport functions through Hermes's plugin event bus: [docs/voice-bridge.md](docs/voice-bridge.md) has the handshake. Hermes stamps every event with the sending plugin's id, so only the named plugin can register, and only for its own profile. Newest-wins and withdrawal rules mean a plugin reload can't bring back a stale copy, and `/pulse status` shows whether the bridge is connected. This release ships the registration only: no wake is delivered by voice yet. With the setting blank, nothing changes. (#162)

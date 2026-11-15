@@ -235,6 +235,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 |---|---|---|---|
 | Enabled | `enabled` | on | Master switch for wakes and watchers in this profile. |
 | Agent can arm wakes | `agent_can_create` | `yes` | yes · ask_first (the agent's wakes wait for `/pulse ok <id>`) · no |
+| Opt-out line on wake messages | `stop_hint` | `once` | `once`: teach how to stop on the first delivered notifying wake per profile; `first_per_chat`: once in each chat. Both skip own-time and message-held turns; own-time and report-back deliveries do not use up the line. `always`: the previous first-wake and built-in-wake rule; `off`: never. Existing profiles and chats with a prior notice count as shown on upgrade. Report-back turns never include it; `/pulse off` and “stop checking in” always work. |
 | Direct messages only | `dm_only` | on | Refuse group chats. Unknown chat types are refused too. When off, group and topic wakes are recognised behind the gateway's sender prefix. |
 | Voice bridge plugin | `voice_bridge` | (blank) | Trusted bridge plugin id, optionally `category/name`. Blank means no bridge; changes take effect at the next gateway restart. See the [registration contract](docs/voice-bridge.md). |
 | Time zone | `timezone` | (blank) | IANA name such as Europe/Paris. Blank uses the profile's time zone. `/pulse status` shows the zone in use and where it comes from, and says when this setting pins a different zone from Hermes'. When the zone changes, cron and `every … at` wakes move to their local time in the new zone. |

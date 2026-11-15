@@ -448,9 +448,9 @@ def test_R10_B4_max_fires_ends_wake_and_stops_probing(engine, finish_route):
     assert not [x for x in e.store.list_wakes(KEY) if x.status=='active']
 
 
-def test_R10_B5_every_builtin_checkin_has_optout(engine):
+def test_R10_B5_every_builtin_checkin_has_optout_with_always(engine):
     e = engine; session(e, first_notice_sent=True)
-    e.policy = replace(e.policy, owner_silent_checkin=True)
+    e.policy = replace(e.policy, owner_silent_checkin=True, stop_hint='always')
     e.clock.advance(86401); e.tick()
     assert 'stop checking in' in e.ctx.calls[-1][0] and '/pulse off' in e.ctx.calls[-1][0]
 

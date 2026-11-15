@@ -112,6 +112,7 @@ class Runtime:
                     except (ValueError,TypeError,OverflowError) as exc:
                         errors[key]=str(exc)
                         if key=='voice_bridge': settings[key]=''
+                        elif key=='stop_hint': settings.pop(key)
                         elif self._last_good is not None: settings[key]=getattr(self._last_good,key)
                         else: settings.pop(key)
                 try: policy=Policy.from_settings(settings,clock=self.clock,profile_timezone=profile)

@@ -672,7 +672,7 @@ class Intake:
                     ending = '.' if w.role or w.trigger_json.get('own_time') else f'; convert with /pulse watch {w.id}.'
                     lines.append(f'{w.title or "A wake"} ({w.id}) paused ({card}): keep / slow / stop via /pulse{ending}')
                     s.set_meta('card:'+w.id,'')
-            limits={f.name:getattr(e.policy,f.name) for f in fields(e.policy) if f.name not in {'clock','profile_timezone','voice_bridge'}}
+            limits={f.name:getattr(e.policy,f.name) for f in fields(e.policy) if f.name not in {'clock','profile_timezone','voice_bridge','stop_hint'}}
             fingerprint=hashlib.sha256(json.dumps(limits,sort_keys=True).encode()).hexdigest()
             session=s.get_session(key)
             if session.limits_fingerprint and session.limits_fingerprint!=fingerprint:
@@ -1007,6 +1007,9 @@ class Intake:
                                and session.last_human_at>o.started_at)
                 s.cas_session(key,{'unanswered_count':session.unanswered_count},
                               unanswered_count=session.unanswered_count+(0 if owner_engaged else 1),first_notice_sent=True)
+                if s.get_meta('stop_hint_offered:'+o.id)=='1':
+                    s.set_meta('stop_hint_shown','1')
+                    s.set_meta('stop_hint_chat:'+key,'1')
             # human() credits only finished occurrences, and the queued owner turn is deduplicated, so credit it here,
             # before governor.finish: its value and pause rules then see an engaged delivery (a no_change the owner
             # answered can't tip a wake into a no-op pause). It keeps the next check the agent asked for.

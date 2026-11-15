@@ -889,8 +889,22 @@ class Poller:
                         lines.append(f'- … {len(items)-3} more after these (they come next time)')
                     handoffs='\n'.join(lines)
                     s.set_meta('handoff_shown:'+o.id,json.dumps([item['occ'] for item in items[:3]]))
+        with s.atomic():
+            shown=s.get_meta('stop_hint_shown')
+            if shown is None:
+                # Migrate old notices once; later own-time deliveries aren't hint deliveries.
+                shown='1' if any(chat.first_notice_sent for chat in s.list_sessions()) else '0'
+                s.set_meta('stop_hint_shown',shown)
+            chat_shown=s.get_meta('stop_hint_chat:'+session.session_key)
+            if chat_shown is None:
+                chat_shown='1' if session.first_notice_sent else '0'
+                s.set_meta('stop_hint_chat:'+session.session_key,chat_shown)
         text=self.render_occurrence(w,o,session,held_by=held_by,message_held=message_held,
                                     cache_line=cache_line,handoffs=handoffs,held_reports=reports)
+        from .wake_text import offers_stop_hint
+        offered=not is_keep_warm(w) and offers_stop_hint(w,session,stop_hint=self.policy.stop_hint,
+            stop_hint_shown=shown=='1',stop_hint_chat_shown=chat_shown=='1',message_held=message_held)
+        s.set_meta('stop_hint_offered:'+o.id,'1' if offered else '')
         if not self.eligible():
             # Lost the home after claiming: give the claim back unsent, as it was.
             if health:
@@ -924,6 +938,12 @@ class Poller:
         from .wake_text import render_wake, render_keep_warm, escape_text
         from .desk import render_desk
         from .intake import marker_tag
+        shown=s.get_meta('stop_hint_shown')
+        if shown is None:
+            shown='1' if any(chat.first_notice_sent for chat in s.list_sessions()) else '0'
+        chat_shown=s.get_meta('stop_hint_chat:'+session.session_key)
+        if chat_shown is None:
+            chat_shown='1' if session.first_notice_sent else '0'
         tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
         if is_keep_warm(w): return render_keep_warm(w,o,marker_tag=tag)
         recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
@@ -932,6 +952,7 @@ class Poller:
             try: late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
             except ValueError: pass
         return render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
+             stop_hint=self.policy.stop_hint,stop_hint_shown=shown=='1',stop_hint_chat_shown=chat_shown=='1',
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-int(not o.force_silent and o.state in {'claimed','started'}),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
              after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
