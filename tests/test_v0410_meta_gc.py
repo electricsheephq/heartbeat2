@@ -5,7 +5,7 @@ from test_store import seed, store  # noqa: F401  (fixture)
 
 # Every meta key the plugin writes as '<prefix><occurrence id>'. A new per-occurrence key belongs here and in the store's list.
 PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'ignored:', 'inject_failures:', 'model_refunded:',
-            'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:', 'supersede_on_refund:')
+            'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:', 'stop_hint_offered:', 'supersede_on_refund:')
 
 
 def missed(store, wake, n):
@@ -42,6 +42,7 @@ def test_gc_keeps_every_other_meta_key(store, clock):
         "notXbefore:" + gone: "1", "reportXshown:" + gone: "1", "model-refunded:" + gone: "1",
         # A prefixed key with no occurrence id after it isn't a marker.
         "accepted:no-slash": "1", "governed:": "1",
+        "stop_hint_shown": "1",
     }
     for key, value in others.items():
         store.set_meta(key, value)

@@ -36,12 +36,27 @@ def escape_text(text: str) -> str:
     return html.escape(re.sub(r"⟦pulse\b", "[pulse", text), quote=False)
 
 
+def offers_stop_hint(wake: Wake, session: Session, *, stop_hint: str = 'once',
+                     stop_hint_shown: bool | None = None) -> bool:
+    if wake.trigger_json.get('report_back') or stop_hint == 'off':
+        return False
+    if stop_hint == 'always':
+        return not session.first_notice_sent or bool(wake.trigger_json.get('builtin'))
+    if wake.trigger_json.get('own_time'):
+        return False
+    if stop_hint == 'first_per_chat':
+        return not session.first_notice_sent
+    # Standalone callers without a profile fact can still respect an older chat's notice.
+    return not (session.first_notice_sent if stop_hint_shown is None else stop_hint_shown)
+
+
 def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: Clock,
                 timezone="UTC", recent_outcomes=(), messages_today: int = 0,
                 max_messages: int = 6, payload=None, governor_hint: str = "",
                 late_by_s: float | None = None, trigger_summary: str = "", after_restart: bool = False,
                 held_by: str = "", message_held: str = "", cache_line: str = "", marker_tag: str | None = None,
-                desk: str = "", handoffs: str = "", held_reports: str = "") -> str:
+                desk: str = "", handoffs: str = "", held_reports: str = "",
+                stop_hint: str = 'once', stop_hint_shown: bool | None = None) -> str:
     now = clock.now()
     local = datetime.fromtimestamp(now, zone(timezone))
     label = ("role" if wake.role else "check-in" if wake.kind == "owner_silent"
@@ -103,7 +118,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
                      "if the owner should hear about this, respond with notify=true, an outcome other than no_change, and a plain-sentence summary: nothing is sent now, but HeartBeat keeps the summary and hands it back on the owner's next message"
                      + ((", or in one report-back turn once messages can be sent" if message_held != 'unanswered' else '')
                         if wake.kind in PROBE_KINDS | EVENT_KINDS else " or a later role or own-time turn that can send") + ". Keep it in your notes too.")
-    if not wake.trigger_json.get('report_back') and (not session.first_notice_sent or wake.trigger_json.get('builtin')):
+    if offers_stop_hint(wake, session, stop_hint=stop_hint, stop_hint_shown=stop_hint_shown):
         lines.append('If you notify, end with one line saying they can say "stop checking in" or use /pulse off.')
     if cache_line: lines.append(escape_text(cache_line))
     return "\n".join(lines)

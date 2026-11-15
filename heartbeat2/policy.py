@@ -121,6 +121,7 @@ class ClampedWake:
 class Policy:
     enabled: bool = True
     agent_can_create: str = "yes"
+    stop_hint: str = "once"
     dm_only: bool = True
     voice_bridge: str = ""
     timezone: str = ""
@@ -208,7 +209,10 @@ class Policy:
             else:
                 # YAML 1.1 turns yes/no/on/off into bools before we see them.
                 if isinstance(value, bool):
-                    value = ("yes" if value else "no") if f.name == "agent_can_create" else (default if value else "")
+                    if f.name == 'stop_hint':
+                        value = 'off' if not value else 'true'
+                    else:
+                        value = ("yes" if value else "no") if f.name == "agent_can_create" else (default if value else "")
                 elif not isinstance(value, str):
                     raise ValueError(f"invalid string setting: {f.name}")
                 value = value.strip()
@@ -217,6 +221,8 @@ class Policy:
                      profile_timezone=profile_timezone)
         if result.agent_can_create not in {"yes", "ask_first", "no"}:
             raise ValueError("agent_can_create must be yes, ask_first, or no")
+        if result.stop_hint not in {'once', 'first_per_chat', 'always', 'off'}:
+            raise ValueError('stop_hint must be once, first_per_chat, always, or off')
         role_max = max(1, min(result.role_turns_per_day_max, result.max_model_wakes_per_day))
         result = replace(result, role_turns_per_day_max=role_max,
                          role_turns_per_day_default=max(1, min(result.role_turns_per_day_default, role_max)),

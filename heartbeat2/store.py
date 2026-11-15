@@ -148,7 +148,7 @@ def _validate_wake(wake: Wake):
 # and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
 OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'ignored:', 'inject_failures:',
                             'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
-                            'supersede_on_refund:')
+                            'stop_hint_offered:', 'supersede_on_refund:')
 
 
 class Store:
