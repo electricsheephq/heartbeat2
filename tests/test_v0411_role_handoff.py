@@ -321,6 +321,24 @@ def test_desk_appends_suffixes_only_when_metadata_is_set(engine):
     assert 'hands off to' not in e.tool.handle({'action':'desk'})['desk']
 
 
+def test_desk_hides_a_finished_target_and_a_finished_roles_queue(engine):
+    e = engine
+    source, target = pair(e)
+    finish_source(e, source)
+    assert ' · hands off to '+target.id in e.tool.handle({'action':'desk'})['desk']
+    e.store.cas_wake(target.id, 'active', status='paused', status_reason='command')
+    assert ' · hands off to '+target.id in e.tool.handle({'action':'desk'})['desk']
+    e.store.cas_wake(target.id, 'paused', status='cancelled', status_reason='command')
+    assert 'hands off to' not in e.tool.handle({'action':'desk'})['desk']
+    e.store.set_meta('handoff_in:'+source.id, e.store.get_meta('handoff_in:'+target.id))
+    assert ' · handoff waiting' in e.tool.handle({'action':'desk'})['desk']
+    e.clock.advance(601)
+    finish_source(e, source, outcome='done', summary='Research finished.')
+    desk = e.tool.handle({'action':'desk'})['desk']
+    row = next(line for line in desk.splitlines() if line.startswith('- done role '+source.id+' '))
+    assert 'handoff waiting' not in row
+
+
 def test_tool_schema_describes_handoff(engine):
     assert PARAMETERS['properties']['handoff_to'] == {'type':'string', 'description':
         'Role id in this chat that takes over when this role ends a turn with progress or done and a summary; empty string clears.'}

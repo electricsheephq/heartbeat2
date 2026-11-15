@@ -66,9 +66,10 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
     def handoff_suffix(w):
         suffix=''
         target=store.get_wake(store.get_meta('handoff_to:'+w.id) or '')
-        if target is not None and target.role:
+        # Only a target that can still take a handoff, and only a queue a turn can still consume.
+        if target is not None and target.role and target.status in {'active','paused'}:
             suffix+=f' · hands off to {target.id}'
-        if json.loads(store.get_meta('handoff_in:'+w.id) or '[]'):
+        if w.status!='done' and json.loads(store.get_meta('handoff_in:'+w.id) or '[]'):
             suffix+=' · handoff waiting'
         return suffix
 
