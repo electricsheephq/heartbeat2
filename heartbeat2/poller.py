@@ -260,8 +260,8 @@ class Poller:
                                              force_silent=True,error=reason):
                 continue  # A claimed/started occurrence is already in flight.
 
-    def refund_claimed(self,o,error):
-        """A claim invalidated by a trigger edit must never return to the queue."""
+    def supersede_claimed(self,o):
+        """Retire a trigger-invalidated claim before refund or attempt-cap handling."""
         s=self.store
         with s.atomic():
             if s.get_meta('supersede_on_refund:'+o.id):
@@ -269,6 +269,13 @@ class Poller:
                 # Model turns/spend are charged only after start/API usage.
                 return s.cas_occurrence(o.wake_id,o.dedupe_key,'claimed','superseded',attempt=o.attempt,
                     epoch=None,pid=None,claimed_at=None,force_silent=True,error='trigger_changed')
+            return False
+
+    def refund_claimed(self,o,error):
+        """A claim invalidated by a trigger edit must never return to the queue."""
+        s=self.store
+        with s.atomic():
+            if self.supersede_claimed(o): return True
             return s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error=error)
 
     def evaluate(self,w,fn):
@@ -354,6 +361,7 @@ class Poller:
         for o in s.list_occurrences(state='claimed'):
             if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
+                if self.supersede_claimed(o): continue
                 s.cas_occurrence(o.wake_id,o.dedupe_key,'claimed','dead',attempt=o.attempt,error='ack_timeout')
                 self.notice(s.get_wake(o.wake_id).session_key,'A wake was not acknowledged after three attempts.')
                 self.terminal_one_shot(s.get_wake(o.wake_id))
@@ -903,6 +911,7 @@ class Poller:
             s.set_meta('inject_failures:'+o.id,str(count))
             s.set_meta('not_before:'+o.id,str(self.clock.now()+RETRY_DELAYS[min(count-1,4)]))
             if count>=5:
+                if self.supersede_claimed(o): return
                 s.cas_occurrence(w.id,o.dedupe_key,'claimed','dead',attempt=o.attempt,error='inject_failed')
                 self.terminal_one_shot(s.get_wake(w.id))
                 governor.error(self,s.get_wake(w.id))
