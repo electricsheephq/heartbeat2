@@ -28,6 +28,7 @@ PARAMETERS = obj({
     'until': obj({'expires':STR, 'max_fires':{'type':'integer'}, 'owner_replies':BOOL}),
     'pacing': obj({'min':STR,'max':STR}), 'babysit':BOOL, 'urgent':BOOL, 'owner_asked':BOOL,
     'role': {'type':'boolean', 'description':'Standing responsibility; recurring creates only, fixed after creation.'},
+    'handoff_to': {'type':'string', 'description':'Role id in this chat that takes over when this role ends a turn with progress or done and a summary; empty string clears.'},
     'budget': obj({'turns_per_day': {'type':'integer', 'description':'Daily role turns, capped by settings.'}}),
     'outcome': {'type':'string','enum':['no_change','progress','done','blocked','needs_attention']},
     'notify':BOOL, 'summary':STR, 'next_check':STR, 'scratch':STR,
@@ -151,16 +152,29 @@ class Tool:
                 flight = e.intake.flight_for(session_id, s.session_key)
                 created_in = 'wake_turn' if flight or e.intake.in_wake_turn(session_id, s.session_key) else 'human_turn'
                 evidence = self.owner_turn_evidence(session_id, created_in)
-                if action == 'respond':
-                    return self.respond(args, flight)
                 # The turn's own flight, even after /pulse warm off or a cancel ended its occurrence mid-turn.
                 retained = flight or (e.intake.flights.get(session_id) if created_in == 'wake_turn' else None)
+                if 'handoff_to' in args:
+                    if action not in {'create','update'} or action == 'create' and not args.get('role'):
+                        return {'error':'handoff_role_only'}
+                    if action == 'update':
+                        source = e.store.get_wake(args.get('id',''))
+                        if source is not None and not source.role:
+                            return {'error':'handoff_role_only'}
+                    if retained and retained.untrusted:
+                        return {'error':'untrusted_handoff'}
+                    if not isinstance(args['handoff_to'], str):
+                        raise ValueError('handoff_to must be a string')
+                if action == 'respond':
+                    return self.respond(args, flight)
                 if retained is not None and action not in {'list', 'desk'}:
                     parent = e.store.get_wake(retained.wake_id)
                     if parent is not None and is_keep_warm(parent):
                         return {'error':'keep_warm_turn','detail':'This turn only keeps the cache warm: change nothing and reply [SILENT].'}
                 if action == 'list':
-                    return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w)} for w in e.store.list_wakes(s.session_key)]}
+                    return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w),
+                        **({'handoff_to':target} if w.role and (target := e.store.get_meta('handoff_to:'+w.id)) else {})}
+                        for w in e.store.list_wakes(s.session_key)]}
                 if action == 'desk':
                     from .desk import render_desk
                     turn = (e.store.get_occurrence(flight.wake_id, flight.dedupe_key)
@@ -171,6 +185,9 @@ class Tool:
                     e.store.cas_session(s.session_key, {'enabled':s.enabled}, enabled=False)
                     return {'ok':True,'enabled':False}
                 if action == 'create':
+                    if 'handoff_to' in args:
+                        error = self.handoff_target(args['handoff_to'], s.session_key)
+                        if error: return error
                     if not s.enabled:
                         return {'error':'session_off'}
                     if args.get('role') and args.get('babysit'):
@@ -212,9 +229,12 @@ class Tool:
                     result = self.prepare(w,request)
                     result.clamped.update(budget_clamps)
                     w = e.store.create_wake(result.wake)
+                    if 'handoff_to' in args:
+                        e.store.set_meta('handoff_to:'+w.id, args['handoff_to'])
                     if child_key:
                         e.store.set_meta(child_key,str(children+1))
                     item = {'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w),'receipt':self.receipt(w,s)}
+                    if 'handoff_to' in args: item['handoff_to'] = args['handoff_to']
                     if args.get('owner_asked') is True and not requested:
                         item['owner_asked_ignored'] = 'wake_turn' if created_in == 'wake_turn' else 'not_owner_turn' if not evidence else 'not_one_shot'
                     return item
@@ -233,6 +253,9 @@ class Tool:
                 for w in wakes:
                     if action == 'update' and 'role' in args:
                         return {'error':'role_is_fixed'}
+                    if 'handoff_to' in args:
+                        error = self.handoff_target(args['handoff_to'], s.session_key, w.id)
+                        if error: return error
                     if action == 'update' and w.trigger_json.get('builtin') and any(k in args for k in ('trigger','until','babysit','pacing')):
                         return {'error':'builtin_settings_owned','detail':'Own time is set in Settings (own_time_hours).' if w.trigger_json.get('own_time')
                                 else "Keep-warm is the owner's: they turn it on and off with /pulse warm on|off." if w.trigger_json.get('keep_warm')
@@ -352,8 +375,11 @@ class Tool:
                     if action=='update' and (w.kind!=updated.kind or w.trigger_json!=updated.trigger_json):
                         e.recheck_pending(w,updated)
                     w=updated
+                    if 'handoff_to' in args:
+                        e.store.set_meta('handoff_to:'+w.id, args['handoff_to'])
                     if action == 'update' and owner_lowered: e.store.set_owner_budget(w.id,max(1,budget))  # the number the owner asked for
                     item={'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':clamps,'cache':self.cache_result(w)}
+                    if 'handoff_to' in args: item['handoff_to'] = args['handoff_to']
                     if action in {'update','resume'}: item['receipt']=self.receipt(w,s)
                     results.append(item)
                 return results[0] if args.get('id') != 'all' and results else {'ok':True,'results':results}
@@ -365,6 +391,16 @@ class Tool:
         except Exception:
             e.log.warning('pulse tool failed', exc_info=True)
             return {'error':'engine_error'}
+
+    def handoff_target(self, target_id, session_key, source_id=None):
+        if not target_id: return None
+        target = self.engine.store.get_wake(target_id)
+        detail = ('The handoff target does not exist.' if target is None else
+                  'The handoff target is not a role.' if not target.role else
+                  'The handoff target is in another chat.' if target.session_key != session_key else
+                  'A role cannot hand off to itself.' if target.id == source_id else
+                  'The handoff target must be active or paused.' if target.status not in {'active','paused'} else '')
+        return {'error':'handoff_target','detail':detail} if detail else None
 
     def cache_result(self,w):
         from .policy import is_watcher

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.11 — 2026-11-15
+
+- **Roles hand off work to each other.** A role can name a follow-on role in the same chat with `handoff_to`. When the role ends a turn with progress or done and a summary, the follow-on role is brought forward and its next turn shows that summary, so "when research makes progress, drafting continues" needs no extra wake. The follow-on turn still keeps every limit: its own daily turn budget, the daily turn and cost caps, wake spacing and message holds. It shows up to three handoffs at a time and the rest on later turns. A turn that read outside text can't set or pass a handoff. The desk shows which role hands off to which, and when a handoff is waiting (#138).
+
 ## 0.4.10 — 2026-11-15
 
 - **Old per-turn records are cleaned up.** The hourly cleanup removed old wake history but left behind small per-turn markers in the plugin's database, so it grew a little with every wake. Those markers now go with the history they belong to. Markers that guard against replaying the owner's messages, and per-wake, per-chat and per-day records, stay. So do a wake turn's child counts, which a resumed turn can still need (#54).

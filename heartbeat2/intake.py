@@ -989,6 +989,12 @@ class Intake:
                 except (ValueError,TypeError):
                     pass
                 s.set_meta('report_shown:'+o.id,'')
+            shown=s.get_meta('handoff_shown:'+o.id)
+            if shown:
+                items=json.loads(s.get_meta('handoff_in:'+w.id) or '[]')
+                consumed=json.loads(shown)
+                s.set_meta('handoff_in:'+w.id,json.dumps([item for item in items if item['occ'] not in consumed]))
+                s.set_meta('handoff_shown:'+o.id,'')
             if f.scratch is not None:
                 s.cas_wake(w.id,w.status,expected_version=w.version,scratch=f.scratch)
             owner_engaged=False
@@ -1011,6 +1017,11 @@ class Intake:
             # A report-back lists at most five reports. Once it settled its list, the next one takes the rest; after
             # governor.finish, which ends this one-shot (#137).
             if settled and w.trigger_json.get('report_back') and s.held_reports(key): e.arm_report_back(key)
+            if (w.role and o.outcome in {'progress','done'} and o.summary.strip() and not f.untrusted
+                    and s.get_meta('handoff_to:'+w.id)):
+                e.handoff(w,o)
+            if w.role and json.loads(s.get_meta('handoff_in:'+w.id) or '[]'):
+                e.bring_role_forward(w.id)
         e.signal()
         return None
 
