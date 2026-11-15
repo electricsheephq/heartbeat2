@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.9 — 2026-11-15
+
+- **The report-back never gets an idle-pause card.** The idle limits counted the report-back's silent answers like any wake's, so after six of them the owner's next turn showed a "paused (noop)" card asking to keep, slow or stop it. The card was about a built-in turn that had already finished and that the agent can't change. The report-back is HeartBeat's own one-shot, and its silent answers already settle what it saw, so the idle, ignored and value limits leave it alone (#185).
+
 ## 0.4.8 — 2026-11-14
 
 - **Agent watchers work while messages are held.** Recurring work and roles already ran silently under quiet hours, the unanswered mute and the daily message cap; a watcher the agent armed waited instead, so a CI failure at 02:00 was first looked at after quiet hours. Now an agent watcher's turn runs when its match arrives, silently and within the turn and spend limits, and its result is held. If that turn leaves a report, one report-back turn per chat is set up, which passes on what still matters once messages can be sent: after quiet hours end, or on the next local day under the daily message or model-turn cap. Under the unanswered mute, or once the daily spend limit is reached, the report-back is skipped and the report waits for the owner's next message. Watchers the owner armed wait as before. A turn carrying an untrusted payload still can't arm new recurring work, and neither can a later turn shown a report such a turn wrote (#137).

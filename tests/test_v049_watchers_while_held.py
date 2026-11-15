@@ -391,3 +391,40 @@ def test_watcher_text_promises_report_back_only_where_one_can_run(engine, reason
     text = e.ctx.calls[-1][0]
     assert 'Messages are held right now' in text
     assert ('one report-back turn once messages can be sent' in text) is promised
+
+
+def test_silent_report_backs_never_get_an_idle_pause_card(engine):
+    """#185: the report-back is HeartBeat's own one-shot, so its silent answers never earn it a governor pause card."""
+    e = engine
+    for i in range(e.policy.noop_pause_after + 1):
+        if i: e.clock.advance(4000)
+        hold(e, 'quiet_hours')
+        finish_watch(e, watch(e, str(90 + i)), summary=f'Result {i}.')
+        back, pending = queued_report(e)
+        e.clock.advance(1200)
+        e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key))
+        # Every report-back still runs, the seventh included, and is shown its own batch.
+        assert f'Result {i}.' in e.ctx.calls[-1][0]
+        start(e)
+        assert end(e, 'no_change', False) == '[SILENT]'
+        back = e.store.get_wake(back.id)
+        assert back.status == 'done' and back.status_reason == 'completed'
+        assert not e.store.get_meta('card:' + back.id)
+        assert not e.store.held_reports(KEY)
+    assert back.noop_streak > e.policy.noop_pause_after
+
+
+@pytest.mark.parametrize('streak,limit', [
+    ('noop_streak', 'noop_pause_after'), ('ignored_streak', 'ignored_pause_after'), ('error_streak', 'error_pause_after'),
+])
+def test_pause_rule_skips_the_report_back(engine, streak, limit):
+    from heartbeat2 import governor
+    e = engine
+    hold(e, 'quiet_hours')
+    finish_watch(e, watch(e))
+    back, _ = queued_report(e)
+    w = watch(e, '91')
+    n = getattr(e.policy, limit)
+    # The same streak pauses an ordinary watcher; the report-back is left alone.
+    assert governor.pause_rule(e, replace(w, **{streak: n})) == streak.split('_')[0]
+    assert governor.pause_rule(e, replace(back, **{streak: n})) is None
