@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.14 — 2026-11-15
+
+- **Voice plugins can register as HeartBeat's voice bridge.** A new owner setting, `voice_bridge` (blank by default), names the voice plugin HeartBeat trusts. That plugin registers its four transport functions through Hermes's plugin event bus: [docs/voice-bridge.md](docs/voice-bridge.md) has the handshake. Hermes stamps every event with the sending plugin's id, so only the named plugin can register, and only for its own profile. Newest-wins and withdrawal rules mean a plugin reload can't bring back a stale copy, and `/pulse status` shows whether the bridge is connected. This release ships the registration only: no wake is delivered by voice yet. With the setting blank, nothing changes. (#162)
+
 ## 0.4.13 — 2026-11-15
 
 - **A turn claimed before a trigger change no longer fires on the new trigger.** Changing a wake to or from a watcher, or changing what a check watches, already dropped the turns it had queued. A turn that was already handed to the agent but never started was left alone, and if it was handed back (no acknowledgement, a restart, or a failed hand-off) it fired once on the new trigger, with the next matching event added to it. Now it is retired the same way as the queued turns, so the new trigger's first turn comes from its own first match. (#191)
