@@ -54,3 +54,39 @@ def test_gc_keeps_every_other_meta_key(store, clock):
 def test_store_prunes_exactly_the_listed_prefixes():
     from heartbeat2.store import OCCURRENCE_META_PREFIXES
     assert set(OCCURRENCE_META_PREFIXES) == set(PREFIXES)
+
+
+def test_gc_prunes_child_counters_with_their_occurrence(store, clock):
+    """children:<occurrence id>:<attempt> counts what a wake turn armed; it goes when gc removes the turn's row."""
+    wake = seed(store)
+    old, kept = missed(store, wake, 1000), missed(store, wake, 1001)
+    live_key = "e:msg/42:7"  # A dedupe key with ':' and '/' in it.
+    store.add_occurrence(wake.id, live_key)
+    store.set_meta(f"children:{old.id}:1", "2")
+    store.set_meta(f"children:{kept.id}:3", "1")
+    store.set_meta(f"children:{wake.id}/{live_key}:2", "1")
+    malformed = {f"children:{wake.id}/gone": "1", f"children:{wake.id}/gone:x": "1", "children:no-slash:1": "1"}
+    for key, value in malformed.items():
+        store.set_meta(key, value)
+    clock.advance(3 * 86400)
+    store.gc(ledger_days=30, keep_occurrences=3)
+    assert store.get_occurrence(wake.id, old.dedupe_key) is None
+    assert store.get_meta(f"children:{old.id}:1") is None
+    assert store.get_meta(f"children:{kept.id}:3") == "1"
+    assert store.get_meta(f"children:{wake.id}/{live_key}:2") == "1"
+    for key, value in malformed.items():
+        assert store.get_meta(key) == value, key
+
+
+def test_gc_keeps_child_counter_of_a_recently_claimed_turn(store, clock):
+    """A turn's row is kept for two days after its claim, so its counter outlives the turn even past the history limit."""
+    wake = seed(store)
+    claimed = missed(store, wake, 1000)
+    store.connection.execute("UPDATE occurrences SET claimed_at=? WHERE wake_id=? AND dedupe_key=?",
+                             (clock.now() + 86400, wake.id, claimed.dedupe_key))
+    missed(store, wake, 1001)
+    store.set_meta(f"children:{claimed.id}:1", "1")
+    clock.advance(1.5 * 86400)
+    store.gc(ledger_days=30, keep_occurrences=2)
+    assert store.get_occurrence(wake.id, claimed.dedupe_key) is not None
+    assert store.get_meta(f"children:{claimed.id}:1") == "1"
