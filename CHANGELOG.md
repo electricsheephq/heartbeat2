@@ -1,8 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.4.11 — 2026-11-15
 
-- **Roles hand off work.** Set `handoff_to` to another role in the same chat: progress or completion with a summary brings it forward within its normal limits, with the result in its next turn; the desk shows links and waiting handoffs (#138).
+- **Roles hand off work to each other.** A role can name a follow-on role in the same chat with `handoff_to`. When the role ends a turn with progress or done and a summary, the follow-on role is brought forward and its next turn shows that summary, so "when research makes progress, drafting continues" needs no extra wake. The follow-on turn still keeps every limit: its own daily turn budget, the daily turn and cost caps, wake spacing and message holds. It shows up to three handoffs at a time and the rest on later turns. A turn that read outside text can't set or pass a handoff. The desk shows which role hands off to which, and when a handoff is waiting (#138).
+
+## 0.4.10 — 2026-11-15
+
+- **Old per-turn records are cleaned up.** The hourly cleanup removed old wake history but left behind small per-turn markers in the plugin's database, so it grew a little with every wake. Those markers now go with the history they belong to. Markers that guard against replaying the owner's messages, and per-wake, per-chat and per-day records, stay. So do a wake turn's child counts, which a resumed turn can still need (#54).
+
+## 0.4.9 — 2026-11-15
+
+- **The report-back never gets an idle-pause card.** The idle limits counted the report-back's silent answers like any wake's, so after six of them the owner's next turn showed a "paused (noop)" card asking to keep, slow or stop it. The card was about a built-in turn that had already finished and that the agent can't change. The report-back is HeartBeat's own one-shot, and its silent answers already settle what it saw, so the idle, ignored and value limits leave it alone. Its error limit doesn't pause it either, since a paused report-back was never set up again: when one keeps failing to start, it is retried with a backoff that grows to hourly, and its reports still reach the owner's next message (#185).
 
 ## 0.4.8 — 2026-11-14
 
