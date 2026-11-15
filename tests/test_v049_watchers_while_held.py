@@ -428,3 +428,42 @@ def test_pause_rule_skips_the_report_back(engine, streak, limit):
     # The same streak pauses an ordinary watcher; the report-back is left alone.
     assert governor.pause_rule(e, replace(w, **{streak: n})) == streak.split('_')[0]
     assert governor.pause_rule(e, replace(back, **{streak: n})) is None
+
+
+def test_report_back_whose_evaluation_keeps_failing_is_retried_not_paused(engine, monkeypatch):
+    """#185: an error pause would leave the report-back paused for good, since only an unpaused one is re-armed."""
+    e = engine
+    hold(e, 'quiet_hours')
+    finish_watch(e, watch(e))
+    back, pending = queued_report(e)
+    e.clock.advance(1200)
+    real = e.render_occurrence
+    def boom(*args, **kwargs):
+        raise RuntimeError('render failed')
+    monkeypatch.setattr(e, 'render_occurrence', boom)
+    for _ in range(e.policy.error_pause_after + 1):
+        e.evaluate(e.store.get_wake(back.id), lambda: e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key)))
+        e.clock.advance(3601)
+    w = e.store.get_wake(back.id)
+    assert w.error_streak > e.policy.error_pause_after
+    assert w.status == 'active' and not e.store.get_meta('card:' + back.id)
+    assert e.store.get_occurrence(back.id, pending.dedupe_key).state == 'pending'
+    # Once evaluation works again, the same report-back runs and relays the held result.
+    monkeypatch.setattr(e, 'render_occurrence', real)
+    e.evaluate(e.store.get_wake(back.id), lambda: e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key)))
+    assert SUMMARY in e.ctx.calls[-1][0]
+
+
+def test_ordinary_wake_whose_evaluation_keeps_failing_is_still_paused(engine, monkeypatch):
+    e = engine
+    w = arm(e, 'at', next_due_at=e.clock.now())
+    e.times()
+    o = e.store.list_occurrences(w.id, state='pending')[0]
+    def boom(*args, **kwargs):
+        raise RuntimeError('render failed')
+    monkeypatch.setattr(e, 'render_occurrence', boom)
+    for _ in range(e.policy.error_pause_after):
+        e.evaluate(e.store.get_wake(w.id), lambda: e.dispatch(e.store.get_occurrence(w.id, o.dedupe_key)))
+        e.clock.advance(3601)
+    w = e.store.get_wake(w.id)
+    assert w.status == 'paused' and w.status_reason == 'governor:error' and e.store.get_meta('card:' + w.id).startswith('error')
