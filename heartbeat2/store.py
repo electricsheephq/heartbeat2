@@ -144,8 +144,8 @@ def _validate_wake(wake: Wake):
 # Meta keys of the form '<prefix><occurrence id>' that gc removes with their occurrence (#54). Each is read only while its row
 # exists, except spend:, which a replayed turn's usage falls back from to the wake's class (gc already removed it before #54).
 # Keys that guard owner input against replay (human:, nonhuman:), and keys per wake, session or day, are never pruned here.
-# Nor is children:<occurrence id>:<attempt>: a recovered turn can bind an old occurrence after gc removed its row, and its child
-# limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
+# Nor is children:<occurrence id>:<attempt>: a recovered turn can stay bound to an old occurrence after gc removes its row,
+# and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
 OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'ignored:', 'inject_failures:', 'model_refunded:',
                             'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:')
 

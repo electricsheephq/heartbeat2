@@ -57,7 +57,7 @@ def test_store_prunes_exactly_the_listed_prefixes():
 
 
 def test_gc_keeps_child_counters(store, clock):
-    """A recovered turn can bind an old occurrence after gc removed its row; its child limit must still hold (#54 review)."""
+    """A recovered turn can stay bound to an old occurrence after gc removes its row; its child limit must still hold (#54 review)."""
     wake = seed(store)
     old, kept = missed(store, wake, 1000), missed(store, wake, 1001)
     counters = {f"children:{old.id}:1": "2", f"children:{kept.id}:3": "1", f"children:{wake.id}/gone:1.5:1": "1"}
