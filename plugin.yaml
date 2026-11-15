@@ -51,6 +51,11 @@ config_schema:
     default: ""
     label: "Time zone"
     description: "IANA name such as Europe/Paris. Blank uses the profile's time zone."
+  voice_bridge:
+    type: str
+    default: ""
+    label: "Voice bridge plugin"
+    description: "Trusted voice bridge plugin id; blank disables registration, and changes take effect at the next gateway restart."
   quiet_hours:
     type: str
     default: "22:00-08:00"

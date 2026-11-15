@@ -227,6 +227,8 @@ Kanban watchers can target one task with `trigger.task_id`, one board with `trig
 Only probe and event watchers can carry a `deadline`: it is a one-time "nothing happened" fallback, and the watcher keeps going until it expires. Quiet hours can hold that fallback wake.
 
 ## Settings
+Voice plugin authors can use the optional [`voice_bridge` registration contract](docs/voice-bridge.md); this release registers transports only, with no voice wake consumer.
+
 These live under `plugins.entries.heartbeat2.settings` and appear in **Settings ▸ Plugins**. The agent's tool can't change them. When a request goes past a bound, the tool tells the agent exactly what it clamped.
 
 | Setting | Key | Default | What it does |

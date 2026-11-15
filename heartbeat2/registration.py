@@ -63,12 +63,34 @@ class Runtime:
         self._last_bootstrap_error=''
         self._started_monotonic=self.clock.monotonic()
         self.closed=False
+        from .voice_bridge import VoiceBridgeRegistry
+        self._voice_bridge=VoiceBridgeRegistry()
+        self._voice_bridge_setting=ctx.get_config('voice_bridge','')
+        self.voice_bridge_id=''
+
+    def register_voice_bridge(self):
+        from .policy import Policy
+        # Read only this startup setting; leave first-use policy fallback untouched.
+        try: self.voice_bridge_id=Policy.from_settings({'voice_bridge':self._voice_bridge_setting}).voice_bridge
+        except (ValueError,TypeError,OverflowError): self.voice_bridge_id=''
+        emit,subscribe=getattr(self.ctx,'emit',None),getattr(self.ctx,'subscribe',None)
+        if not self.voice_bridge_id or not callable(emit) or not callable(subscribe): return
+        try:
+            subscribe(self.voice_bridge_id+':heartbeat2_voice_bridge',self._voice_bridge.announce)
+            emit('voice_bridge_wanted',{'version':1})
+        except Exception:
+            LOG.warning('heartbeat2 voice bridge event bus unavailable',exc_info=True)
+
+    def voice_bridge(self):
+        try: return self._voice_bridge.get()
+        except Exception: return None
 
     def policy(self):
         from dataclasses import fields
         from .policy import Policy
         with self._policy_lock,home_scope(self.home):
-            settings={f.name:self.ctx.get_config(f.name,getattr(Policy(),f.name))
+            settings={f.name:(self._voice_bridge_setting if f.name=='voice_bridge' else
+                              self.ctx.get_config(f.name,getattr(Policy(),f.name)))
                       for f in fields(Policy) if f.name not in {'clock','profile_timezone'}}
             profile=''
             try:
@@ -85,7 +107,8 @@ class Runtime:
                     try: Policy.from_settings({key:value},clock=self.clock,profile_timezone=profile)
                     except (ValueError,TypeError,OverflowError) as exc:
                         errors[key]=str(exc)
-                        if self._last_good is not None: settings[key]=getattr(self._last_good,key)
+                        if key=='voice_bridge': settings[key]=''
+                        elif self._last_good is not None: settings[key]=getattr(self._last_good,key)
                         else: settings.pop(key)
                 try: policy=Policy.from_settings(settings,clock=self.clock,profile_timezone=profile)
                 except (ValueError,TypeError,OverflowError):
@@ -117,6 +140,7 @@ class Runtime:
                 self._engine.signal=self._wake.set
                 self._engine.needs_restart=self.needs_restart
                 self._engine.runtime_status=self.status
+                self._engine.voice_bridge=self.voice_bridge
             return self._engine
 
     def inactive(self):
@@ -211,6 +235,7 @@ class Runtime:
                         from .poller import Poller
                         e=self.get_engine()
                         runner=Poller(self.ctx,e.store,e.policy,self.clock,boot_at=self.boot_at)
+                        runner.voice_bridge=self.voice_bridge
                         runner.refresh_policy=self.policy
                         runner.process_start=not self._reconciled
                         self._runner=runner
@@ -239,6 +264,7 @@ class Runtime:
         with self._engine_lock:
             if self.closed: return
             self.closed=True
+            self._voice_bridge.close()
             self._stop.set()
             self._wake.set()
         for thread in self._threads:
@@ -292,6 +318,7 @@ def register(ctx,**options):
             _register_surfaces(ctx,runtime)
             cleanup=getattr(ctx,'on_unload',None)
             if cleanup: cleanup(runtime.close)
+            runtime.register_voice_bridge()
             runtime.start()
             return runtime
         except BaseException:

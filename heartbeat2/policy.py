@@ -3,6 +3,7 @@ from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, tzinfo
 import math
 import os
+import re
 import shlex
 from typing import Mapping, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -121,6 +122,7 @@ class Policy:
     enabled: bool = True
     agent_can_create: str = "yes"
     dm_only: bool = True
+    voice_bridge: str = ""
     timezone: str = ""
     quiet_hours: str = "22:00-08:00"
     quiet_hours_urgent: bool = False
@@ -178,6 +180,9 @@ class Policy:
             value, default = settings[f.name], getattr(defaults, f.name)
             if value is None:
                 continue
+            if f.name == 'voice_bridge' and (not isinstance(value, str) or
+                    value.strip() and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', value.strip())):
+                raise ValueError('voice_bridge must be a plugin id or blank')
             if isinstance(default, bool):
                 if isinstance(value, str):
                     token = value.strip().lower()
