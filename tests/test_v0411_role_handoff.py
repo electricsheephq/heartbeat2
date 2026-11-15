@@ -324,3 +324,15 @@ def test_desk_appends_suffixes_only_when_metadata_is_set(engine):
 def test_tool_schema_describes_handoff(engine):
     assert PARAMETERS['properties']['handoff_to'] == {'type':'string', 'description':
         'Role id in this chat that takes over when this role ends a turn with progress or done and a summary; empty string clears.'}
+
+
+def test_handoff_to_is_refused_for_update_all(engine):
+    """Setting a handoff on every wake at once would reach non-roles and the target itself; one role at a time."""
+    e = engine
+    source, target = pair(e)
+    plain = arm(e, 'every')
+    result = e.tool.handle({'action': 'update', 'id': 'all', 'handoff_to': target.id}, session_id='sid')
+    assert result.get('error') == 'handoff_needs_id'
+    assert e.store.get_meta('handoff_to:' + plain.id) in (None, '')
+    assert e.store.get_meta('handoff_to:' + target.id) in (None, '')
+    assert e.store.get_meta('handoff_to:' + source.id) == target.id

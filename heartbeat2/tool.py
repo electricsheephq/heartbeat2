@@ -157,6 +157,8 @@ class Tool:
                 if 'handoff_to' in args:
                     if action not in {'create','update'} or action == 'create' and not args.get('role'):
                         return {'error':'handoff_role_only'}
+                    if action == 'update' and args.get('id') == 'all':
+                        return {'error':'handoff_needs_id','detail':'Set handoff_to on one role at a time.'}
                     if action == 'update':
                         source = e.store.get_wake(args.get('id',''))
                         if source is not None and not source.role:
