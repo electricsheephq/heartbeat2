@@ -543,8 +543,10 @@ class Poller:
             elif w.kind in PROBE_KINDS|EVENT_KINDS and w.deadline_at is not None and w.deadline_at<=now:
                 # Deadline fallback is one fire only, and only when no trigger
                 # occurrence has already been produced (including pending).
+                # Marked occurrences belong to an old trigger, in any state.
                 if not [o for o in s.list_occurrences(w.id)
-                        if not (o.state=='superseded' and o.error in {'filter_changed','trigger_changed'})]:
+                        if not (o.state=='superseded' and o.error in {'filter_changed','trigger_changed'})
+                        and not s.get_meta('supersede_on_refund:'+o.id)]:
                     s.add_occurrence(w.id,f't:{w.deadline_at:.17g}',payload=[{'message':'deadline passed — nothing happened'}])
                 s.cas_wake(w.id,'active',expected_version=w.version,deadline_at=None)
 

@@ -115,6 +115,54 @@ def test_refund_sites_preserve_control_then_supersede_changed_claim(engine, comm
             e.clock.advance(61)
 
 
+def test_watcher_deadline_before_old_claim_refund_keeps_fallback(engine, command):
+    e = engine
+    assert e.acquire()
+    w = arm(e, 'every', next_due_at=e.clock.now()+3600)
+    assert command('run '+w.id).startswith('Queued ')
+    old, = e.store.list_occurrences(w.id)
+    e.dispatch(old)
+    assert e.store.get_occurrence(w.id, old.dedupe_key).state == 'claimed'
+    watcher = update(e, w, {'kind': 'reaction', 'deadline': 'in 1m'})
+    assert e.store.get_meta('supersede_on_refund:'+old.id) == 'trigger_changed'
+    e.clock.advance(61)
+    e.tick()
+    assert e.store.get_occurrence(w.id, old.dedupe_key).state == 'claimed'
+    fallback = e.store.get_occurrence(w.id, f't:{watcher.deadline_at:.17g}')
+    assert fallback is not None
+    assert fallback.state in {'pending', 'claimed'}
+    assert fallback.payload_json == [{'message': 'deadline passed — nothing happened'}]
+    assert e.store.get_wake(w.id).deadline_at is None
+    e.clock.advance(540)
+    e.acks()
+    assert_superseded(e, old)
+    e.tick()
+    assert_superseded(e, old)
+    rows = e.store.list_occurrences(w.id)
+    assert len(rows) == 2 and rows[1].id == fallback.id
+    assert rows[1].state == 'claimed'
+    assert 'deadline passed — nothing happened' in e.ctx.calls[-1][0]
+    assert RUN_LINE not in e.ctx.calls[-1][0]
+
+
+@pytest.mark.parametrize('state', ['claimed', 'pending'])
+def test_watcher_deadline_with_unmarked_trigger_occurrence_has_no_fallback(engine, state):
+    e = engine
+    assert e.acquire()
+    w = update(e, arm(e, 'reaction'), {'kind': 'reaction', 'deadline': 'in 1m'})
+    old = pending(e, w, 'e:matching-reaction')
+    if state == 'claimed':
+        e.dispatch(old)
+    assert e.store.get_occurrence(w.id, old.dedupe_key).state == state
+    assert e.store.get_meta('supersede_on_refund:'+old.id) is None
+    e.clock.advance(61)
+    e.tick()
+    rows = e.store.list_occurrences(w.id)
+    assert len(rows) == 1 and rows[0].id == old.id
+    assert e.store.get_occurrence(w.id, f't:{w.deadline_at:.17g}') is None
+    assert e.store.get_wake(w.id).deadline_at is None
+
+
 def test_claimed_probe_target_change_refunds_and_keeps_deadline_fallback(engine):
     e = engine
     assert e.acquire()
