@@ -15,6 +15,7 @@ WAKE_STATUSES = frozenset({"active", "paused", "proposed", "done", "cancelled",
 FINISHED_WAKE_STATUSES = frozenset({"done", "cancelled", "expired", "failed", "orphaned"})
 TERMINAL_OCCURRENCE_STATES = frozenset({"done", "skipped", "missed", "dead",
                                       "interrupted", "orphaned", "superseded"})
+RUN_KEY_PREFIX = "r:"
 
 
 def agent_authored(wake) -> bool:
@@ -124,6 +125,11 @@ class Occurrence:
     @property
     def id(self) -> str:
         return f"{self.wake_id}/{self.dedupe_key}"
+
+
+def reads_outside_text(o: Occurrence) -> bool:
+    # r: occurrences come only from /pulse run (commands.py) and carry HeartBeat's own line.
+    return bool(o.payload_json) and not o.dedupe_key.startswith(RUN_KEY_PREFIX)
 
 
 @dataclass(frozen=True)

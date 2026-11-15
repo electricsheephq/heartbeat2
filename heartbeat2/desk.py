@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 
 from .commands import _clip, _oneline, _paused, _time, messages_count, quiet_until, quiet_window
+from .model import reads_outside_text
 from .policy import is_watcher, is_keep_warm
 from .schedule import quiet_end, zone
 from .wake_text import _age
@@ -26,7 +27,7 @@ def _plain(text: str) -> str:
 
 def held_report_lines(store, session_key, *, limit=5, payload_ok=True) -> tuple[list[str], list[tuple[str, str]]]:
     # Results of turns that read outside text go only to the owner and the fenced report-back turn (#137).
-    pending = [o for o in store.held_reports(session_key) if payload_ok or not o.payload_json]
+    pending = [o for o in store.held_reports(session_key) if payload_ok or not reads_outside_text(o)]
     shown = pending[:limit]
     lines = []
     for o in shown:

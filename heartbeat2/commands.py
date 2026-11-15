@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import json
 import re
 
-from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES
+from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES, RUN_KEY_PREFIX
 from . import governor
 from . import cache
 from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested, cap_counts, is_keep_warm, is_watcher
@@ -356,7 +356,7 @@ def handle(raw_args, runtime):
                 if any(o.state in {'claimed','started'} for o in occurrences): return f'{wake.id} is running now.'
                 if any(o.state=='pending' for o in occurrences): return f'Already queued: {wake.id} runs on the next check.'
                 now=engine.clock.now()
-                engine.store.add_occurrence(wake.id,f'r:{now:.17g}',payload=[{'message':'The owner asked to run this now (/pulse run).'}])
+                engine.store.add_occurrence(wake.id,f'{RUN_KEY_PREFIX}{now:.17g}',payload=[{'message':'The owner asked to run this now (/pulse run).'}])
                 engine.signal()
                 return f'Queued {wake.id}: it runs on the next check, under the usual checks (busy chat, quiet hours, daily caps).'
             if action == 'desk' and not rest:
