@@ -448,6 +448,31 @@ class Poller:
         for w in self.store.list_wakes(status='active'):
             self.evaluate(w,lambda w=w:self._time(w))
 
+    def bring_role_forward(self, wake_id):
+        """Make work due without bypassing any of the normal dispatch gates."""
+        s,now=self.store,self.clock.now()
+        with s.atomic():
+            target=s.get_wake(wake_id)
+            if target is not None and target.role and target.status=='active':
+                if target.next_due_at is None or target.next_due_at>now:
+                    s.cas_wake(target.id,'active',expected_version=target.version,next_due_at=now)
+
+    def handoff(self, source, o):
+        s,now=self.store,self.clock.now()
+        with s.atomic():
+            target=s.get_wake(s.get_meta('handoff_to:'+source.id) or '')
+            if (target is None or not target.role or target.session_key!=source.session_key
+                    or target.id==source.id or target.status!='active'):
+                self.log.info('role handoff skipped: target is not an active role in the same chat')
+                return
+            key='handoff_in:'+target.id
+            items=json.loads(s.get_meta(key) or '[]')
+            if any(item['occ']==o.id for item in items): return
+            items.append({'from':source.id,'title':source.title or source.note,
+                          'summary':o.summary[:500],'occ':o.id,'at':now})
+            s.set_meta(key,json.dumps(items[-10:]))
+            self.bring_role_forward(target.id)
+
     def _time(self,w):
         s,now=self.store,self.clock.now()
         if self.end_max_fires(w): return
@@ -814,15 +839,30 @@ class Poller:
         if health:
             health['trial']=o.id
             s.set_meta('provider_health',json.dumps(health))
-        from .desk import held_report_lines
+        from .desk import held_report_lines, _plain, _clip, _oneline
         reports=''
         if (w.role or w.trigger_json.get('own_time') or w.trigger_json.get('report_back')) and not message_held and not o.force_silent:
             report_lines,shown=held_report_lines(s,w.session_key,payload_ok=bool(w.trigger_json.get('report_back')))
             if report_lines:
                 reports='\n'.join(['Held for the owner (their limits held these earlier). If you message them this turn, include what still matters:', *report_lines])
                 s.set_meta('report_shown:'+o.id,json.dumps(shown))
+        handoffs=''
+        # Message holds silence the reply, not this work input. Other forced-silent turns keep it for later.
+        if w.role and (not o.force_silent or o.held_reason.startswith('message_held:')):
+            with s.atomic():
+                items=json.loads(s.get_meta('handoff_in:'+w.id) or '[]')
+                if items:
+                    lines=['Handed off to you by another role in this chat (its latest result; continue from it):']
+                    for item in items[:3]:
+                        title=_plain(_clip(_oneline(item['title']),60))
+                        summary=_plain(_clip(_oneline(item['summary']),240))
+                        lines.append(f'- {title} ({item["from"]}): {summary}')
+                    if len(items)>3:
+                        lines.append(f'- … {len(items)-3} more after these (they come next time)')
+                    handoffs='\n'.join(lines)
+                    s.set_meta('handoff_shown:'+o.id,json.dumps([item['occ'] for item in items[:3]]))
         text=self.render_occurrence(w,o,session,held_by=held_by,message_held=message_held,
-                                    cache_line=cache_line,held_reports=reports)
+                                    cache_line=cache_line,handoffs=handoffs,held_reports=reports)
         if not self.eligible():
             # Lost the home after claiming: give the claim back unsent, as it was.
             if health:
@@ -850,7 +890,7 @@ class Poller:
                 governor.error(self,s.get_wake(w.id))
             else: s.refund(w.id,o.dedupe_key,attempt=o.attempt,error='inject_failed')
 
-    def render_occurrence(self,w,o,session,*,held_by='',message_held='',cache_line='',held_reports=''):
+    def render_occurrence(self,w,o,session,*,held_by='',message_held='',cache_line='',handoffs='',held_reports=''):
         s=self.store
         from .wake_text import render_wake, render_keep_warm, escape_text
         from .desk import render_desk
@@ -866,7 +906,7 @@ class Poller:
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-int(not o.force_silent and o.state in {'claimed','started'}),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
              after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
-             cache_line=cache_line,marker_tag=tag,held_reports=held_reports,
+             cache_line=cache_line,marker_tag=tag,handoffs=handoffs,held_reports=held_reports,
              desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
                               measure=lambda text: len(escape_text(text)),turn=o)
                   if w.role or w.trigger_json.get('own_time') else '')

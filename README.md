@@ -165,6 +165,8 @@ A role shows its first results over a few hours, because it spreads its turns ac
 3. **Look at its desk.** `/pulse desk` shows each role's last result and next turn, and today's messages, turns and cost against your limits. The agent sees the same desk.
 4. **Adjust or stop it.** `/pulse budget <id> 2/day` sets a role's daily turns; the agent can go under your number but never over it, and only this command raises it. A new budget changes how many turns the role takes a day, not how often they come: to spread them out, ask the agent to change its rhythm. `/pulse pause <id>` or `/pulse cancel <id>` stops one role, and `/pulse off` stops everything in the chat.
 
+A role can name another role in the same chat with `handoff_to`: when it ends a turn with `progress` or `done` and a summary, the next role is brought forward within its usual limits and gets that result as work input. For example, research can hand off to drafting; an empty `handoff_to` clears the link.
+
 Optional: set **Own time** (`own_time_hours`, for example 6) to give the agent regular turns with no assigned task. On Discord, WhatsApp or Matrix, set `display.platforms.<platform>.tool_progress: off` so silent turns don't post progress bubbles.
 
 All other settings are in **Settings ▸ Plugins** in Hermes Desktop or in `config.yaml`.

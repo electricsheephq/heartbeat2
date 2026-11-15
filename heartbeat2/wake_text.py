@@ -41,7 +41,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
                 max_messages: int = 6, payload=None, governor_hint: str = "",
                 late_by_s: float | None = None, trigger_summary: str = "", after_restart: bool = False,
                 held_by: str = "", message_held: str = "", cache_line: str = "", marker_tag: str | None = None,
-                desk: str = "", held_reports: str = "") -> str:
+                desk: str = "", handoffs: str = "", held_reports: str = "") -> str:
     now = clock.now()
     local = datetime.fromtimestamp(now, zone(timezone))
     label = ("role" if wake.role else "check-in" if wake.kind == "owner_silent"
@@ -67,6 +67,8 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
         lines.append(f"Scratch: {escape_text(wake.scratch)}")
     if desk and (wake.role or wake.trigger_json.get('own_time')):
         lines.append(escape_text(desk))
+    if handoffs:
+        lines.append(escape_text(handoffs))
     if held_reports:
         lines.append(escape_text(held_reports))
     if occurrence.held_since is not None:

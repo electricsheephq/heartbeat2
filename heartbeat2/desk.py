@@ -1,4 +1,5 @@
 """A bounded, read-only view of this chat's responsibilities and budgets."""
+import json
 from types import SimpleNamespace
 
 from .commands import _clip, _oneline, _paused, _time, messages_count, quiet_until, quiet_window
@@ -62,6 +63,15 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
     wakes = [w for w in store.list_wakes(key) if w.status in {'active', 'paused'}]
     roles = sorted((w for w in wakes if w.role), key=lambda w: (w.updated_at, w.created_at), reverse=True)
     rows = []
+    def handoff_suffix(w):
+        suffix=''
+        target=store.get_wake(store.get_meta('handoff_to:'+w.id) or '')
+        if target is not None and target.role:
+            suffix+=f' · hands off to {target.id}'
+        if json.loads(store.get_meta('handoff_in:'+w.id) or '[]'):
+            suffix+=' · handoff waiting'
+        return suffix
+
     for w in roles:
         history = [o for o in store.list_occurrences(w.id) if o.started_at is not None and o.ended_at is not None]
         last = max(history, key=lambda o: o.ended_at) if history else None
@@ -76,7 +86,7 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
             due = _paused(view, w, compact=True)
         title = _plain(_clip(_oneline(w.title or w.note), 80))
         rows.append(f'- role {w.id} {title} · {_rhythm(w)} · last: {summary} · '
-                    f'{due} · today {today}/{budget}')
+                    f'{due} · today {today}/{budget}'+handoff_suffix(w))
     for w in store.list_wakes(key, status='done'):
         if not w.role: continue
         history = [o for o in store.list_occurrences(w.id, state='done') if o.ended_at is not None]
@@ -85,7 +95,7 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
         if session.last_human_at is not None and last.ended_at <= session.last_human_at: continue
         title = _plain(_clip(_oneline(w.title or w.note), 80))
         summary = _plain(_clip(_oneline(last.summary or last.outcome or last.state), 80))
-        rows.append(f'- done role {w.id} {title} · finished {_time(view, last.ended_at, compact=True)} · last: {summary}')
+        rows.append(f'- done role {w.id} {title} · finished {_time(view, last.ended_at, compact=True)} · last: {summary}'+handoff_suffix(w))
     other = [w for w in wakes if not w.role and w.status == 'active' and not is_keep_warm(w)]
     due = [(t, w) for w in other for t in (w.next_due_at, w.deadline_at) if t is not None]
     next_due = min(due, key=lambda pair: pair[0]) if due else None

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Roles hand off work.** Set `handoff_to` to another role in the same chat: progress or completion with a summary brings it forward within its normal limits, with the result in its next turn; the desk shows links and waiting handoffs (#138).
+
 ## 0.4.8 — 2026-11-14
 
 - **Agent watchers work while messages are held.** Recurring work and roles already ran silently under quiet hours, the unanswered mute and the daily message cap; a watcher the agent armed waited instead, so a CI failure at 02:00 was first looked at after quiet hours. Now an agent watcher's turn runs when its match arrives, silently and within the turn and spend limits, and its result is held. If that turn leaves a report, one report-back turn per chat is set up, which passes on what still matters once messages can be sent: after quiet hours end, or on the next local day under the daily message or model-turn cap. Under the unanswered mute, or once the daily spend limit is reached, the report-back is skipped and the report waits for the owner's next message. Watchers the owner armed wait as before. A turn carrying an untrusted payload still can't arm new recurring work, and neither can a later turn shown a report such a turn wrote (#137).
