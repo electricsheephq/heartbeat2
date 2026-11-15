@@ -65,13 +65,16 @@ class Runtime:
         self.closed=False
         from .voice_bridge import VoiceBridgeRegistry
         self._voice_bridge=VoiceBridgeRegistry()
-        # Read this profile's setting, like policy() does: get_config reads the active Hermes home's config.
-        with home_scope(self.home): self._voice_bridge_setting=ctx.get_config('voice_bridge','')
+        self._voice_bridge_setting=''
         self.voice_bridge_id=''
 
     def register_voice_bridge(self):
         from .policy import Policy
         # Read only this startup setting; leave first-use policy fallback untouched.
+        get_config=getattr(self.ctx,'get_config',None)
+        if not callable(get_config): return
+        # get_config reads the active Hermes home's config, so scope the snapshot.
+        with home_scope(self.home): self._voice_bridge_setting=get_config('voice_bridge','')
         try: self.voice_bridge_id=Policy.from_settings({'voice_bridge':self._voice_bridge_setting}).voice_bridge
         except (ValueError,TypeError,OverflowError): self.voice_bridge_id=''
         emit,subscribe=getattr(self.ctx,'emit',None),getattr(self.ctx,'subscribe',None)

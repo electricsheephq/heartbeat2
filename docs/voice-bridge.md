@@ -11,7 +11,8 @@ consumer can use `heartbeat2.voice_bridge.voice_bridge_for(engine)` or
 Set `plugins.entries.heartbeat2.settings.voice_bridge` to the manifest plugin id
 of the trusted bridge. The **Voice bridge plugin** setting is a string, blank by
 default (no bridge). Whitespace is trimmed; ids must match
-`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`. Invalid values act as blank and produce a
+`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?$`.
+One optional category is allowed, for example `cat/bridge`. Invalid values act as blank and produce a
 settings warning. The value is read at registration; changing it takes effect at
 the next gateway restart. Status shows `voice bridge: <id> (connected)` or
 `voice bridge: <id> (not connected)` only when configured. Connected means a
@@ -27,33 +28,52 @@ Contexts without the event bus fall back to no bridge.
 
 When creating a runtime with a nonblank bridge id, heartbeat2 subscribes to
 `<voice_bridge>:heartbeat2_voice_bridge`, then emits `voice_bridge_wanted` with
-`{"version": 1}` (published as `heartbeat2:voice_bridge_wanted`). It emits no
+`{"version": 1}`. It emits under its own plugin id: normally
+`heartbeat2:voice_bridge_wanted`, or `cat/heartbeat2:voice_bridge_wanted` when
+installed under that category. It emits no
 other handshake events, including on lookup misses: the bus has a pending budget.
 
 The bridge's `register(ctx)` takes one `time.monotonic_ns()` stamp and creates
 four **plain functions or closures**. Subscribe to
-`heartbeat2:voice_bridge_wanted` and answer each event by emitting
+`<heartbeat2's id>:voice_bridge_wanted` and answer each event by emitting
 `heartbeat2_voice_bridge` with the payload below; also emit it once at register
 time. Both load orders then work. The bus delivers asynchronously on a worker
 thread using `callback(**copy.deepcopy(payload))`. Plain functions retain their
 identity; bound methods copy their owning object and can fail (for example on a
-lock), causing skipped delivery. Do not send bound methods.
+lock), causing skipped delivery. Do not send bound methods. A bridge MUST stop
+answering wanted events and never announce again once its `on_unload` ran. Set
+an unloaded flag first in that callback, before emitting the withdrawal, and
+check it on every announcement path.
 
 ```python
-payload = {
-    "version": 1,
-    "registered_at": registered_at,  # one monotonic_ns() stamp per register
-    "voice_target": voice_target,
-    "owner_message": owner_message,
-    "wake_ready": wake_ready,
-    "inject_wake": inject_wake,
-}
-ctx.subscribe("heartbeat2:voice_bridge_wanted",
-              lambda **_: ctx.emit("heartbeat2_voice_bridge", payload))
-ctx.emit("heartbeat2_voice_bridge", payload)
-ctx.on_unload(lambda: ctx.emit("heartbeat2_voice_bridge", {
-    "version": 1, "registered_at": registered_at, "withdrawn": True,
-}))
+def register(ctx):
+    import time
+    unloaded = False
+    registered_at = time.monotonic_ns()
+    payload = {
+        "version": 1,
+        "registered_at": registered_at,
+        "voice_target": voice_target,
+        "owner_message": owner_message,
+        "wake_ready": wake_ready,
+        "inject_wake": inject_wake,
+    }
+
+    def announce(**_):
+        if not unloaded:
+            ctx.emit("heartbeat2_voice_bridge", payload)
+
+    def on_unload():
+        nonlocal unloaded
+        unloaded = True
+        ctx.emit("heartbeat2_voice_bridge", {
+            "version": 1, "registered_at": registered_at, "withdrawn": True,
+        })
+
+    # Use "cat/heartbeat2:voice_bridge_wanted" for that heartbeat2 installation.
+    ctx.subscribe("heartbeat2:voice_bridge_wanted", announce)
+    ctx.on_unload(on_unload)
+    announce()
 ```
 
 Version must be exactly integer `1` (not bool), and the stamp a positive integer
@@ -62,8 +82,16 @@ Malformed payloads are ignored with one warning per distinct reason. Newest
 stamp wins; equal stamps replace the view. Withdrawals permanently retire that
 stamp for the runtime and clear it if current. Older announcements cannot
 replace newer ones, even after withdrawal. Forced reloads leave old subscriptions
-alive in Hermes, so the stamp and unload withdrawal are required. Closed runtimes
-ignore callbacks. Registry state is protected by a lock.
+alive in Hermes, so the stamp, unload flag and withdrawal are required. HeartBeat
+also ignores an announcement if any transport Python function's globals no
+longer belong to the live module in `sys.modules` (including a missing module).
+Lookup clears such a registration too. Callable objects without function module
+metadata are not checked. Closed runtimes ignore callbacks. Registry state is
+protected by a lock; liveness reads and transport calls never run under it.
+
+A bridge that ignores the unload rule can stay connected until the gateway restarts:
+when disabled, its old module may remain in `sys.modules`, so the liveness check
+cannot detect it. In all cases, disabling a bridge takes full effect at the next gateway restart.
 
 ## Transport interface
 

@@ -181,7 +181,7 @@ class Policy:
             if value is None:
                 continue
             if f.name == 'voice_bridge' and (not isinstance(value, str) or
-                    value.strip() and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', value.strip())):
+                    value.strip() and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?', value.strip())):
                 raise ValueError('voice_bridge must be a plugin id or blank')
             if isinstance(default, bool):
                 if isinstance(value, str):

@@ -1,7 +1,9 @@
 """Profile-local v1 voice transport registry. This module never delivers wakes."""
 from dataclasses import dataclass
 import logging
+import sys
 import threading
+from types import FunctionType
 from typing import Callable
 
 LOG = logging.getLogger('heartbeat2')
@@ -16,6 +18,15 @@ class VoiceBridge:
     inject_wake: Callable
 
 
+def _is_live(bridge):
+    for name in FIELDS:
+        fn = getattr(bridge, name)
+        if isinstance(fn, FunctionType):
+            module = sys.modules.get(fn.__module__)
+            if module is None or fn.__globals__ is not vars(module): return False
+    return True
+
+
 class VoiceBridgeRegistry:
     def __init__(self):
         self._lock = threading.Lock()
@@ -25,7 +36,12 @@ class VoiceBridgeRegistry:
         self._warned = set()
         self._closed = False
 
-    def announce(self, **payload):
+    def announce(self, /, **payload):
+        bridge = None
+        if payload.get('withdrawn') is not True and all(callable(payload.get(name)) for name in FIELDS):
+            bridge = VoiceBridge(**{name: payload[name] for name in FIELDS})
+        # Module/attribute reads stay outside the state lock; never call a transport.
+        live = bridge is None or _is_live(bridge)
         with self._lock:
             if self._closed: return
             reason = ''
@@ -37,6 +53,7 @@ class VoiceBridgeRegistry:
             elif payload.get('withdrawn') is not True:
                 reason = next((name+' must be callable' for name in FIELDS
                                if not callable(payload.get(name))), '')
+                if not reason and not live: reason = 'transport function module is no longer live'
             if reason:
                 if reason not in self._warned:
                     self._warned.add(reason)
@@ -44,15 +61,25 @@ class VoiceBridgeRegistry:
                 return
             if payload.get('withdrawn') is True:
                 self._withdrawn.add(stamp)
-                if stamp == self._stamp: self._current = None
+                # A withdrawal is a lifecycle stamp too: it retires the current copy if that copy is not newer, and older
+                # announcements stay out even when this registry never saw the withdrawn copy's own announcement.
+                if stamp >= self._stamp: self._current, self._stamp = None, stamp
                 return
             if stamp in self._withdrawn or stamp < self._stamp: return
-            self._current = VoiceBridge(**{name: payload[name] for name in FIELDS})
+            self._current = bridge
             self._stamp = stamp
 
     def get(self):
-        with self._lock:
-            return None if self._closed else self._current
+        while True:
+            with self._lock:
+                current = None if self._closed else self._current
+            if current is None: return None
+            live = _is_live(current)
+            with self._lock:
+                if self._closed: return None
+                if self._current is not current: continue
+                if not live: self._current = None
+                return self._current
 
     def close(self):
         with self._lock:

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from test_real_loader import _load_hermes
 
@@ -12,16 +13,23 @@ BRIDGE = '''
 import time
 def register(ctx):
     global transport, announcement
+    unloaded = False
     def voice_target(session_id): return ctx.plugin_id
     transport = voice_target
     announcement = data = dict(version=1, registered_at=time.monotonic_ns(),
         voice_target=voice_target, owner_message=lambda *a: False,
         wake_ready=lambda *a: False, inject_wake=lambda *a: False)
-    ctx.subscribe('heartbeat2:voice_bridge_wanted',
-        lambda **kw: ctx.emit('heartbeat2_voice_bridge', data))
+    def wanted(**kw):
+        if not unloaded:
+            ctx.emit('heartbeat2_voice_bridge', data)
+    def on_unload():
+        nonlocal unloaded
+        unloaded = True
+        ctx.emit('heartbeat2_voice_bridge', dict(
+            version=1, registered_at=data['registered_at'], withdrawn=True))
+    ctx.subscribe('heartbeat2:voice_bridge_wanted', wanted)
     ctx.emit('heartbeat2_voice_bridge', data)
-    ctx.on_unload(lambda: ctx.emit('heartbeat2_voice_bridge', dict(
-        version=1, registered_at=data['registered_at'], withdrawn=True)))
+    ctx.on_unload(on_unload)
 '''
 
 
@@ -122,3 +130,80 @@ def test_profiles_load_orders_and_forced_reload(tmp_path, monkeypatch, bridge_fi
         for manager in reversed(managers):
             manager.unload()
             drained(manager)
+
+
+@pytest.mark.parametrize('case', ['disabled', 'noncompliant_disabled', 'register_raises'])
+def test_bridge_lifecycle_on_forced_reload(tmp_path, monkeypatch, case):
+    monkeypatch.setenv('HERMES_DISABLE_LAZY_INSTALLS', '1')
+    home = tmp_path/'profile'
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    _load_hermes()
+    from hermes_cli.plugins import PluginManager, PluginContext
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from gateway.session_context import set_session_vars, clear_session_vars
+    if not callable(getattr(PluginContext, 'emit', None)):
+        pytest.skip('this Hermes pin has no event bus')
+    make_home(home, 'bridge')
+    if case == 'noncompliant_disabled':
+        # Deliberately violate the bridge contract: answer even after unload.
+        source = BRIDGE.replace("        if not unloaded:\n", "        if True:\n")
+        (home/'plugins/bridge/__init__.py').write_text(source)
+    token = set_hermes_home_override(home)
+    manager = PluginManager(scope_key=str(home))
+    try:
+        manager.discover_and_load()
+        drained(manager)
+        old_runtime = runtime(manager)
+        old_function = old_runtime.voice_bridge().voice_target
+        stale = dict(manager._plugins['bridge'].module.announcement)
+        # Pin the valid bus ordering where withdrawals drain before the new
+        # runtime subscribes. Otherwise late withdrawal can hide the zombie.
+        unload = manager.unload
+        def unload_and_drain():
+            unload()
+            drained(manager)
+        monkeypatch.setattr(manager, 'unload', unload_and_drain)
+        if case == 'register_raises':
+            (home/'plugins/bridge/__init__.py').write_text(
+                "def register(ctx):\n    raise RuntimeError('fixture register failure')\n")
+        else:
+            config = yaml.safe_load((home/'config.yaml').read_text())
+            config['plugins']['enabled'].remove('bridge')
+            config['plugins']['entries']['bridge']['enabled'] = False
+            (home/'config.yaml').write_text(yaml.safe_dump(config))
+        manager.discover_and_load(force=True)
+        drained(manager)
+        current = runtime(manager)
+        assert old_runtime.closed and old_runtime.voice_bridge() is None
+        assert current is not old_runtime
+        assert not manager._plugins['bridge'].enabled
+        if case == 'register_raises':
+            assert manager._plugins['bridge'].error
+            assert sys.modules[old_function.__module__].__dict__ is not old_function.__globals__
+            # Failed registration removes the bridge's subscribers on this pin.
+            # Replay a late old-copy announcement through the real namespaced bus
+            # to prove the heartbeat2 defence independently of that cleanup.
+            ctx = PluginContext(manager._plugins['bridge'].manifest, manager)
+            ctx.emit('heartbeat2_voice_bridge', stale)
+            drained(manager)
+        if case == 'noncompliant_disabled':
+            # Hermes retains the disabled module; liveness cannot detect this copy.
+            assert sys.modules[old_function.__module__].__dict__ is old_function.__globals__
+            assert current.voice_bridge().voice_target is old_function
+            doc = (ROOT/'docs/voice-bridge.md').read_text()
+            assert 'can stay connected until the gateway restarts' in doc
+            assert 'disabling a bridge takes full effect at the next gateway restart' in doc
+        else:
+            assert current.voice_bridge() is None
+        session_tokens = set_session_vars(platform='telegram', chat_id='fixture', chat_type='dm',
+                                          session_key='agent:telegram:dm:fixture', session_id='sid')
+        try:
+            status = manager._plugin_commands['pulse']['handler']('status')
+            connected = 'connected' if case == 'noncompliant_disabled' else 'not connected'
+            assert f'voice bridge: bridge ({connected})' in status
+        finally:
+            clear_session_vars(session_tokens)
+    finally:
+        manager.unload()
+        drained(manager)
+        reset_hermes_home_override(token)

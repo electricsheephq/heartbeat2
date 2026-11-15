@@ -2,7 +2,8 @@
 import copy
 from dataclasses import FrozenInstanceError
 import json
-from types import SimpleNamespace as NS
+import sys
+from types import ModuleType, SimpleNamespace as NS
 
 import pytest
 
@@ -114,6 +115,21 @@ def test_withdrawal_tombstones_and_stale_announces():
     assert registry.get() is not None
 
 
+def test_withdrawal_advances_the_watermark_past_a_missed_announcement():
+    # Announcement 2 never reached this registry, but its withdrawal did: stale announcement 1 must stay out.
+    registry = VoiceBridgeRegistry()
+    registry.announce(version=1, registered_at=2, withdrawn=True)
+    registry.announce(**payload(1))
+    assert registry.get() is None
+    # A current copy older than a withdrawn stamp is retired too.
+    registry = VoiceBridgeRegistry()
+    registry.announce(**payload(1))
+    registry.announce(version=1, registered_at=2, withdrawn=True)
+    assert registry.get() is None
+    registry.announce(**payload(3))
+    assert registry.get() is not None
+
+
 @pytest.mark.parametrize('setting', ['', '  ', 'invalid:id', '../bridge', 'a'*65, True, 123])
 def test_blank_invalid_settings_do_nothing(tmp_path, monkeypatch, setting, clock):
     monkeypatch.setattr(Runtime, 'start', lambda self: None)
@@ -201,3 +217,106 @@ def test_status_line(setup, monkeypatch):
     assert 'voice bridge: bridge (connected)' in handle('status', rt)
     rt.voice_bridge_id = ''
     assert 'voice bridge:' not in handle('status', rt)
+
+
+@pytest.mark.parametrize('field', FIELDS)
+@pytest.mark.parametrize('state', ['replaced', 'missing'])
+def test_function_liveness_at_announce_and_lookup(monkeypatch, field, state):
+    module = ModuleType('voice_bridge_unit_fixture')
+    exec('def transport(*args): return None', module.__dict__)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    registry = VoiceBridgeRegistry()
+    data = payload() | {field: module.transport}
+    registry.announce(**data)
+    assert getattr(registry.get(), field) is module.transport
+    if state == 'replaced':
+        monkeypatch.setitem(sys.modules, module.__name__, ModuleType(module.__name__))
+    else:
+        monkeypatch.delitem(sys.modules, module.__name__)
+    assert registry.get() is None
+    assert registry._current is None
+    # Check announce independently, rather than relying on get() to reject it.
+    registry.announce(**data)
+    assert registry._current is None
+
+
+def test_callable_without_function_metadata():
+    class Transport:
+        def __call__(self, *args): return None
+    transport = Transport()
+    registry = VoiceBridgeRegistry()
+    registry.announce(**dict(version=1, registered_at=1, **{name: transport for name in FIELDS}))
+    assert registry.get().voice_target is transport
+
+
+def test_payload_self_key_is_ignored():
+    registry = VoiceBridgeRegistry()
+    data = payload()
+    registry.announce(**data, self='extra payload key')
+    assert registry.get().voice_target is data['voice_target']
+
+
+@pytest.mark.parametrize('setting', ['cat/bridge', 'a'*64+'/'+ 'b'*64])
+def test_category_plugin_ids(tmp_path, monkeypatch, clock, setting):
+    monkeypatch.setattr(Runtime, 'start', lambda self: None)
+    bus = Bus()
+    rt = register(Context(tmp_path, bus, {'voice_bridge': ' '+setting+' '}), clock=clock)
+    try:
+        assert rt.voice_bridge_id == rt.policy().voice_bridge == setting
+        assert list(bus.subscriptions) == [setting+':heartbeat2_voice_bridge']
+    finally: rt.close()
+
+
+@pytest.mark.parametrize('setting', ['a/b/c', '/bridge', 'bridge/', 'a/'+ 'b'*65, 'a/.bridge'])
+def test_invalid_category_plugin_ids(setting):
+    from heartbeat2.policy import Policy
+    with pytest.raises(ValueError): Policy.from_settings({'voice_bridge': setting})
+
+
+def test_registration_without_get_config(tmp_path, monkeypatch, clock):
+    monkeypatch.setattr(Runtime, 'start', lambda self: None)
+    bus = Bus()
+    ctx = FakeCtx()
+    ctx._manager = NS(home_path=tmp_path, scope_key=str(tmp_path))
+    rt = register(ctx, clock=clock)
+    try:
+        assert rt._voice_bridge_setting == '' and rt.voice_bridge() is None
+        assert not bus.emits and not bus.subscriptions
+    finally: rt.close()
+
+
+def test_setting_read_during_handshake_not_construction(tmp_path, clock):
+    bus = Bus()
+    ctx = Context(tmp_path, bus, {'voice_bridge': 'bridge'})
+    reads = []
+    ctx.get_config = lambda key, default=None: reads.append(key) or ctx.settings.get(key, default)
+    rt = Runtime(ctx, clock=clock)
+    try:
+        assert reads == [] and rt._voice_bridge_setting == ''
+        rt.register_voice_bridge()
+        assert reads == ['voice_bridge'] and rt.voice_bridge_id == 'bridge'
+    finally: rt.close()
+
+
+@pytest.mark.parametrize('setting', ['', 'bridge'])
+def test_voice_bridge_does_not_change_default_limits_fingerprint(tmp_path, clock, setting):
+    from test_engine import GatewayCtx, KEY, admit
+    from heartbeat2.model import Session
+    from heartbeat2.policy import Policy
+    from heartbeat2.poller import Poller
+    from heartbeat2.store import Store
+    # Default Policy limits at main 645877f, before voice_bridge was introduced.
+    baseline = 'c8ea8abc6d7f5f05b08f0edeb020602464461c74b7dd60138848b5c0ad34c1fb'
+    store = Store(tmp_path/'pulse.db', clock)
+    store.upsert_session(Session(KEY, 'telegram', 'dm', 'unit', 'sid', clock.now(),
+                                 clock.now(), 'episode', limits_fingerprint=baseline))
+    e = Poller(GatewayCtx(tmp_path), store, Policy(clock=clock, voice_bridge=setting), clock,
+               session_key_fn=lambda: KEY, paused=lambda: False, compression_tip=lambda sid: sid)
+    try:
+        admit(e)
+        result = e.intake.pre_llm_call(session_id='sid', user_message='hello')
+        assert 'limits changed' not in (result or {}).get('context', '')
+        assert store.get_session(KEY).limits_fingerprint == baseline
+    finally:
+        e.close()
+        store.close()
