@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.10 — 2026-11-15
+
+- **Old per-turn records are cleaned up.** The hourly cleanup removed old wake history but left behind small per-turn markers in the plugin's database, so it grew a little with every wake. Those markers now go with the history they belong to. Markers that guard against replaying the owner's messages, and per-wake, per-chat and per-day records, stay. So do a wake turn's child counts, which a resumed turn can still need (#54).
+
 ## 0.4.9 — 2026-11-15
 
 - **The report-back never gets an idle-pause card.** The idle limits counted the report-back's silent answers like any wake's, so after six of them the owner's next turn showed a "paused (noop)" card asking to keep, slow or stop it. The card was about a built-in turn that had already finished and that the agent can't change. The report-back is HeartBeat's own one-shot, and its silent answers already settle what it saw, so the idle, ignored and value limits leave it alone. Its error limit doesn't pause it either, since a paused report-back was never set up again: when one keeps failing to start, it is retried with a backoff that grows to hourly, and its reports still reach the owner's next message (#185).
