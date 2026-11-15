@@ -210,7 +210,7 @@ def error(engine,wake):
         engine.ledger(w,errors=1)
         w=s.get_wake(w.id)
         # The report-back gets no pause either (#185): a paused one is never re-armed. When its evaluation keeps failing,
-        # evaluate's own backoff retries it (at most hourly), and its reports still reach the owner's next message.
+        # evaluate's own backoff retries it (growing to hourly), and its reports still reach the owner's next message.
         if w.error_streak>=engine.policy.error_pause_after and not w.trigger_json.get('report_back'): pause(engine,w,'error')
 
 
