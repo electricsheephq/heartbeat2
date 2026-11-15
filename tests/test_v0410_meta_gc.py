@@ -43,6 +43,7 @@ def test_gc_keeps_every_other_meta_key(store, clock):
         # A prefixed key with no occurrence id after it isn't a marker.
         "accepted:no-slash": "1", "governed:": "1",
         "stop_hint_shown": "1",
+        "stop_hint_chat:" + wake.session_key: "1",
     }
     for key, value in others.items():
         store.set_meta(key, value)

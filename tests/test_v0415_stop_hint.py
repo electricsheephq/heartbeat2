@@ -9,7 +9,9 @@ from heartbeat2.model import Session, Wake
 from heartbeat2.policy import Policy
 from heartbeat2.registration import Runtime
 from heartbeat2.wake_text import render_wake
+from test_commands import runtime  # noqa: F401
 from test_engine import KEY, GatewayCtx, arm, end, engine, pending, start  # noqa: F401
+from test_v049_watchers_while_held import finish_watch, hold, queued_report, watch
 from test_wake_text import records
 
 HINT = 'If you notify, end with one line saying they can say "stop checking in" or use /pulse off.'
@@ -138,6 +140,116 @@ def test_first_per_chat_delivers_once_in_each_chat(engine):
     assert e.store.list_occurrences(w.id)[0].delivered
     assert HINT not in render(e, session_key=OTHER, chat_id='other', armed_session_id='sid2',
                               trigger_json={'builtin': True})
+
+
+@pytest.mark.parametrize('first', ['own_time', 'report_back'])
+def test_first_per_chat_nonhint_delivery_preserves_hint(engine, first):
+    e = engine
+    configure(e, 'first_per_chat', own_time_hours=1)
+    if first == 'own_time':
+        w = arm(e, trigger_json={'builtin': True, 'own_time': True, 'hours': 1})
+        e.tick()
+        o, = e.store.list_occurrences(w.id, state='claimed')
+    else:
+        hold(e, 'quiet_hours')
+        finish_watch(e, watch(e))
+        w, o = queued_report(e)
+        e.clock.advance(1200)
+        e.dispatch(e.store.get_occurrence(w.id, o.dedupe_key))
+    assert HINT not in e.ctx.calls[-1][0]
+    start(e)
+    end(e, outcome='progress', notify=True)
+    assert e.store.get_occurrence(w.id, o.dedupe_key).delivered
+    assert e.store.get_session(KEY).first_notice_sent
+
+    assert HINT in render(e)
+    e.tick()
+    assert HINT in e.ctx.calls[-1][0]
+    o, = e.store.list_occurrences(state='claimed')
+    assert e.store.get_meta('stop_hint_offered:' + o.id) == '1'
+    start(e)
+    end(e, outcome='progress', notify=True)
+    assert e.store.get_occurrence(o.wake_id, o.dedupe_key).delivered
+    assert e.store.get_meta('stop_hint_shown') == '1'
+    assert e.store.get_meta('stop_hint_chat:' + KEY) == '1'
+    assert HINT not in render(e)
+
+
+def test_first_per_chat_upgrade_migrates_each_chat(engine):
+    e = engine
+    configure(e, 'first_per_chat')
+    e.store.cas_session(KEY, {'first_notice_sent': False}, first_notice_sent=True)
+    assert e.store.get_meta('stop_hint_chat:' + KEY) is None
+    assert HINT not in render(e)
+    e.tick()
+    assert HINT not in e.ctx.calls[-1][0]
+    assert e.store.get_meta('stop_hint_chat:' + KEY) == '1'
+    start(e)
+    end(e, outcome='progress', notify=False)
+
+    other_chat(e)
+    assert HINT in render(e, session_key=OTHER)
+    e.tick()
+    assert HINT in e.ctx.calls[-1][0]
+    assert e.store.get_meta('stop_hint_chat:' + OTHER) == '0'
+    e.tool.session_key_fn = lambda: OTHER
+    start(e, sid='sid2')
+    e.intake.post_api_request(session_id='sid2', turn_id='turn', usage={})
+    assert e.tool.handle(dict(action='respond', outcome='progress', notify=True,
+                             summary='Checked the other task.'), session_id='sid2')['ok']
+    e.intake.transform_llm_output(response_text='Result.', session_id='sid2', turn_id='turn')
+    e.intake.on_session_end(session_id='sid2', turn_id='turn', completed=True)
+    assert any(o.delivered and e.store.get_wake(o.wake_id).session_key == OTHER
+               for o in e.store.list_occurrences())
+    assert e.store.get_meta('stop_hint_chat:' + OTHER) == '1'
+    assert HINT not in render(e, session_key=OTHER)
+
+
+@pytest.mark.parametrize('mode', ['once', 'first_per_chat'])
+@pytest.mark.parametrize('reason', ['quiet_hours', 'unanswered', 'daily_message_cap'])
+def test_held_turn_preserves_stop_hint(engine, mode, reason):
+    e = engine
+    configure(e, mode)
+    hold(e, reason)
+    w = watch(e)
+    o = pending(e, w)
+    # Inspect the held prompt before settlement as well as the dispatched offer marker.
+    preview = e.render_occurrence(w, o, e.store.get_session(KEY), message_held=reason)
+    assert HINT not in preview
+    e.dispatch(o)
+    assert HINT not in e.ctx.calls[-1][0]
+    assert e.store.get_meta('stop_hint_offered:' + o.id) != '1'
+    start(e)
+    assert end(e, outcome='progress', notify=True) == '[SILENT]'
+    assert not e.store.get_occurrence(w.id, o.dedupe_key).delivered
+    assert e.store.get_meta('stop_hint_shown') == '0'
+    assert e.store.get_meta('stop_hint_chat:' + KEY) == '0'
+    e.store.set_meta('quiet:' + KEY, '')
+    configure(e, mode)
+    e.store.cas_session(KEY, {'unanswered_count': e.store.get_session(KEY).unanswered_count},
+                        unanswered_count=0)
+    w = arm(e)
+    e.dispatch(pending(e, w))
+    assert HINT in e.ctx.calls[-1][0]
+    o, = e.store.list_occurrences(w.id, state='claimed')
+    assert e.store.get_meta('stop_hint_offered:' + o.id) == '1'
+
+
+def test_commands_preview_reads_chat_fact_without_writing_either_fact(runtime):
+    from heartbeat2 import commands
+    e = runtime.get_engine()
+    configure(e, 'first_per_chat')
+    w = arm(e)
+    for _ in range(2):
+        assert HINT in commands.handle(f'test {w.id}', runtime)
+        assert e.store.get_meta('stop_hint_shown') is None
+        assert e.store.get_meta('stop_hint_chat:' + KEY) is None
+    # A non-hint delivery after migration must not hide the hint in previews either.
+    e.store.set_meta('stop_hint_chat:' + KEY, '0')
+    e.store.cas_session(KEY, {'first_notice_sent': False}, first_notice_sent=True)
+    assert HINT in commands.handle(f'test {w.id}', runtime)
+    assert e.store.get_meta('stop_hint_shown') is None
+    assert e.store.get_meta('stop_hint_chat:' + KEY) == '0'
 
 
 @pytest.mark.parametrize('trigger,noticed', [({}, False), ({'builtin': True}, True),

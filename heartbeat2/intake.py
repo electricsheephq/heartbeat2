@@ -1009,6 +1009,7 @@ class Intake:
                               unanswered_count=session.unanswered_count+(0 if owner_engaged else 1),first_notice_sent=True)
                 if s.get_meta('stop_hint_offered:'+o.id)=='1':
                     s.set_meta('stop_hint_shown','1')
+                    s.set_meta('stop_hint_chat:'+key,'1')
             # human() credits only finished occurrences, and the queued owner turn is deduplicated, so credit it here,
             # before governor.finish: its value and pause rules then see an engaged delivery (a no_change the owner
             # answered can't tip a wake into a no-op pause). It keeps the next check the agent asked for.
