@@ -445,8 +445,8 @@ def test_report_back_whose_evaluation_keeps_failing_is_retried_not_paused(engine
         e.evaluate(e.store.get_wake(back.id), lambda: e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key)))
         e.clock.advance(3601)
     w = e.store.get_wake(back.id)
-    assert w.error_streak > e.policy.error_pause_after
     assert w.status == 'active' and not e.store.get_meta('card:' + back.id)
+    assert w.error_streak > e.policy.error_pause_after
     assert e.store.get_occurrence(back.id, pending.dedupe_key).state == 'pending'
     # Once evaluation works again, the same report-back runs and relays the held result.
     monkeypatch.setattr(e, 'render_occurrence', real)
