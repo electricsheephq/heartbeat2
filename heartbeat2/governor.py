@@ -158,6 +158,9 @@ def apply(engine,wake,*,next_check=None,not_after=None):
 
 def pause_rule(engine,w):
     """The governor rule a wake's current streaks and value history break, if any."""
+    # The report-back is HeartBeat's own one-shot: its silent answers already settle what it saw, and a pause card
+    # would ask the owner about a wake the agent can't change (#185).
+    if w.trigger_json.get('report_back'): return None
     s,p=engine.store,engine.policy
     since=float(s.get_meta('ratio_since:'+w.id) or '-inf')
     history=[o for o in s.list_occurrences(w.id) if o.state=='done' and o.ended_at is not None and o.ended_at>since][-20:]
@@ -206,7 +209,9 @@ def error(engine,wake):
         s.cas_wake(w.id,w.status,expected_version=w.version,error_streak=w.error_streak+1)
         engine.ledger(w,errors=1)
         w=s.get_wake(w.id)
-        if w.error_streak>=engine.policy.error_pause_after: pause(engine,w,'error')
+        # The report-back gets no pause either (#185): a paused one is never re-armed. When its evaluation keeps failing,
+        # evaluate's own backoff retries it (growing to hourly), and its reports still reach the owner's next message.
+        if w.error_streak>=engine.policy.error_pause_after and not w.trigger_json.get('report_back'): pause(engine,w,'error')
 
 
 def engagement(engine,o,*,next_check=None,late=False):
