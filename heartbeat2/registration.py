@@ -65,7 +65,8 @@ class Runtime:
         self.closed=False
         from .voice_bridge import VoiceBridgeRegistry
         self._voice_bridge=VoiceBridgeRegistry()
-        self._voice_bridge_setting=ctx.get_config('voice_bridge','')
+        # Read this profile's setting, like policy() does: get_config reads the active Hermes home's config.
+        with home_scope(self.home): self._voice_bridge_setting=ctx.get_config('voice_bridge','')
         self.voice_bridge_id=''
 
     def register_voice_bridge(self):
