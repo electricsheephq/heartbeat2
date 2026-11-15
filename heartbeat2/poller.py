@@ -454,8 +454,10 @@ class Poller:
         with s.atomic():
             target=s.get_wake(wake_id)
             if target is not None and target.role and target.status=='active':
-                if target.next_due_at is None or target.next_due_at>now:
-                    s.cas_wake(target.id,'active',expected_version=target.version,next_due_at=now)
+                if ((target.next_due_at is None or target.next_due_at>now)
+                        and s.cas_wake(target.id,'active',expected_version=target.version,next_due_at=now)):
+                    # Marks this time as due on purpose, so follow_zone doesn't take it for one set in another zone.
+                    s.set_meta('brought_forward:'+target.id,f'{now:.17g}')
 
     def handoff(self, source, o):
         s,now=self.store,self.clock.now()
@@ -533,6 +535,8 @@ class Poller:
         """
         due=w.next_due_at
         if due is None: return w
+        # A handoff made the role due now (#138): off its local schedule on purpose, not set in another zone.
+        if self.store.get_meta('brought_forward:'+w.id)==f'{due:.17g}': return w
         around=local_neighbours(w,due,tz)
         if around is None: return w
         before,after=around

@@ -336,3 +336,42 @@ def test_handoff_to_is_refused_for_update_all(engine):
     assert e.store.get_meta('handoff_to:' + plain.id) in (None, '')
     assert e.store.get_meta('handoff_to:' + target.id) in (None, '')
     assert e.store.get_meta('handoff_to:' + source.id) == target.id
+
+
+@pytest.mark.parametrize('trigger', [{'kind': 'cron', 'cron': '0 12 * * *'}, {'kind': 'every', 'every': '1d', 'at': '12:00'}])
+def test_handoff_brings_forward_a_role_with_local_times(engine, trigger):
+    """A role with local times (cron, `every … at`) brought forward by a handoff runs now. The zone check that moves an
+    off-schedule time to the nearest local time must leave it alone, or the role waits for its next local time."""
+    e = engine
+    now = e.clock.now()
+    e.clock.advance((12*3600 - now % 86400) % 86400 - 1800)  # 11:30 UTC, half an hour before the role's local time.
+    result = e.tool.handle(dict(action='create', note='Own this task.', role=True, title='Drafting', trigger=trigger),
+                           session_id='sid')
+    assert result.get('ok'), result
+    target = e.store.get_wake(result['wake']['id'])
+    noon = e.clock.now() + 1800
+    assert target.next_due_at >= noon
+    source = create(e, title='Research', handoff_to=target.id)
+    finish_source(e, source, summary='Ready to draft.')
+    e.clock.advance(601)
+    o, text = dispatch_target(e, target)
+    assert float(o.dedupe_key[2:]) < noon
+    assert HEADER+'\n- Research ('+source.id+'): Ready to draft.' in text
+    end(e, 'progress', False)
+    assert not inbox(e, target)
+
+
+def test_handoff_display_marker_goes_with_its_occurrence(engine):
+    e = engine
+    source, target = pair(e)
+    finish_source(e, source)
+    e.clock.advance(601)
+    o, _ = dispatch_target(e, target)
+    end(e, 'progress', False)
+    assert e.store.get_meta('handoff_shown:'+o.id) == ''
+    e.store.add_occurrence(target.id, 't:newer')
+    e.store.cas_occurrence(target.id, 't:newer', 'pending', 'missed')
+    e.clock.advance(3*86400)
+    e.store.gc(ledger_days=30, keep_occurrences=1)
+    assert e.store.get_occurrence(target.id, o.dedupe_key) is None
+    assert e.store.get_meta('handoff_shown:'+o.id) is None
