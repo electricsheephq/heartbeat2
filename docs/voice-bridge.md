@@ -88,7 +88,8 @@ alive in Hermes, so the stamp, unload flag and withdrawal are required. HeartBea
 also ignores an announcement if any transport Python function's globals no
 longer belong to the live module in `sys.modules` (including a missing module).
 Lookup clears such a registration too. Callable objects without function module
-metadata are not checked. Closed runtimes ignore callbacks. Registry state is
+metadata are not checked. Transport functions must be defined in an imported module (one in
+`sys.modules`); a function built by `exec` into a bare dict, or in a module that was never imported, is treated as not live. Closed runtimes ignore callbacks. Registry state is
 protected by a lock; liveness reads and transport calls never run under it.
 
 A bridge that ignores the unload rule can stay connected until the gateway restarts:
