@@ -22,7 +22,9 @@ def _is_live(bridge):
     for name in FIELDS:
         fn = getattr(bridge, name)
         if isinstance(fn, FunctionType):
-            module = sys.modules.get(fn.__module__)
+            # Look the module up by the function's own globals: functools.wraps copies __module__ from the wrapped
+            # function, so a transport decorated in a helper module reports a module it does not live in.
+            module = sys.modules.get(fn.__globals__.get('__name__'))
             if module is None or fn.__globals__ is not vars(module): return False
     return True
 

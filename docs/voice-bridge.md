@@ -80,7 +80,9 @@ Version must be exactly integer `1` (not bool), and the stamp a positive integer
 (not bool). All four fields must be callable unless `withdrawn is True`.
 Malformed payloads are ignored with one warning per distinct reason. Newest
 stamp wins; equal stamps replace the view. Withdrawals permanently retire that
-stamp for the runtime and clear it if current. Older announcements cannot
+stamp for the runtime. A withdrawal at or above the current stamp also clears the current
+registration and raises the stamp floor, so an older announcement stays out even if this
+runtime never saw the withdrawn copy's announcement. Older announcements cannot
 replace newer ones, even after withdrawal. Forced reloads leave old subscriptions
 alive in Hermes, so the stamp, unload flag and withdrawal are required. HeartBeat
 also ignores an announcement if any transport Python function's globals no

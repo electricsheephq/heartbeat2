@@ -240,6 +240,23 @@ def test_function_liveness_at_announce_and_lookup(monkeypatch, field, state):
     assert registry._current is None
 
 
+def test_wrapped_transport_from_a_helper_module_is_live(monkeypatch):
+    # functools.wraps copies __module__ from the wrapped function; the wrapper's globals belong to the helper module.
+    package, helper = ModuleType('voice_bridge_pkg_fixture'), ModuleType('voice_bridge_pkg_fixture.util')
+    exec('import functools\ndef logged(fn):\n    @functools.wraps(fn)\n    def wrapper(*a, **k): return fn(*a, **k)\n    return wrapper',
+         helper.__dict__)
+    exec('def transport(*args): return None', package.__dict__)
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    monkeypatch.setitem(sys.modules, helper.__name__, helper)
+    wrapped = helper.logged(package.transport)
+    assert wrapped.__module__ == package.__name__ and wrapped.__globals__ is helper.__dict__
+    registry = VoiceBridgeRegistry()
+    registry.announce(**(payload() | {'voice_target': wrapped}))
+    assert registry.get().voice_target is wrapped
+    monkeypatch.setitem(sys.modules, helper.__name__, ModuleType(helper.__name__))
+    assert registry.get() is None
+
+
 def test_callable_without_function_metadata():
     class Transport:
         def __call__(self, *args): return None
