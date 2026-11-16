@@ -1039,8 +1039,11 @@ class Intake:
     @fail_open
     def on_session_reset(self,old_session_id='',new_session_id='',session_id='',**kwargs):
         e,s=self.engine,self.engine.store
-        old=old_session_id or session_id
-        if not old: return None
+        # Only a real rotation ends a conversation: the gateway's /new names both ids and they differ. A bare
+        # session_id (an app or Desktop opening or rebuilding an existing session, #198) or a reset with no new id
+        # (a viewer leaving) is not one. If the conversation did move, the next turn's session-switch check catches it.
+        old=old_session_id
+        if not old or not new_session_id or old==new_session_id: return None
         self.anchors.pop(old,None)
         with s.atomic():
             # The old conversation's cache route, touch and prompt size don't describe the new one: a keep-warm ping,
