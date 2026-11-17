@@ -156,6 +156,8 @@ def test_a_held_turn_of_a_paused_competitor_waits_and_does_not_go_first(engine, 
     assert 'Would run now: yes' in command('test '+second.id)
     e.tick()
     assert claimed(e, first) == [] and claimed(e, second) != []
+    held = e.store.get_occurrence(first.id, 't:second')
+    assert held.state == 'pending' and held.error == 'held_paused'  # Held while paused, not skipped.
 
 
 def test_a_report_back_is_never_paused_by_its_drops(engine, command, monkeypatch):
