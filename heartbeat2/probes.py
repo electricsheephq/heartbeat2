@@ -87,6 +87,9 @@ def command_env_rules(text):
         listed = [name.strip() for name in names.split(',')]
         if not prefix or any(not ENV_NAME.fullmatch(name) or name in RESERVED_ENV or name.startswith(RESERVED_ENV_PREFIXES) for name in listed):
             raise ValueError('each rule is "<allowed command> = NAME[, NAME...]" with upper-case names that do not change how the program runs')
+        if len(prefix) == 1 and ENV_NAME.fullmatch(prefix[0]):
+            # A lone upper-case name before "=" is a NAME=VALUE pasted by mistake: values belong in .env, never here.
+            raise ValueError('a rule starts with the allowed command, not a variable: put the value in .env and name it here')
         # A relative path resolves in the watcher's cwd, which the agent chooses, so another file could get the secret.
         program = prefix[1] if prefix[0] == PYTHON_TOKEN and len(prefix) > 1 else prefix[0]
         if not os.path.isabs(program) and ('/' in program or program.startswith('~') or prefix[0] == PYTHON_TOKEN):
@@ -440,8 +443,9 @@ def _command_env(secrets=()):
         env = hermes_subprocess_env(inherit_credentials=False, base_env=allowlisted)
     except Exception:
         env = allowlisted
-    # Only the names the owner granted this command's allowlist entry; a missing one is skipped (#108 item 3). They go
-    # in before the pager and no-prompt settings, which stay last.
+    # Only the names the owner granted this command's allowlist entry; a missing one is skipped (#108 item 3). They are
+    # added after hermes_subprocess_env on purpose: it drops credential-like names, and passing one the owner named is the
+    # point. They go in before the pager and no-prompt settings, which stay last.
     env.update({name: os.environ[name] for name in secrets if name in os.environ})
     env.update({'GIT_OPTIONAL_LOCKS':'0', 'GIT_PAGER':'cat',
            'GH_PAGER':'cat', 'PAGER':'cat', 'GIT_TERMINAL_PROMPT':'0',
