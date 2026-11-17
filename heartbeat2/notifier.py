@@ -311,7 +311,7 @@ class NotificationWorker:
             s.notify_reservation=None
             if (data.get('id')!=ident or not rows or chat is None or chat.platform not in LOCAL_SURFACES
                     or _gate(engine,chat,data,engine.clock.now())[0] or notifier_for(engine) is not transport): return
-            now=engine.clock.now()
+            now=sent_at=engine.clock.now()
             s.notify_reservation=(key,local_day(now,engine.policy.resolved_timezone()))
             data.setdefault('first',now)
             data['attempts']+=1
@@ -337,7 +337,7 @@ class NotificationWorker:
                     dedupe='notify:'+ident
                     s.add_event('notify',dedupe,{'status':'queued'},session_key=key)
                     s.connection.execute('UPDATE events SET consumed_at=? WHERE dedupe_key=?',(now,dedupe))
-                    data['queued']=now
+                    data['queued']=sent_at  # the send's start: an owner write during the send ends this wait
                     data.pop('error',None)
                 else:
                     error=str(result.get('error') or 'notifier refused').replace(text,'[notice]')

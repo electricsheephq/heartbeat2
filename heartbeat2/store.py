@@ -437,7 +437,9 @@ class Store:
                 if o.state == 'claimed': totals['model_turns'] += 1
                 if not o.force_silent: totals['delivered'] += 1
         # A send that crosses midnight is charged on completion, so reserve its slot on the current day too.
-        if self.notify_reservation is not None and self.notify_reservation[0] == key:
+        # The notifier's worker clears this without the store lock: read it once.
+        reservation = self.notify_reservation
+        if reservation is not None and reservation[0] == key:
             totals['delivered'] += 1
         return totals
 

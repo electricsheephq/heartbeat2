@@ -337,3 +337,33 @@ def test_new_wait_after_a_day_gets_its_own_notice_and_owner_write_resets(engine,
     session(engine, last_human_at=engine.clock.now()+1)
     engine.clock.advance(60); engine.notifications.tick(engine); settle(engine)
     assert len(calls) == 2 and engine.store.get_meta(EPISODE_PREFIX+KEY) is None
+
+
+def test_owner_write_during_send_ends_the_wait(engine, monkeypatch):
+    calls, registry, rows = held(engine, monkeypatch)
+    def send(target, text):
+        engine.clock.advance(1)
+        session(engine, last_human_at=engine.clock.now())   # the owner writes while the send is in flight
+        engine.clock.advance(1)
+        calls.append((target, text))
+        return {'ok': True}
+    offer(registry, 2, send=send)
+    engine.clock.advance(600); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 1
+    engine.clock.advance(60); engine.notifications.tick(engine)
+    assert engine.store.get_meta(EPISODE_PREFIX+KEY) is None
+
+
+def test_daily_counts_survive_reservation_cleared_concurrently(engine):
+    """The worker clears the reservation without the store lock: a second read may see None."""
+    store = engine.store
+    key = KEY
+    values = iter([(key, 'day'), None])
+    cls = type(store)
+    original = cls.__dict__.get('notify_reservation')
+    try:
+        cls.notify_reservation = property(lambda self: next(values, None), lambda self, v: None)
+        assert store.daily_counts(key, engine.policy.resolved_timezone())['delivered'] >= 1
+    finally:
+        if original is None: del cls.notify_reservation
+        else: cls.notify_reservation = original
