@@ -73,7 +73,8 @@ def _allowlist_entry(entry):
 # A name the owner passes to a command (#108 item 3). Names that change how the program runs, rather than what it reads,
 # are refused.
 ENV_NAME = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
-RESERVED_ENV = re.compile(r'(PATH|HOME|USER|LOGNAME|SHELL|LANG|TMPDIR|IFS|ENV|BASH_ENV|LD_.*|DYLD_.*|PYTHON.*|HERMES_.*|LC_.*)')
+RESERVED_ENV = frozenset({'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TMPDIR', 'IFS', 'ENV', 'BASH_ENV'})
+RESERVED_ENV_PREFIXES = ('LD_', 'DYLD_', 'PYTHON', 'HERMES_', 'LC_')
 
 
 def command_env_rules(text):
@@ -84,7 +85,7 @@ def command_env_rules(text):
         entry, sep, names = part.rpartition('=')
         prefix = tuple(shlex.split(entry.strip())) if sep else ()
         listed = [name.strip() for name in names.split(',')]
-        if not prefix or any(not ENV_NAME.fullmatch(name) or RESERVED_ENV.fullmatch(name) for name in listed):
+        if not prefix or any(not ENV_NAME.fullmatch(name) or name in RESERVED_ENV or name.startswith(RESERVED_ENV_PREFIXES) for name in listed):
             raise ValueError('each rule is "<allowed command> = NAME[, NAME...]" with upper-case names that do not change how the program runs')
         # A relative path resolves in the watcher's cwd, which the agent chooses, so another file could get the secret.
         program = prefix[1] if prefix[0] == PYTHON_TOKEN and len(prefix) > 1 else prefix[0]

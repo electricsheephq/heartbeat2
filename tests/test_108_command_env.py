@@ -53,6 +53,7 @@ def test_several_names_in_one_rule(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('rule', ['git status = PATH', 'git status = LD_PRELOAD', 'git status = DYLD_INSERT_LIBRARIES',
                                   'git status = PYTHONPATH', 'git status = HERMES_HOME', 'git status = lower_case',
+                                  'git status = ENV', 'git status = BASH_ENV', 'git status = IFS', 'git status = LC_ALL',
                                   'git status = ', '= HB_T_KEY', 'git status HB_T_KEY', 'git status = A B'])
 def test_invalid_or_reserved_rules_are_refused(rule):
     with pytest.raises(ValueError):
