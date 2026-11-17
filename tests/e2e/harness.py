@@ -390,6 +390,16 @@ class PulseRig:
         return [r for r in self.llm.main_requests() if r["messages"][-1].get("role") == "user"
                 and MARKER.match(Director._text(r["messages"][-1]))]
 
+    def opener_replayed_after_redirect(self):
+        """Hermes re-sent the wake's opener after an owner redirect interrupted the wake turn: exactly two openers with the
+        redirect correction between them. Hermes' behaviour, not HeartBeat's: HeartBeat injected the wake once."""
+        requests = self.llm.main_requests()
+        at = [n for n, r in enumerate(requests) if r["messages"][-1].get("role") == "user"
+              and MARKER.match(Director._text(r["messages"][-1]))]
+        return len(at) == 2 and any(
+            Director._text(r["messages"][-1]).startswith("[Context from the interrupted assistant response]")
+            for r in requests[at[0]+1:at[1]])
+
     def tick_barrier(self, seconds=12):
         start = time.time()
         self.wait(lambda: any(r["key"] == "last_tick_at" and float(r["value"]) >= start + seconds

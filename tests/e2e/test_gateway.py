@@ -46,7 +46,13 @@ def busy_case(make_rig, *, mode="queue", command=False, photo=False):
     rig.assert_tools_ok()
     rig.human_once(before_events, before_human, unanswered=0)
     assert len(rig.director.wake_starts) == 1
-    assert len(rig.wake_openers()) == 1
+    if mode == "interrupt" and rig.opener_replayed_after_redirect():
+        # When the owner's message lands after the wake turn's first model call, Hermes can re-send the wake's
+        # opener after the redirect. HeartBeat still claimed and injected the wake once, and the owner sees one answer.
+        assert row["attempt"] == 1, row
+        assert sum("WAKE-OWNER-ANSWER" in t for t in rig.texts()) == 1, rig.texts()
+    else:
+        assert len(rig.wake_openers()) == 1
     if not photo:
         assert any("WAKE-OWNER-ANSWER" in t for t in rig.texts()), rig.texts()
     return rig, row
