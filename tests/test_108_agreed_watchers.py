@@ -60,3 +60,14 @@ def test_the_receipt_says_the_mute_does_not_hold_it(engine):
     s = muted(engine)
     receipt = engine.tool.receipt(engine.store.get_wake(w.id), s)
     assert 'Muted' not in receipt and 'You asked for this watcher: not muted; daily caps still apply.' in receipt
+
+
+def test_an_agent_edit_without_a_fresh_ask_drops_the_exemption(engine):
+    owner_turn(engine)
+    w, _ = create(engine, kind='subagent_done')
+    assert flag(w) is True
+    finish(engine)
+    engine.intake.pre_llm_call(session_id='sid', turn_id='internal', user_message='Internal event', platform='telegram')
+    assert engine.tool.handle({'action': 'update', 'id': w.id, 'note': 'Check the gate number too.'}, session_id='sid').get('ok')
+    w = engine.store.get_wake(w.id)
+    assert flag(w) is False and engine.message_hold_reason(w, muted(engine)) == 'unanswered'
