@@ -850,6 +850,11 @@ class Poller:
                 held={'held_since':o.held_since if o.held_since is not None else self.clock.now(),
                       'held_reason':reason,'held_matches':o.held_matches or max(1,len(o.payload_json)),
                       'payload_json':o.payload_json[-1:]} if reason.startswith('held_') else {}
+                if held and o.force_silent and o.held_reason.startswith('message_held:'):
+                    # A held_ reason replaces a message hold; drop its silence with it, or it could never be cleared
+                    # (dispatch only clears a message_held: silence) and the owner's result would end as [SILENT].
+                    # Dispatch checks the message holds again before the turn.
+                    held['force_silent']=False
                 s.update_occurrence(w.id,o.dedupe_key,'pending',error=reason,**held)
                 if reason=='provider_unavailable':
                     if first: self.ledger(w,provider_deferrals=1)

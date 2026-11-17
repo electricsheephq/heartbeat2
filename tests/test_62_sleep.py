@@ -128,6 +128,8 @@ def test_status_and_why_say_the_chat_is_asleep(engine, monkeypatch):
     engine.tick()
     run = lambda text: commands.handle(text, SimpleNamespace(get_engine=lambda: engine))
     assert 'Asleep' in run('status')
+    watcher = arm(engine, 'subagent_done')
+    assert 'asleep until you write' in run('list')
     assert 'asleep' in run(f'why {w.id}')
 
 
@@ -144,3 +146,19 @@ def test_the_test_preview_agrees_that_the_chat_is_asleep(engine, monkeypatch):
     out = commands.handle(f'test {w.id}', SimpleNamespace(get_engine=lambda: engine))
     assert 'asleep' in out, out
     assert not engine.ctx.calls
+
+
+def test_a_held_watcher_that_was_silenced_by_a_message_hold_speaks_after_the_owner_returns(engine):
+    # A message-held turn whose injection failed goes back to pending still marked silent; sleep then takes over its hold.
+    w = arm(engine, 'subagent_done')
+    o = pending(engine, w)
+    engine.store.update_occurrence(w.id, o.dedupe_key, 'pending', force_silent=True, held_reason='message_held:unanswered')
+    away(engine)
+    engine.tick()
+    o = engine.store.get_occurrence(w.id, o.dedupe_key)
+    assert o.error == 'held_asleep' and not o.force_silent
+    admit(engine, mid='back', text='I am back')
+    engine.clock.advance(61)
+    engine.tick()
+    o = engine.store.get_occurrence(w.id, o.dedupe_key)
+    assert o.state != 'pending' and not o.force_silent
