@@ -207,3 +207,20 @@ def test_several_held_watchers_come_back_spaced_when_the_owner_writes(engine):
     engine.tick()
     states = [[o.state for o in engine.store.list_occurrences(w.id)] for w in wakes]
     assert sum(s != ['pending'] for s in states) == 1, states  # one runs now; the other waits for the spacing
+
+
+@pytest.mark.parametrize('agreed', [True, False])
+def test_the_list_agrees_with_the_gate_for_a_report_back(engine, monkeypatch, agreed):
+    # Review (scout r2): /pulse list marks a report-back asleep only when the gate would hold it.
+    import test_v049_watchers_while_held as held
+    monkeypatch.setattr(commands, 'session_env', lambda n: KEY if n == 'HERMES_SESSION_KEY' else '')
+    e = engine
+    held.hold(e, 'quiet_hours')
+    held.finish_watch(e, held.watch(e, '90', owner_requested=agreed), muted=True)
+    back, pending = held.queued_report(e)
+    e.clock.advance(1200)
+    away(e)
+    verdict = e.gate(back, e.store.get_occurrence(back.id, pending.dedupe_key), e.store.get_session(KEY))[0]
+    lines = [l for l in commands.handle('list', SimpleNamespace(get_engine=lambda: e)).splitlines() if back.id in l]
+    assert verdict == ('' if agreed else 'asleep')
+    assert len(lines) == 1 and ('asleep until you write' in lines[0]) is (not agreed), lines
