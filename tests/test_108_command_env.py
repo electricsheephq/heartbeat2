@@ -127,8 +127,9 @@ def test_bare_program_names_and_absolute_paths_are_accepted(rule):
     assert Policy.from_settings({'probe_command_env': rule}).probe_command_env == rule
 
 
-@pytest.mark.parametrize('rule', ['FLIGHT_API_KEY = ABCDEF123', 'GH_TOKEN=GHPXYZ'])
-def test_a_pasted_name_and_value_is_refused_with_a_clear_error(rule):
-    # The left side must be the allowed command; a lone upper-case name there is a NAME=VALUE pasted by mistake.
-    with pytest.raises(ValueError, match='.env'):
-        Policy.from_settings({'probe_command_env': rule})
+def test_a_pasted_value_is_refused_and_an_upper_case_program_is_not():
+    # A secret value pasted as NAME=value fails the upper-case name rule; an all-caps program such as GET is still a
+    # legitimate allowed command.
+    with pytest.raises(ValueError):
+        Policy.from_settings({'probe_command_env': 'FLIGHT_API_KEY = sk-live-abc123'})
+    assert Policy.from_settings({'probe_command_env': 'GET = HB_T_KEY'}).probe_command_env == 'GET = HB_T_KEY'

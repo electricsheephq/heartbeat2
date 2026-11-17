@@ -87,9 +87,6 @@ def command_env_rules(text):
         listed = [name.strip() for name in names.split(',')]
         if not prefix or any(not ENV_NAME.fullmatch(name) or name in RESERVED_ENV or name.startswith(RESERVED_ENV_PREFIXES) for name in listed):
             raise ValueError('each rule is "<allowed command> = NAME[, NAME...]" with upper-case names that do not change how the program runs')
-        if len(prefix) == 1 and ENV_NAME.fullmatch(prefix[0]):
-            # A lone upper-case name before "=" is a NAME=VALUE pasted by mistake: values belong in .env, never here.
-            raise ValueError('a rule starts with the allowed command, not a variable: put the value in .env and name it here')
         # A relative path resolves in the watcher's cwd, which the agent chooses, so another file could get the secret.
         program = prefix[1] if prefix[0] == PYTHON_TOKEN and len(prefix) > 1 else prefix[0]
         if not os.path.isabs(program) and ('/' in program or program.startswith('~') or prefix[0] == PYTHON_TOKEN):
