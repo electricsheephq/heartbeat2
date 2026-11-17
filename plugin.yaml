@@ -13,7 +13,8 @@ description: >-
   and permissions. GET requests include the configured URL, including its query;
   URL userinfo, cookies, Authorization headers and ambient proxies are refused or
   unused by the probe. Command probes use Hermes' sanitizer on an allowlisted
-  environment, without provider, bot or GitHub tokens; gh uses its own hosts.yml
+  environment, without provider, bot or GitHub tokens unless the owner names
+  one for an allowed command in probe_command_env; gh uses its own hosts.yml
   or keyring. URL probes always block cloud metadata and block private/local
   addresses unless url_allow_private is enabled, checking each hop at connect
   time. File probes honor Hermes read blocks at arm/update and every check,
@@ -243,6 +244,11 @@ config_schema:
     default: "gh pr view, gh pr checks, gh run view, gh run list, git ls-remote, git status, git log"
     label: "Allowed watcher commands"
     description: "Comma-separated argv prefixes for command watchers. Blank disables command watchers. `{python} <script>` runs the script with the Python running Hermes."
+  probe_command_env:
+    type: str
+    default: ""
+    label: "Secrets for watcher commands"
+    description: "Optional `<allowed command> = NAME, NAME` rules, separated by `;`. A command watcher admitted by that allowed command gets those variables from Hermes' environment, such as an API key in your .env. Names only. The command's output still reaches your agent, and your agent chooses the arguments after the allowed command, so pass a secret only to a command that doesn't print it and can't be pointed at another host."
   source_silence:
     type: bool
     default: true
