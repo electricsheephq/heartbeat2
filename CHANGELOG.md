@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.20 — 2026-11-17
+
+- **A wake turn can arm a ping-back after its first follow-up.** A wake turn that isn't a role could arm only one wake or watcher, so a turn that had already armed a check couldn't also arm its own ping-back, for example to check in after a restart. It may now arm two, and never more than `max_children_per_wake_turn`. Role and own-time turns keep that setting's limit (3 by default). Chain depth (`max_rearm_chain`), the active-wake and daily caps, and the rule that a watcher's payload may only arm one-time wakes are unchanged. (#200)
+
 ## 0.4.19 — 2026-11-17
 
 - **A paused wake no longer brings a second closed-window notice.** With `notify_via` set, pausing or cancelling the last waiting wake while HeartBeat was sending the notice ended the wait before the send was recorded. Resuming that wake, or arming another, while the app window was still closed then sent a second notice for the same wait. The wait now lasts until the send's result is recorded. (#197)
