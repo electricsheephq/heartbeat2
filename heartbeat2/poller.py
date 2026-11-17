@@ -233,8 +233,8 @@ class Poller:
 
         wake=self.store.get_wake(wid)
         if wake is not None and wake.platform in LOCAL_SURFACES:
-            from .notifier import held_wakes, end_episode
-            if not held_wakes(self,wake.session_key): end_episode(self,wake.session_key)
+            from .notifier import episode_over, end_episode
+            if episode_over(self,wake.session_key): end_episode(self,wake.session_key)
 
     def recheck_pending(self,old,new):
         target_changed=any(old.trigger_json.get(k)!=new.trigger_json.get(k)
@@ -949,8 +949,8 @@ class Poller:
                 # waiting time separately from watcher/message holds, so those holds and silence still work unchanged.
                 with s.atomic():
                     if self.refund_claimed(o,'app_closed'):
-                        from .notifier import held_wakes, end_episode
-                        if not held_wakes(self,w.session_key): end_episode(self,w.session_key)
+                        from .notifier import episode_over, end_episode
+                        if episode_over(self,w.session_key): end_episode(self,w.session_key)
                         if not s.get_meta('held_since:'+o.id): s.set_meta('held_since:'+o.id,str(self.clock.now()))
                         s.set_meta('not_before:'+o.id,str(self.clock.now()+60))
                         if not is_keep_warm(w):

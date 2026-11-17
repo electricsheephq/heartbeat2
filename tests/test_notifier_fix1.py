@@ -244,3 +244,73 @@ def test_deferral_flip_keeps_episode_and_sends_one_notice(engine, monkeypatch, r
     engine.ctx.accept = True
     engine.dispatch(engine.store.get_occurrence(w.id, o.dedupe_key), cache_line='')
     assert engine.store.get_meta(EPISODE_PREFIX+KEY) is None
+
+
+def _hold_again(e, w):
+    """A resumed or new wake meets the still-closed window: the real refund path stamps it again."""
+    e.ctx.accept = False
+    o = pending(e, w, key=f't:again:{e.clock.now()}')
+    assert o.state == 'pending'
+    e.dispatch(o, cache_line='')
+    assert e.store.get_occurrence(w.id, o.dedupe_key).error == 'app_closed'
+    return o
+
+
+@pytest.mark.parametrize('path', ['tool_pause', 'sibling_cancel', 'sibling_refund'])
+def test_queued_notice_survives_until_window_reopens(engine, monkeypatch, path):
+    calls, _, rows = held(engine, monkeypatch, count=2)
+    (a, ao), (b, bo) = rows
+    engine.clock.advance(600); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 1
+    engine.store.update_occurrence(a.id, ao.dedupe_key, 'pending', error='quiet_hours')
+    if path == 'tool_pause':
+        # The same calls the pulse tool makes: the wake is paused and its pending occurrences superseded.
+        for w in (a, b):
+            engine.store.cas_wake(w.id, 'active', status='paused')
+            engine.cancel_occurrences(w.id, 'paused', preserve_started=True)
+        engine.notifications.tick(engine)
+        for w in (a, b): engine.store.cas_wake(w.id, 'paused', status='active')
+        _hold_again(engine, a)
+    elif path == 'sibling_cancel':
+        engine.store.cas_wake(b.id, 'active', status='cancelled')
+        engine.cancel_occurrences(b.id, 'cancelled', preserve_started=True)
+        engine.store.cas_wake(a.id, 'active', status='cancelled')
+        engine.cancel_occurrences(a.id, 'cancelled', preserve_started=True)
+        engine.store.cas_wake(a.id, 'cancelled', status='active')
+        _hold_again(engine, a)
+    else:
+        engine.store.cas_wake(b.id, 'active', status='cancelled')
+        engine.cancel_occurrences(b.id, 'cancelled', preserve_started=True)
+        c = arm(engine, platform='desktop', title='PRIVATE TITLE')
+        _hold_again(engine, c)
+    engine.clock.advance(3600); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 1
+
+
+def test_owner_message_in_chat_ends_a_queued_wait(engine, monkeypatch):
+    calls, _, rows = held(engine, monkeypatch)
+    w, o = rows[0]
+    engine.clock.advance(600); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 1
+    engine.store.cas_wake(w.id, 'active', status='paused')
+    engine.cancel_occurrences(w.id, 'paused', preserve_started=True)
+    engine.clock.advance(60)
+    session(engine, last_human_at=engine.clock.now())   # the owner wrote in the app chat: the window was open
+    engine.clock.advance(60); engine.notifications.tick(engine)
+    assert engine.store.get_meta(EPISODE_PREFIX+KEY) is None
+    engine.store.cas_wake(w.id, 'paused', status='active')
+    _hold_again(engine, w)
+    engine.clock.advance(600); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 2
+
+
+def test_queued_wait_without_stamps_ends_after_a_day(engine, monkeypatch):
+    calls, _, rows = held(engine, monkeypatch)
+    w, o = rows[0]
+    engine.clock.advance(600); engine.notifications.tick(engine); settle(engine)
+    engine.store.cas_wake(w.id, 'active', status='paused')
+    engine.cancel_occurrences(w.id, 'paused', preserve_started=True)
+    engine.clock.advance(3600); engine.notifications.tick(engine)
+    assert engine.store.get_meta(EPISODE_PREFIX+KEY) is not None
+    engine.clock.advance(86400); engine.notifications.tick(engine)
+    assert engine.store.get_meta(EPISODE_PREFIX+KEY) is None

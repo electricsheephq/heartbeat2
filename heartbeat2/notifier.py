@@ -130,6 +130,21 @@ def stamped(engine, key):
     return False
 
 
+def episode_over(engine, key, now=None):
+    """Whether a chat's closed-window wait has ended, so a later hold may start a new one with its own notice.
+
+    While any wake still carries a closed-window stamp the wait goes on. Once a notice was queued, the wait also goes on after
+    the stamps are gone (a pause or cancel supersedes the stamped occurrence), until the window is known to have reopened:
+    an accepted injection (end_episode), or the owner writing in that chat. A day after the notice it ends regardless.
+    """
+    if stamped(engine, key): return False
+    data = json.loads(engine.store.get_meta(EPISODE_PREFIX+key) or 'null') or {}
+    if 'queued' not in data: return True
+    now = engine.clock.now() if now is None else now
+    chat = engine.store.get_session(key)
+    return now-data['queued'] >= 86400 or bool(chat and chat.last_human_at and chat.last_human_at > data['queued'])
+
+
 def end_episode(engine, key):
     # Accepted injection ends the whole chat episode, even if sibling wakes still wait.
     with engine.store.atomic():
@@ -244,7 +259,7 @@ class NotificationWorker:
             chats={chat.session_key:chat for chat in s.list_sessions() if chat.platform in LOCAL_SURFACES}
             for row in s.connection.execute('SELECT key FROM meta WHERE key LIKE ?', (EPISODE_PREFIX+'%',)).fetchall():
                 key=row[0][len(EPISODE_PREFIX):]
-                if key not in chats or not stamped(engine,key):
+                if key not in chats or episode_over(engine,key,now):
                     s.connection.execute('DELETE FROM meta WHERE key=?',(row[0],))
             for key,chat in chats.items():
                 rows=held_wakes(engine,key)

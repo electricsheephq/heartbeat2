@@ -65,16 +65,17 @@ def test_inflight_notice_reserves_completion_day_across_midnight(engine,monkeypa
     assert engine.store.get_session(KEY).unanswered_count==0
 
 
-def test_cancel_then_fresh_hold_before_next_tick_starts_new_episode(engine,monkeypatch):
+def test_cancel_then_fresh_hold_in_the_same_closed_window_sends_no_second_notice(engine,monkeypatch):
     from test_engine import arm,pending
     calls,_,rows=held(engine,monkeypatch)
     engine.clock.advance(600);engine.notifications.tick(engine);settle(engine)
     w,_=rows[0]
     engine.cancel_occurrences(w.id,'cancelled')
-    assert engine.store.get_meta('notify_episode:'+KEY) is None
+    # The window hasn't reopened since the notice, so the wait (and its queued notice) goes on.
+    assert engine.store.get_meta('notify_episode:'+KEY) is not None
     w=arm(engine,platform='desktop');engine.dispatch(pending(engine,w),cache_line='')
     engine.clock.advance(600);engine.notifications.tick(engine);settle(engine)
-    assert len(calls)==2
+    assert len(calls)==1
 
 
 def test_five_second_send_does_not_block_tick(engine,monkeypatch):
