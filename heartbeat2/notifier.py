@@ -150,10 +150,12 @@ def episode_over(engine, key, now=None):
 
 
 def end_episode(engine, key):
-    # Accepted injection ends the whole chat episode, even if sibling wakes still wait.
+    # Accepted injection ends the whole chat episode, even if sibling wakes still wait. Keep-warm pings are never part of
+    # an episode (held_wakes and stamped skip them), so their stamps keep the time they started waiting.
     with engine.store.atomic():
         engine.store.connection.execute('DELETE FROM meta WHERE key=?', (EPISODE_PREFIX+key,))
         for w in engine.store.list_wakes(key):
+            if is_keep_warm(w): continue
             for o in engine.store.list_occurrences(w.id, state='pending'):
                 engine.store.set_meta('held_since:'+o.id, '')
 
