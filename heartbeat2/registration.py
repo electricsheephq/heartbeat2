@@ -13,6 +13,38 @@ import threading
 from . import serving
 
 LOG=logging.getLogger('heartbeat2')
+PLUGIN_ROOT=Path(__file__).resolve().parents[1]
+# Every module of the plugin. A runtime imports them all up front, so plugin files replaced under a running process (an
+# upgrade without a reload) stay inert until the restart instead of mixing old and new modules (#207).
+MODULES=('cache','clock','commands','desk','governor','intake','model','notifier','policy','poller','probes','schedule',
+         'serving','store','tool','voice_bridge','wake_text')
+
+
+def installed_version():
+    # Read at import: an unreadable or undecodable manifest must never stop the plugin loading, whatever the host locale.
+    try:
+        import re
+        match=re.search(r'^version:\s*"?([^"\n]+)',(PLUGIN_ROOT/'plugin.yaml').read_text(encoding='utf-8'),re.M)
+        return match.group(1).strip() if match else None
+    except (OSError, ValueError):
+        return None
+
+
+LOADED_VERSION=installed_version()
+
+
+def load_all():
+    import importlib
+    for name in MODULES: importlib.import_module('.'+name,__package__)
+
+
+def version_skew():
+    """A status line when newer plugin files are installed than this process runs, else ''."""
+    installed=installed_version()
+    if not installed or not LOADED_VERSION or installed==LOADED_VERSION: return ''
+    return f'Upgrade pending: {installed} is installed but {LOADED_VERSION} is running; restart Hermes to finish the upgrade.'
+
+
 _RUNTIMES={}
 _GUARD=threading.RLock()
 HOOKS=('pre_gateway_dispatch','gateway_platform_event','pre_llm_call',
@@ -352,6 +384,7 @@ def register(ctx,**options):
         _register_surfaces(ctx,None)
         return None
     scope=manager.scope_key
+    load_all()
     with _GUARD:
         runtime=_RUNTIMES.get(scope)
         if runtime is not None and not runtime.closed: return runtime
