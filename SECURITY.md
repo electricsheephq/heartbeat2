@@ -86,7 +86,9 @@ These same disclosure and exception paragraphs appear in README and the manifest
   IFS, ENV, BASH_ENV, LD_*, DYLD_*, PYTHON*, HERMES_*, LC_*) and malformed rules
   are refused when settings load, as is a rule whose program (or `{python}`
   script) is a relative path, since that resolves in the watcher's cwd, which
-  the agent chooses. The agent cannot set it. Values are never logged
+  the agent chooses. Other variables that change how a program runs (such as
+  GIT_SSH_COMMAND or NODE_OPTIONS) are not refused: name only what the command
+  needs. The agent cannot set it. Values are never logged
   or shown, but the command's output still reaches the agent, and the agent still
   chooses the arguments after the allowed command. Grant a secret only to a
   command that does not print it and cannot be pointed at another host.
