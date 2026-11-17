@@ -217,8 +217,8 @@ def test_hermes_import_missing_falls_through(engine, monkeypatch):
     from heartbeat2.cache import cache_ttl_for
     monkeypatch.setitem(sys.modules,'agent.agent_runtime_helpers',None)
     route='anthropic|claude-test|api.anthropic.com'
-    engine.store.set_meta('cache_routes',json.dumps({route:{'max_warm_gap':100,'min_cold_gap':200}}))
-    assert cache_ttl_for(route,store=engine.store)==(100,'learned')
+    engine.store.set_meta('cache_routes',json.dumps({route:{'max_warm_gap':1000,'min_cold_gap':2000}}))
+    assert cache_ttl_for(route,store=engine.store)==(1000,'learned')
 
 
 @pytest.mark.parametrize('seconds,expected', [(3419,3419),(3420,3420),(3600,3420),(4500,3420),(4501,4501)])

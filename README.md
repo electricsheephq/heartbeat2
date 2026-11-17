@@ -300,7 +300,7 @@ A wake turn is an ordinary model turn in that conversation. It is billed like a 
 ## Prompt cache
 Claude marker routes use Hermes' 5m/1h/auto setting; GPT-5.6+ and GPT-6.x on OpenAI API routes use 30m.
 The Codex OAuth route is reported as unknown until learned.
-Other routes learn a conservative TTL only after both warm and cold gaps are observed.
+Other routes learn a conservative TTL only after both warm and cold gaps are observed. On Claude models, whose caches last at least 5 minutes, a cache miss less than 5 minutes after the previous call means the prompt changed, not that the cache expired, so it doesn't count as a cold gap.
 Agent recurring intervals near the TTL snap below it with downward jitter, respecting floors.
 Owner wakes, cron and anchored repeats retain their timing. Cache lines show the effect and warm interval.
 
@@ -315,7 +315,7 @@ turn ("reply [SILENT]", no tools) that reads the cache and keeps it alive, so th
 - Pings are silent, aren't wake turns, and don't count toward wake turns, messages, active items or the daily priced-spend limit
   for the agent's own turns. `/pulse status` and `/pulse ledger` show them on their own row with their cost.
 - Only you turn it on or off (`/pulse warm off`); the agent can't. When the route doesn't report the cache lifetime,
-  HeartBeat uses the longest gap it has seen stay warm on that route.
+  HeartBeat uses the longest gap it has seen stay warm on that route. When it can't tell the lifetime, `/pulse warm` says why.
 - Hermes has no per-turn output cap for plugins, so the ping asks for a one-word reply rather than enforcing it.
 
 ## Security and privacy
