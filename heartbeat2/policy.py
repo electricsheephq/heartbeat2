@@ -53,6 +53,8 @@ MESSAGING_PLATFORMS = frozenset({"telegram", "discord", "whatsapp", "whatsapp_cl
 LOCAL_SURFACES = frozenset({"desktop", "tui"})
 NON_GATEWAY_PLATFORMS = frozenset({"cli", "api_server", "cron", "local"})
 INJECTION_CONFIG = "plugins:\n  entries:\n    heartbeat2:\n      allow_gateway_injection: true"
+# A wake turn that isn't a role may arm this many follow-ups per turn, never more than a role turn may (#200).
+NON_ROLE_CHILDREN_PER_TURN = 2
 
 
 @lru_cache(maxsize=1)
@@ -412,7 +414,8 @@ class Policy:
         if created_in == "wake_turn":
             if not parent_role and depth > self.max_rearm_chain:
                 return Gate(False, "rearm_depth")
-            if children_created >= (self.max_children_per_wake_turn if parent_role else 1):
+            limit = self.max_children_per_wake_turn if parent_role else min(NON_ROLE_CHILDREN_PER_TURN, self.max_children_per_wake_turn)
+            if children_created >= limit:
                 return Gate(False, "rearm_child")
             if untrusted_payload and kind != "at":
                 return Gate(False, "untrusted_rearm")

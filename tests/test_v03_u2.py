@@ -164,6 +164,8 @@ def test_role_children_reset_depth_and_bound_each_flight(engine):
     start(e)
     result = e.tool.handle(args, session_id='sid')
     assert result.get('ok') and result['wake']['depth'] == 2
+    second = e.tool.handle(args, session_id='sid')
+    assert second.get('ok') and second['wake']['depth'] == 2
     assert e.tool.handle(args, session_id='sid')['error'] == 'rearm_child'
     end(e, 'progress', False)
     e.clock.advance(3600)

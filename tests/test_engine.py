@@ -270,7 +270,7 @@ def test_I10_daily_caps_and_flood(engine):
     assert any(o.error == 'global_flood' for o in e.store.list_occurrences())
 
 
-def test_I11_depth_and_one_child_per_turn(engine):
+def test_I11_depth_and_two_children_per_turn(engine):
     e = engine
     w = arm(e, depth=2)
     e.tick(); start(e)
@@ -278,6 +278,8 @@ def test_I11_depth_and_one_child_per_turn(engine):
     result = e.tool.handle(args, session_id='sid')
     assert result['error'] == 'rearm_depth'
     e.store.cas_wake(w.id, 'active', depth=0)
+    # A ping-back after an earlier child in the same turn (#200).
+    assert e.tool.handle(args, session_id='sid')['ok']
     assert e.tool.handle(args, session_id='sid')['ok']
     assert e.tool.handle(args, session_id='sid')['error'] == 'rearm_child'
 
