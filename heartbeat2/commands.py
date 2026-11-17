@@ -142,7 +142,10 @@ def _item(engine, wake, today_budget=None):
     kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
     held = app_closed_hold(engine, wake)
     if not held and wake.status == 'active' and sleeps(wake) and engine.policy.asleep(engine.store.get_session(wake.session_key), engine.clock.now()):
-        held = 'asleep until you write'
+        from .desk import agreed_reports
+        # A report-back still runs for results of watchers the owner asked for, as the gate allows.
+        if not (wake.trigger_json.get('report_back') and agreed_reports(engine.store, wake.session_key)):
+            held = 'asleep until you write'
     return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) or agreed_watcher(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '') + (' · '+held if held else '')
 
 
