@@ -112,6 +112,7 @@ How command results are read:
 - `change` fires only when a later successful result differs. Nonzero exits are errors in `change` and `json` mode.
 - Use `failure` for a command whose failure exit is the intended signal; CLI exit conventions differ.
 - For a local repository, set `cwd` to it and use an allowlisted verb (`["git","log","-1","--format=%H"]`), not `git -C <repo>`: the allowlist matches the command's first words.
+- For a Python observer the owner allowlisted as `{python} <script>`, use `["{python}","<script>", ...]` as the command, not an interpreter path: `{python}` is resolved to the Python running Hermes at each check.
 - A configured JSON observer may print exactly `{"fire":bool,"message":str,"state":JSON}`. State of up to 16 KB is committed only when fire=true.
 - The argv guard is not a sandbox: allowlisted programs and local configuration must be trusted and read-only. Do not add write/execute flags, shell operators, or browser flags.
 

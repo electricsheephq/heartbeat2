@@ -242,7 +242,7 @@ config_schema:
     type: str
     default: "gh pr view, gh pr checks, gh run view, gh run list, git ls-remote, git status, git log"
     label: "Allowed watcher commands"
-    description: "Comma-separated argv prefixes for command watchers. Blank disables command watchers."
+    description: "Comma-separated argv prefixes for command watchers. Blank disables command watchers. `{python} <script>` runs the script with the Python running Hermes."
   source_silence:
     type: bool
     default: true

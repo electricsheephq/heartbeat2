@@ -43,9 +43,14 @@ def test_check_runs_the_script_with_the_python_running_hermes(tmp_path):
 def test_unknown_interpreter_is_an_error_without_running_anything(tmp_path, monkeypatch):
     script = tmp_path/'check.py'
     monkeypatch.setattr(probes.sys, 'executable', '')
-    monkeypatch.setattr(subprocess, 'Popen', lambda *a, **k: (_ for _ in ()).throw(AssertionError('ran')))
+    spawned = []
+    def popen(*args, **kwargs):
+        spawned.append(args)
+        raise OSError('blocked in test')
+    monkeypatch.setattr(subprocess, 'Popen', popen)
     result = probes.check(wake(['{python}', str(script)]), policy=Policy(probe_commands=f'{{python}} {script}'), home=tmp_path)
     assert result['fire'] is False and result.get('error')
+    assert spawned == []
 
 
 def test_agent_can_arm_a_token_watcher(engine, tmp_path):
