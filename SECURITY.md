@@ -90,8 +90,12 @@ These same disclosure and exception paragraphs appear in README and the manifest
   GIT_SSH_COMMAND or NODE_OPTIONS) are not refused: name only what the command
   needs. The agent cannot set it. Values are never logged
   or shown, but the command's output still reaches the agent, and the agent still
-  chooses the arguments after the allowed command. Grant a secret only to a
-  command that does not print it and cannot be pointed at another host.
+  chooses the arguments after the allowed command and the watcher's working
+  directory. Grant a secret only to a command that does not print it, cannot be
+  pointed at another host, and does not read configuration or code from its
+  working directory (git and npm do: a repository's config can run its own
+  helpers). A bare program name is looked up on Hermes' PATH, which should hold
+  no relative entries.
 - A `{python}` program token matches allowlist entries literally and resolves to
   the Python running Hermes only when the command runs. The next word in such an
   entry must be the script: with nothing or an option (such as `-I` or `-X`) after
