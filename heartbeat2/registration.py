@@ -67,6 +67,10 @@ class Runtime:
         self._voice_bridge=VoiceBridgeRegistry()
         self._voice_bridge_setting=''
         self.voice_bridge_id=''
+        from .notifier import NotifierRegistry
+        self._notifier=NotifierRegistry()
+        self._notify_via_setting=''
+        self.notify_via_invalid=False
 
     def register_voice_bridge(self):
         from .policy import Policy
@@ -85,6 +89,28 @@ class Runtime:
         except Exception:
             LOG.warning('heartbeat2 voice bridge event bus unavailable',exc_info=True)
 
+    def register_notifier(self):
+        from .policy import Policy
+        get_config=getattr(self.ctx,'get_config',None)
+        if not callable(get_config): return
+        with home_scope(self.home): self._notify_via_setting=get_config('notify_via','')
+        try: setting=Policy.from_settings({'notify_via':self._notify_via_setting}).notify_via
+        except (ValueError,TypeError,OverflowError):
+            self.notify_via_invalid=True
+            LOG.warning('heartbeat2 notify_via ignored: expected <plugin>:<target> or blank')
+            return
+        emit,subscribe=getattr(self.ctx,'emit',None),getattr(self.ctx,'subscribe',None)
+        if not setting or not callable(emit) or not callable(subscribe): return
+        try:
+            subscribe(setting.split(':',1)[0]+':heartbeat2_notifier',self._notifier.announce)
+            emit('notifier_wanted',{'version':1})
+        except Exception:
+            LOG.warning('heartbeat2 notifier event bus unavailable',exc_info=True)
+
+    def notifier(self):
+        try: return self._notifier.get()
+        except Exception: return None
+
     def voice_bridge(self):
         try: return self._voice_bridge.get()
         except Exception: return None
@@ -93,7 +119,8 @@ class Runtime:
         from dataclasses import fields
         from .policy import Policy
         with self._policy_lock,home_scope(self.home):
-            settings={f.name:(self._voice_bridge_setting if f.name=='voice_bridge' else
+            settings={f.name:(self._notify_via_setting if f.name=='notify_via' else
+                              self._voice_bridge_setting if f.name=='voice_bridge' else
                               self.ctx.get_config(f.name,getattr(Policy(),f.name)))
                       for f in fields(Policy) if f.name not in {'clock','profile_timezone'}}
             profile=''
@@ -111,7 +138,7 @@ class Runtime:
                     try: Policy.from_settings({key:value},clock=self.clock,profile_timezone=profile)
                     except (ValueError,TypeError,OverflowError) as exc:
                         errors[key]=str(exc)
-                        if key=='voice_bridge': settings[key]=''
+                        if key in {'voice_bridge','notify_via'}: settings[key]=''
                         elif key=='stop_hint': settings.pop(key)
                         elif self._last_good is not None: settings[key]=getattr(self._last_good,key)
                         else: settings.pop(key)
@@ -146,6 +173,8 @@ class Runtime:
                 self._engine.needs_restart=self.needs_restart
                 self._engine.runtime_status=self.status
                 self._engine.voice_bridge=self.voice_bridge
+                self._engine.notifier=self.notifier
+                self._engine.notify_via_invalid=self.notify_via_invalid
             return self._engine
 
     def inactive(self):
@@ -241,6 +270,10 @@ class Runtime:
                         e=self.get_engine()
                         runner=Poller(self.ctx,e.store,e.policy,self.clock,boot_at=self.boot_at)
                         runner.voice_bridge=self.voice_bridge
+                        runner.notifier=self.notifier
+                        runner.notifications=e.notifications
+                        runner._owns_notifications=False
+                        runner.notify_via_invalid=self.notify_via_invalid
                         runner.refresh_policy=self.policy
                         runner.process_start=not self._reconciled
                         self._runner=runner
@@ -269,19 +302,24 @@ class Runtime:
         with self._engine_lock:
             if self.closed: return
             self.closed=True
-            self._voice_bridge.close()
             self._stop.set()
             self._wake.set()
+            if self._engine: self._engine.notifications.stop()
+        self._voice_bridge.close()
+        self._notifier.close()
+        # No engine, store or global registration lock is held while joining.
+        if self._engine: self._engine.notifications.close()
         for thread in self._threads:
             if thread is not threading.current_thread(): thread.join(timeout=.5)
         if self._engine:
-            # This runtime's turns are abandoned even when a tick outlives the join below.
             from .poller import LOCAL_EPOCHS
             LOCAL_EPOCHS.discard(self._engine.epoch)
-        # Do not close a connection under a still-running old tick.
-        if self._engine and all(not t.is_alive() for t in self._threads):
-            self._engine.close()
-            self._engine.store.close()
+            worker=self._engine.notifications.thread
+            threads=self._threads+([worker] if worker is not None else [])
+            # A live tick or transport still owns this connection.
+            if all(not t.is_alive() for t in threads):
+                self._engine.close()
+                self._engine.store.close()
         with _GUARD:
             if _RUNTIMES.get(self.scope) is self: _RUNTIMES.pop(self.scope,None)
 
@@ -324,6 +362,7 @@ def register(ctx,**options):
             cleanup=getattr(ctx,'on_unload',None)
             if cleanup: cleanup(runtime.close)
             runtime.register_voice_bridge()
+            runtime.register_notifier()
             runtime.start()
             return runtime
         except BaseException:

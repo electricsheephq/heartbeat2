@@ -237,6 +237,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Agent can arm wakes | `agent_can_create` | `yes` | yes · ask_first (the agent's wakes wait for `/pulse ok <id>`) · no |
 | Opt-out line on wake messages | `stop_hint` | `once` | `once`: teach how to stop on the first delivered notifying wake per profile; `first_per_chat`: once in each chat. Both skip own-time and message-held turns; own-time and report-back deliveries do not use up the line. `always`: the previous first-wake and built-in-wake rule; `off`: never. Existing profiles and chats with a prior notice count as shown on upgrade. Report-back turns never include it; `/pulse off` and “stop checking in” always work. |
 | Direct messages only | `dm_only` | on | Refuse group chats. Unknown chat types are refused too. When off, group and topic wakes are recognised behind the gateway's sender prefix. |
+| Closed-window notifier | `notify_via` | (blank) | Owner-only `<plugin>:<target>`, for example `birdie:assistant`. [Notice setup and limits](#closed-window-notices). |
 | Voice bridge plugin | `voice_bridge` | (blank) | Trusted bridge plugin id, optionally `category/name`. Blank means no bridge; changes take effect at the next gateway restart. See the [registration contract](docs/voice-bridge.md). |
 | Time zone | `timezone` | (blank) | IANA name such as Europe/Paris. Blank uses the profile's time zone. `/pulse status` shows the zone in use and where it comes from, and says when this setting pins a different zone from Hermes'. When the zone changes, cron and `every … at` wakes move to their local time in the new zone. |
 | Quiet hours | `quiet_hours` | `22:00-08:00` | HH:MM-HH:MM, may cross midnight; blank for none. Due one-shots wait until the end. Your agent's own recurring work and roles keep running inside them, silently: their messages are held. `/pulse status` and the agent's desk show the range and whether it is the default. |
@@ -359,6 +360,16 @@ Wakes can't run in API-server sessions yet: Hermes drops plugin turns there. Arm
 This Hermes version can't deliver wakes to app sessions. Update Hermes, or use a messaging chat.
 
 The last message applies to Desktop/TUI hosts without local-session injection support. `/pulse warm` stays messaging-only: a closed app window makes keep-warm pointless.
+
+Desktop and TUI wakes stay held while their app window is closed. An optional `notify_via` notice can tell the owner to reopen that chat; it does not run the wake elsewhere.
+
+### Closed-window notices
+
+The owner can set `plugins.entries.heartbeat2.settings.notify_via` to `birdie:assistant` (then restart Hermes). Install and configure the notifier plugin separately. Blank disables notices; invalid values are ignored. `/pulse status` shows whether the notifier is connected.
+
+After a chat's oldest closed-window hold reaches ten minutes, HeartBeat sends one short count-and-time notice per held episode. It includes no wake titles or contents. The chat's quiet-hours override (or profile quiet hours when there is no override) and daily message cap defer it; the unanswered mute does not. Off or paused chats send no notice. A queued notice counts as one message, without increasing the unanswered count. One wait gets one notice. Before a notice is sent, the wait ends when a wake in that chat runs (an accepted injection) or no wake is held there any more. After a notice is sent, it lasts until a wake runs in the reopened chat or the owner writes there, and at most a day after the notice, so a window closed for days gets at most one notice a day.
+
+`queued` means accepted by the notifier's bus, not read by anyone. Failed sends retry after five minutes for the first three attempts, then hourly, stopping after 24 hours. A timeout or Birdie's “can't reach birdie” error shows **may repeat**: the notifier couldn't confirm the send, and the message may already have gone, so a retry can duplicate it. **notifier not ready** means no sending-profile token is available yet; Birdie obtains one after that profile's first turn. Hosts without the plugin event bus show **not connected**. Plugin authors: [notifier handshake](docs/notifier.md).
 
 ### Known limits
 

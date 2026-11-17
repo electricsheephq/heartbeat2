@@ -111,6 +111,16 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
     for w in wakes:
         held = app_closed_hold(view, w)
         if held: held_rows.append(f'- {w.id}: '+held)
+    if held_rows and policy.notify_via:
+        from .notifier import notifier_line, notice_state
+        notice_view=SimpleNamespace(store=store,clock=clock,policy=policy,
+            notifier=getattr(engine_or_store,'notifier',None),
+            notify_via_invalid=getattr(engine_or_store,'notify_via_invalid',False),
+            paused=getattr(engine_or_store,'paused',lambda:False),
+            eligible=getattr(engine_or_store,'eligible',lambda:False),
+            injection_allowed=getattr(engine_or_store,'injection_allowed',lambda:False),
+            daily=lambda k:store.daily_counts(k,policy.resolved_timezone()))
+        if notice_state(notice_view,key): tail.append('- '+notifier_line(notice_view,key))
     tail.extend(held_rows[:3])
     if len(held_rows)>3:
         tail.append(f'- {len(held_rows)-3} more held while their app window is closed')

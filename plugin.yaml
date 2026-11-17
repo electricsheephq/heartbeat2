@@ -1,5 +1,5 @@
 name: heartbeat2
-version: "0.4.17"
+version: "0.4.18"
 description: >-
   HeartBeat 2.0: your agent's own time between your messages. Roles it owns, follow-ups,
   own-time turns and free deterministic watchers, all in the conversation that armed them and
@@ -62,6 +62,11 @@ config_schema:
     default: ""
     label: "Voice bridge plugin"
     description: "Trusted voice bridge plugin id; blank disables registration, and changes take effect at the next gateway restart."
+  notify_via:
+    type: str
+    default: ""
+    label: "Closed-window notifier"
+    description: "Owner-only plugin:target, for example birdie:assistant; blank disables notices. Restart Hermes after changing it."
   quiet_hours:
     type: str
     default: "22:00-08:00"

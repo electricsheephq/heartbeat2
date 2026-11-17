@@ -76,6 +76,9 @@ class Poller:
         self.restart=lambda: None
         self.signal=lambda: None
         self.needs_restart=self._needs_restart
+        from .notifier import NotificationWorker
+        self.notifications=NotificationWorker(store)
+        self._owns_notifications=True
 
     def _needs_restart(self):
         last=self.store.get_meta('last_tick_monotonic')
@@ -143,6 +146,7 @@ class Poller:
 
     def close(self):
         self.closed=True
+        if self._owns_notifications: self.notifications.close()
         # A closed poller's turns are abandoned; a re-registered runtime must not treat them as live.
         LOCAL_EPOCHS.discard(self.epoch)
         self.release()
@@ -226,6 +230,11 @@ class Poller:
                 self.store.cas_occurrence(wid,o.dedupe_key,o.state,'superseded',
                     attempt=o.attempt if o.state!='pending' else None,force_silent=True,
                     error='expired_held' if o.state=='pending' and o.held_since is not None and reason in {'expired','max_fires','max_lifetime_changed'} else reason)
+
+        wake=self.store.get_wake(wid)
+        if wake is not None and wake.platform in LOCAL_SURFACES:
+            from .notifier import episode_over, end_episode
+            if episode_over(self,wake.session_key): end_episode(self,wake.session_key)
 
     def recheck_pending(self,old,new):
         target_changed=any(old.trigger_json.get(k)!=new.trigger_json.get(k)
@@ -336,6 +345,7 @@ class Poller:
                 w=s.get_wake(o.wake_id)
                 cache_line=self.cache_line(w)  # Pricing may fetch metadata; never hold the write lock.
                 self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
+            self.notifications.tick(self)
         except Exception as exc:
             self.log.warning('heartbeat2 tick failed',exc_info=True)
             try: self.store.set_meta('last_error',type(exc).__name__)
@@ -921,6 +931,9 @@ class Poller:
             accepted=False
             self.log.warning('heartbeat2 injection failed: %s',type(exc).__name__)
         if accepted:
+            if session.platform in LOCAL_SURFACES:
+                from .notifier import end_episode
+                end_episode(self,session.session_key)
             s.set_meta('held_since:'+o.id,'')
             s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))
             flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]
@@ -936,8 +949,14 @@ class Poller:
                 # waiting time separately from watcher/message holds, so those holds and silence still work unchanged.
                 with s.atomic():
                     if self.refund_claimed(o,'app_closed'):
+                        from .notifier import episode_over, end_episode
+                        if episode_over(self,w.session_key): end_episode(self,w.session_key)
                         if not s.get_meta('held_since:'+o.id): s.set_meta('held_since:'+o.id,str(self.clock.now()))
                         s.set_meta('not_before:'+o.id,str(self.clock.now()+60))
+                        if not is_keep_warm(w):
+                            from .notifier import episode, EPISODE_PREFIX
+                            if not s.get_meta(EPISODE_PREFIX+w.session_key):
+                                s.set_meta(EPISODE_PREFIX+w.session_key,json.dumps(episode(self,w.session_key)))
                 return
             count=int(s.get_meta('inject_failures:'+o.id) or 0)+1
             s.set_meta('inject_failures:'+o.id,str(count))

@@ -145,9 +145,9 @@ def _item(engine, wake, today_budget=None):
 
 
 def app_closed_hold(engine, wake):
-    if wake.platform not in LOCAL_SURFACES: return ''
+    if wake.platform not in LOCAL_SURFACES or wake.status != 'active' or is_keep_warm(wake): return ''
     since = [float(stamp) for o in engine.store.list_occurrences(wake.id, state='pending')
-             if (stamp := engine.store.get_meta('held_since:'+o.id))]
+             if o.error == 'app_closed' and (stamp := engine.store.get_meta('held_since:'+o.id))]
     return 'held: app window is closed · since '+_time(engine,min(since)) if since else ''
 
 
@@ -429,6 +429,9 @@ def handle(raw_args, runtime):
                 if bridge_id:
                     from .voice_bridge import voice_bridge_for
                     lines.append(f'voice bridge: {bridge_id} ({"connected" if voice_bridge_for(engine) else "not connected"})')
+                from .notifier import notifier_line
+                notice=notifier_line(engine,key)
+                if notice: lines.append(notice)
                 held=sum(o.held_since is not None or bool(engine.store.get_meta('held_since:'+o.id))
                          for o in engine.store.list_occurrences(session_key=key,state='pending'))
                 kw=engine.store.get_wake(keep_warm_id(key))
