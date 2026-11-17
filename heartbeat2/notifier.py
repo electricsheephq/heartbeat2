@@ -139,7 +139,11 @@ def episode_over(engine, key, now=None):
     still waiting starts a fresh wait: at most one notice per wait, and at most one a day.
     """
     data = json.loads(engine.store.get_meta(EPISODE_PREFIX+key) or 'null') or {}
-    if 'queued' not in data: return not stamped(engine, key)
+    if 'queued' not in data:
+        # Its notice is being sent: the send's result decides, so a pause or cancel meanwhile can't lose the receipt.
+        reservation = getattr(engine.store, 'notify_reservation', None)
+        if reservation is not None and reservation[0] == key: return False
+        return not stamped(engine, key)
     now = engine.clock.now() if now is None else now
     chat = engine.store.get_session(key)
     return now-data['queued'] >= 86400 or bool(chat and chat.last_human_at and chat.last_human_at > data['queued'])
