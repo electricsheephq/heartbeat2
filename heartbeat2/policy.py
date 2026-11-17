@@ -28,6 +28,12 @@ def owner_class(wake):
     return is_owner(wake) or owner_requested(wake)
 
 
+def sleeps(wake):
+    """The agent's own work, which sleeps once the owner has been away `sleep_after_days` (#62). Owner wakes, reminders and
+    watchers the owner asked for, and the owner's keep-warm still run."""
+    return not owner_class(wake) and not agreed_watcher(wake) and not is_keep_warm(wake)
+
+
 def agreed_watcher(wake):
     """A watcher the agent armed because the owner asked for it in their own message (#108).
 
@@ -208,6 +214,7 @@ class Policy:
     catch_up_hours: int = 6
     probe_commands: str = "gh pr view, gh pr checks, gh run view, gh run list, git ls-remote, git status, git log"
     probe_command_env: str = ""
+    sleep_after_days: int = 0
     source_silence: bool = True
     source_process: bool = True
     source_file: bool = True
@@ -306,6 +313,7 @@ class Policy:
             "max_active_profile": 10000,
             "keep_warm_idle_hours": 168,
             "keep_warm_min_tokens": 10000000,
+            "sleep_after_days": 365,
         }.items():
             if getattr(result, name) > maximum:
                 raise ValueError(f"{name} exceeds maximum {maximum:g}")
@@ -613,6 +621,12 @@ class Policy:
     def role_budget(self, wake):
         return max(1, min(wake.budget_turns_per_day if wake.budget_turns_per_day is not None
                           else self.role_turns_per_day_default, self.role_turns_per_day_max))
+
+    def asleep(self, session, now: float) -> bool:
+        """The owner has written nothing in this chat for `sleep_after_days` (#62). With no record of an owner message, the
+        chat is awake: absence needs evidence."""
+        last = getattr(session, 'last_human_at', None)
+        return bool(self.sleep_after_days) and last is not None and now - last >= self.sleep_after_days * 86400
 
     def unanswered_gate(self, wake: Wake, unanswered_count: int) -> str | None:
         if unanswered_count >= self.max_unanswered and not owner_class(wake) and not agreed_watcher(wake):

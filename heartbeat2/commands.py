@@ -153,13 +153,14 @@ def app_closed_hold(engine, wake):
 
 def _occurrences(engine, wake):
     reasons={'held_unanswered':'held: waiting for your reply', 'held_daily_cap':'held: waiting for daily capacity', 'held_paused':'held: wake paused',
-        'app_closed':'held: app window is closed',
+        'app_closed':'held: app window is closed', 'held_asleep':'held: chat asleep until you write',
+        'asleep':'dropped: chat asleep (no message from you for '+str(engine.policy.sleep_after_days)+'+ days)',
         'unanswered':'dropped: unanswered mute', 'daily_model_cap':f'dropped: daily model cap ({engine.policy.max_model_wakes_per_day})',
         'daily_message_cap':f'dropped: daily message cap ({engine.policy.max_messages_per_day})', 'expired_held':'expired while held'}
     def held_clause(o):
         held = o.held_reason
         if not held or held == o.error: return ''
-        if held in {'held_unanswered','held_daily_cap','held_paused'}:
+        if held in {'held_unanswered','held_daily_cap','held_paused','held_asleep'}:
             return ' · was '+reasons[held]
         if held.startswith(('message_held:', 'reported:')):
             code = held.split(':', 1)[1]
@@ -433,6 +434,9 @@ def handle(raw_args, runtime):
                          # What the create limits count: active and proposed items, not the check-in, own time or keep-warm (#171).
                          f'Limits: {used} of {engine.policy.max_active} items in this chat, {profile_used} of {engine.policy.max_active_profile} in this profile '
                          "(check-in, own time and keep-warm don't count; the owner can raise max_active / max_active_profile in settings)"]
+                if engine.policy.asleep(session,engine.clock.now()):
+                    lines.append(f'Asleep: no message from you for {engine.policy.sleep_after_days}+ days, so your agent\'s own wakes and '
+                                 'watchers are not running; they resume when you write (any message, not a /pulse command).')
                 if engine.policy.timezone_pin_notice(): lines.append(engine.policy.timezone_pin_notice())
                 from .registration import version_skew
                 if skew := version_skew(): lines.append(skew)

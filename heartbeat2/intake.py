@@ -78,6 +78,18 @@ def fail_open(fn):
     return call
 
 
+# Settings that are not chat bounds stay out of the fingerprint; a setting added later counts only when set, so an upgrade
+# alone never reads as "limits changed".
+FINGERPRINT_EXCLUDED = frozenset({'clock','profile_timezone','voice_bridge','notify_via','stop_hint','probe_command_env'})
+FINGERPRINT_WHEN_SET = frozenset({'sleep_after_days'})
+
+
+def limits_fingerprint(policy):
+    limits={f.name:getattr(policy,f.name) for f in fields(policy)
+            if f.name not in FINGERPRINT_EXCLUDED and not (f.name in FINGERPRINT_WHEN_SET and not getattr(policy,f.name))}
+    return hashlib.sha256(json.dumps(limits,sort_keys=True).encode()).hexdigest()
+
+
 def pulse_command(text):
     return isinstance(text,str) and bool(re.match(r'^/pulse(?:@[^\s]+)?(?:\s|$)',text.strip(),re.I))
 
@@ -672,8 +684,7 @@ class Intake:
                     ending = '.' if w.role or w.trigger_json.get('own_time') else f'; convert with /pulse watch {w.id}.'
                     lines.append(f'{w.title or "A wake"} ({w.id}) paused ({card}): keep / slow / stop via /pulse{ending}')
                     s.set_meta('card:'+w.id,'')
-            limits={f.name:getattr(e.policy,f.name) for f in fields(e.policy) if f.name not in {'clock','profile_timezone','voice_bridge','notify_via','stop_hint','probe_command_env'}}
-            fingerprint=hashlib.sha256(json.dumps(limits,sort_keys=True).encode()).hexdigest()
+            fingerprint=limits_fingerprint(e.policy)
             session=s.get_session(key)
             if session.limits_fingerprint and session.limits_fingerprint!=fingerprint:
                 lines.append('HeartBeat 2.0 limits changed outside /pulse; current bounds now apply.')

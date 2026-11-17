@@ -89,10 +89,11 @@ def test_an_agent_one_shot_is_dropped_and_ended(engine):
     assert [o.error for o in engine.store.list_occurrences(w.id)] == ['asleep']
 
 
-def test_weeks_of_sleep_leave_recurring_work_and_roles_untouched(engine):
-    wakes = [arm(engine, 'every'), arm(engine, 'every', role='researcher')]
+def test_days_of_sleep_leave_recurring_work_and_roles_untouched(engine):
+    far = engine.clock.now() + 90*DAY
+    wakes = [arm(engine, 'every', expires_at=far), arm(engine, 'every', role='researcher', expires_at=far)]
     away(engine)
-    for _ in range(21 * 24):
+    for _ in range(13 * 24):  # inside the agent's 14-day lifetime cap, which sleep does not change
         engine.clock.advance(3600)
         engine.tick()
     assert not engine.ctx.calls
@@ -120,7 +121,8 @@ def test_a_pulse_command_does_not_wake_the_chat(engine):
     assert engine.store.get_session(KEY).last_human_at == s.last_human_at
 
 
-def test_status_and_why_say_the_chat_is_asleep(engine):
+def test_status_and_why_say_the_chat_is_asleep(engine, monkeypatch):
+    monkeypatch.setattr(commands, 'session_env', lambda n: KEY if n == 'HERMES_SESSION_KEY' else '')
     w = arm(engine, 'at')
     away(engine, days=3)
     engine.tick()
@@ -133,3 +135,12 @@ def test_the_setting_changes_the_limits_fingerprint_only_when_set(engine):
     from heartbeat2.intake import limits_fingerprint
     assert limits_fingerprint(replace(engine.policy, sleep_after_days=0)) == limits_fingerprint(engine.policy)
     assert limits_fingerprint(replace(engine.policy, sleep_after_days=7)) != limits_fingerprint(engine.policy)
+
+
+def test_the_test_preview_agrees_that_the_chat_is_asleep(engine, monkeypatch):
+    monkeypatch.setattr(commands, 'session_env', lambda n: KEY if n == 'HERMES_SESSION_KEY' else '')
+    w = arm(engine, 'every', expires_at=engine.clock.now() + 7*DAY)
+    away(engine)
+    out = commands.handle(f'test {w.id}', SimpleNamespace(get_engine=lambda: engine))
+    assert 'asleep' in out, out
+    assert not engine.ctx.calls
