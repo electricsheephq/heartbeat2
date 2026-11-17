@@ -3,6 +3,8 @@ from dataclasses import replace
 import subprocess
 import sys
 
+import pytest
+
 from heartbeat2 import probes
 from heartbeat2.model import Wake
 from heartbeat2.policy import Policy
@@ -21,6 +23,16 @@ def test_entry_matches_the_token_and_its_script_only(tmp_path):
     assert not policy.command_allowed(['{python}', str(tmp_path/'other.py')])
     assert not policy.command_allowed([sys.executable, script])
     assert not policy.command_allowed(['{python}', '-c', 'print(1)'])
+    assert policy.command_allowed(['git', 'status'])
+
+
+@pytest.mark.parametrize('entry', ['{python} -I', '{python} -X dev', '{python} -m mod', '{python} -u'])
+def test_a_token_entry_must_name_its_script_next(entry, tmp_path):
+    script = str(tmp_path/'any.py')
+    policy = Policy(probe_commands=f'{entry}, git status')
+    argv = ['{python}', *entry.split()[1:], script]
+    assert not policy.command_allowed(argv)
+    assert not policy.command_allowed(['{python}', *entry.split()[1:]])
     assert policy.command_allowed(['git', 'status'])
 
 

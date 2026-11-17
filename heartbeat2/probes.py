@@ -61,6 +61,14 @@ def resolve_program(argv):
     return [sys.executable, *argv[1:]]
 
 
+def _allowlist_entry(entry):
+    prefix = shlex.split(entry.strip())
+    # `{python}` must be followed by its script. With nothing after it, or an option such as -I or -X next, the entry
+    # would admit any script appended to it, so it allows nothing.
+    if prefix[:1] == [PYTHON_TOKEN] and (len(prefix) < 2 or prefix[1].startswith('-')): return []
+    return prefix
+
+
 def command_allowed(argv, allowlist):
     if not isinstance(argv, list) or not argv or not isinstance(allowlist, str):
         return False
@@ -79,7 +87,7 @@ def command_allowed(argv, allowlist):
             return False
     try:
         return any(argv[:len(prefix)] == prefix for entry in allowlist.split(',')
-                   if (prefix := shlex.split(entry.strip())) and prefix != [PYTHON_TOKEN])
+                   if (prefix := _allowlist_entry(entry)))
     except ValueError:
         return False
 

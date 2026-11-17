@@ -71,8 +71,9 @@ These same disclosure and exception paragraphs appear in README and the manifest
   guard rejects shell operators, output/code/config/helper/browser flags and
   common mutating verbs, including gh `--jq`/`-q` and `--template`/`-t`.
 - A `{python}` program token matches allowlist entries literally and resolves to
-  the Python running Hermes only when the command runs. An entry that is only
-  `{python}`, with no script after it, allows nothing.
+  the Python running Hermes only when the command runs. The next word in such an
+  entry must be the script: with nothing or an option (such as `-I` or `-X`) after
+  `{python}`, the entry allows nothing.
   Pager variables are set to `cat`; optional git locks
   are disabled. This cannot detect hidden effects in binaries, wrappers, Git
   helpers/hooks, executable lookup or remote services.
