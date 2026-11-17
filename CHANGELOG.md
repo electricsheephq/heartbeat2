@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.17 — 2026-11-17
+
+- **Wakes, roles and own time now run in Hermes Desktop and TUI chats** on Hermes 0.23 or later, with the same budgets, quiet hours, caps and check-ins as a one-to-one DM. HeartBeat reads the real app surface from Hermes, and only admits app chats when the running Hermes can deliver plugin turns to them. While the app window is closed, a wake waits instead of failing: it retries every minute, and `/pulse status` and the desk show it as held since it started waiting. In an app window, a wake turn that isn't notifying is asked to reply with exactly `[SILENT]`, because Hermes still shows a silenced turn's text there (no push is sent). The CLI and API-server sessions stay refused, now with messages that say why. New VISION.md states what HeartBeat is for and where wakes run. (#197)
+
 ## 0.4.16 — 2026-11-16
 
 - **Opening a chat in the app no longer cancels its reminders.** Hermes tells plugins a session was reset each time the desktop or mobile app opens or reconnects to an existing chat, even though the conversation didn't change. HeartBeat treated that as `/new`: it orphaned every one-time reminder in the chat and posted "Wakes from the old conversation were orphaned after /new." HeartBeat now acts only on a real reset, one that names both the old and the new conversation and where they differ, as `/new` does. If a conversation changes without a reset, the next turn in it still retires the old reminders. Reminders already orphaned by this bug need to be set again. (#198)
