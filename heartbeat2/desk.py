@@ -26,8 +26,11 @@ def _plain(text: str) -> str:
 
 
 def agreed_reports(store, session_key):
-    """Held results of watchers the owner asked for: the unanswered mute doesn't hold them (#108)."""
-    return [o for o in store.held_reports(session_key) if (w := store.get_wake(o.wake_id)) is not None and agreed_watcher(w)]
+    """Held results of watchers the owner asked for: the unanswered mute doesn't hold them (#108).
+
+    A watcher cancelled since loses this, so its result waits for the owner like any other; one that finished keeps it."""
+    return [o for o in store.held_reports(session_key)
+            if (w := store.get_wake(o.wake_id)) is not None and w.status != 'cancelled' and agreed_watcher(w)]
 
 
 def held_report_lines(store, session_key, *, limit=5, payload_ok=True, agreed_only=False) -> tuple[list[str], list[tuple[str, str]]]:

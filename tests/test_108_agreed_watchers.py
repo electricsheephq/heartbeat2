@@ -132,3 +132,24 @@ def test_the_desk_says_agreed_watchers_still_send(engine):
     create(engine, kind='subagent_done')
     muted(engine)
     assert "Messages held now: the owner hasn't replied yet (watchers the owner asked for still send their alerts)" in desk(engine)
+
+
+@pytest.mark.parametrize('after', ['cancelled', 'done'])
+def test_a_cancelled_watchers_held_result_waits_but_a_finished_ones_does_not(engine, after):
+    # Review (Astra r2): an agreed alert held by quiet hours, then the watcher is cancelled: its result is no longer
+    # the owner's ask, so the mute holds it. A watcher that finished on its own keeps the exemption for its result.
+    import test_v049_watchers_while_held as held
+    e = engine
+    held.hold(e, 'quiet_hours')
+    agreed = held.watch(e, '90', owner_requested=True)
+    held.finish_watch(e, agreed, summary='Your flight is delayed two hours.', muted=True)
+    back, pending = held.queued_report(e)
+    w = e.store.get_wake(agreed.id)
+    if after == 'cancelled':
+        assert e.tool.handle({'action': 'cancel', 'id': w.id}, session_id='sid').get('ok')
+    else:
+        assert e.store.cas_wake(w.id, w.status, expected_version=w.version, status='done', status_reason='completed')
+    session(e, unanswered_count=e.policy.max_unanswered)
+    e.clock.advance(1200)
+    verdict = e.gate(back, e.store.get_occurrence(back.id, pending.dedupe_key), e.store.get_session(KEY))[0]
+    assert verdict == ('unanswered' if after == 'cancelled' else '')
