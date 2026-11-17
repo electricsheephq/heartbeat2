@@ -42,6 +42,9 @@ def offers_stop_hint(wake: Wake, session: Session, *, stop_hint: str = 'once',
                      stop_hint_chat_shown: bool | None = None, message_held: str = '') -> bool:
     if wake.trigger_json.get('report_back') or stop_hint == 'off':
         return False
+    # An app window shows every word of a held turn, which must reply with exactly [SILENT] (#197).
+    if message_held and session.platform in LOCAL_SURFACES:
+        return False
     if stop_hint == 'always':
         return not session.first_notice_sent or bool(wake.trigger_json.get('builtin'))
     if wake.trigger_json.get('own_time') or message_held:
@@ -123,6 +126,9 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
                      "if the owner should hear about this, respond with notify=true, an outcome other than no_change, and a plain-sentence summary: nothing is sent now, but HeartBeat keeps the summary and hands it back on the owner's next message"
                      + ((", or in one report-back turn once messages can be sent" if message_held != 'unanswered' else '')
                         if wake.kind in PROBE_KINDS | EVENT_KINDS else " or a later role or own-time turn that can send") + ". Keep it in your notes too.")
+        if session.platform in LOCAL_SURFACES:
+            lines.append('This app window shows anything you write, so reply with exactly [SILENT] and nothing else, '
+                         'even when you respond with notify=true: HeartBeat keeps the summary, not your reply.')
     if offers_stop_hint(wake, session, stop_hint=stop_hint, stop_hint_shown=stop_hint_shown,
                         stop_hint_chat_shown=stop_hint_chat_shown, message_held=message_held):
         lines.append('If you notify, end with one line saying they can say "stop checking in" or use /pulse off.')

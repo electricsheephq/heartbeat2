@@ -350,3 +350,33 @@ def test_desk_bounds_closed_app_rows(engine, monkeypatch):
     assert text.count('held: app window is closed') == 3
     assert '- 37 more held while their app window is closed' in text
     assert 'Owner last wrote' in text and 'Items' in text and 'quiet hours' in text
+
+
+HELD_APP_LINE = ('This app window shows anything you write, so reply with exactly [SILENT] and nothing else, '
+                 'even when you respond with notify=true: HeartBeat keeps the summary, not your reply.')
+
+
+@pytest.mark.parametrize('held', ['quiet_hours', 'unanswered', 'daily_message_cap'])
+@pytest.mark.parametrize('stop_hint', ['once', 'always', 'first_per_chat'])
+def test_held_app_turn_replies_silent_and_offers_no_stop_hint(clock, held, stop_hint):
+    from heartbeat2.wake_text import offers_stop_hint
+    w,o,s=records(clock)
+    s=replace(s,first_notice_sent=False)
+    messaging=render_wake(w,o,replace(s,platform='telegram'),clock=clock,message_held=held,stop_hint=stop_hint)
+    assert HELD_APP_LINE not in messaging
+    for platform in ('desktop','tui'):
+        app=replace(s,platform=platform)
+        text=render_wake(w,o,app,clock=clock,message_held=held,stop_hint=stop_hint)
+        assert HELD_APP_LINE in text
+        assert 'stop checking in' not in text
+        assert not offers_stop_hint(w,app,stop_hint=stop_hint,message_held=held)
+        # Messages flowing again: the app chat gets the ordinary not-notifying rule, no held line.
+        assert HELD_APP_LINE not in render_wake(w,o,app,clock=clock,stop_hint=stop_hint)
+
+
+@pytest.mark.parametrize('stored,expected', [('cli', CLI), ('api_server', API)])
+@pytest.mark.parametrize('action', ['status', 'off', 'quiet off'])
+def test_command_in_stored_cli_or_api_chat_gives_its_refusal(engine, monkeypatch, stored, expected, action):
+    session(engine, platform=stored)
+    bind(monkeypatch, 'local')
+    assert commands.handle(action, SimpleNamespace(get_engine=lambda:engine)) == expected

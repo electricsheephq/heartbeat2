@@ -347,6 +347,8 @@ def handle(raw_args, runtime):
                     bound['platform']=session.platform
                 elif session is None:
                     return 'Send a message in this chat first, then try /pulse again.'
+                elif action not in {'run','test'} and platform_refusal(session.platform):
+                    return platform_refusal(session.platform)  # a CLI chat gets the CLI's own refusal
             app_off=action=='off' and session is not None and session.platform in LOCAL_SURFACES
             if action not in {'run','test'} and not app_off and bound['platform'] and not deliverable_platform(bound['platform']):
                 return platform_refusal(bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
