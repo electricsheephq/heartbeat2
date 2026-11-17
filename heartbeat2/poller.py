@@ -16,14 +16,14 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat
+from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every
 from . import governor
 
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
 PROBES_PER_TICK = 16
-FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
+FINAL_SKIP_REASONS = frozenset({'unanswered','asleep','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires','nothing_to_report'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
 # by another (for a startup replay: the crashed) process.
@@ -774,6 +774,14 @@ class Poller:
         if s.paused_until is not None and s.paused_until>now: return 'session_paused',True,None
         if self.policy.dm_only and (s.chat_type!='dm' or w.chat_type!='dm'): return 'dm_only',False,None
         if not deliverable_platform(s.platform): return 'non_gateway',False,None
+        # The owner has been away sleep_after_days: the agent's own work runs no turn until they write (#62). This comes
+        # before the message holds, which still run a turn silently. A report-back passes only for agreed results.
+        if sleeps(w) and self.policy.asleep(s,now):
+            if w.trigger_json.get('report_back'):
+                from .desk import agreed_reports
+                if not agreed_reports(self.store,s.session_key): return 'asleep',False,None
+            elif is_watcher(w): return 'held_asleep',True,None
+            else: return 'asleep',False,None
         health=json.loads(self.store.get_meta('provider_health') or '{}')
         if health.get('trial'):
             wid,key=health['trial'].split('/',1)
@@ -842,6 +850,11 @@ class Poller:
                 held={'held_since':o.held_since if o.held_since is not None else self.clock.now(),
                       'held_reason':reason,'held_matches':o.held_matches or max(1,len(o.payload_json)),
                       'payload_json':o.payload_json[-1:]} if reason.startswith('held_') else {}
+                if held and o.force_silent and o.held_reason.startswith('message_held:'):
+                    # A held_ reason replaces a message hold; drop its silence with it, or it could never be cleared
+                    # (dispatch only clears a message_held: silence) and the owner's result would end as [SILENT].
+                    # Dispatch checks the message holds again before the turn.
+                    held['force_silent']=False
                 s.update_occurrence(w.id,o.dedupe_key,'pending',error=reason,**held)
                 if reason=='provider_unavailable':
                     if first: self.ledger(w,provider_deferrals=1)
@@ -889,7 +902,8 @@ class Poller:
         reports=''
         if (w.role or w.trigger_json.get('own_time') or w.trigger_json.get('report_back')) and not message_held and not o.force_silent:
             report_lines,shown=held_report_lines(s,w.session_key,payload_ok=bool(w.trigger_json.get('report_back')),
-                agreed_only=bool(w.trigger_json.get('report_back') and self.policy.unanswered_gate(w,session.unanswered_count)))
+                agreed_only=bool(w.trigger_json.get('report_back') and (self.policy.unanswered_gate(w,session.unanswered_count)
+                                                                        or self.policy.asleep(session,self.clock.now()))))
             if report_lines:
                 reports='\n'.join(['Held for the owner (their limits held these earlier). If you message them this turn, include what still matters:', *report_lines])
                 s.set_meta('report_shown:'+o.id,json.dumps(shown))

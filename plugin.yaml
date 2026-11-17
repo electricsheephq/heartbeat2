@@ -1,5 +1,5 @@
 name: heartbeat2
-version: "0.4.26"
+version: "0.4.27"
 description: >-
   HeartBeat 2.0: your agent's own time between your messages. Roles it owns, follow-ups,
   own-time turns and free deterministic watchers, all in the conversation that armed them and
@@ -121,6 +121,11 @@ config_schema:
     default: 2
     label: "Unanswered messages before mute"
     description: "Wakes you armed always fire; agent watchers wait for your reply; agent one-time reminders are dropped; the agent's recurring work keeps running, with its messages held. Watchers you ask for in chat still send their alerts."
+  sleep_after_days:
+    type: int
+    default: 0
+    label: "Sleep the agent's wakes after days without your message"
+    description: "0 is off. After this many days with no message from you in a chat, the agent's own wakes, roles, own time and watchers there run no turn until you write again (a /pulse command doesn't count). Its one-time reminders are dropped; its watchers keep checking and hold one result for your return, unless they expire first. Your own wakes, reminders and watchers you asked for, and the keep-warm, still run."
   min_interval_minutes:
     type: int
     default: 15
