@@ -91,7 +91,7 @@ def test_negative_controls(engine, control):
     w, result = create(engine, requested=control != 'undeclared', kind=kind)
     assert flag(w) is False
     if control != 'undeclared':
-        assert result.get('owner_asked_ignored') == ('not_one_shot' if kind != 'at' else 'not_owner_turn')
+        assert result.get('owner_asked_ignored') == ('not_one_shot_or_watcher' if kind != 'at' else 'not_owner_turn')
     else:
         assert 'owner_asked_ignored' not in result
     finish(engine)

@@ -136,7 +136,7 @@ def test_receipt_excludes_ignored_refused_user_proposed_and_paused(engine, comma
     assert not ignored['wake']['owner_requested'] and EXEMPTION not in receipt(ignored)
     owner_turn(engine)
     recurring = create(engine, {'kind':'every', 'every':'1h'}, owner_asked=True)
-    assert recurring.get('ok') and recurring['owner_asked_ignored'] == 'not_one_shot'
+    assert recurring.get('ok') and recurring['owner_asked_ignored'] == 'not_one_shot_or_watcher'
     assert not recurring['wake']['owner_requested'] and EXEMPTION not in receipt(recurring)
     refused = create(engine, {'kind':'at', 'at':'in 366d'}, owner_asked=True)
     assert refused.get('error') == 'invalid_request' and 'receipt' not in refused

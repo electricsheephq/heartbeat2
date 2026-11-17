@@ -243,7 +243,7 @@ class Tool:
                     item = {'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w),'receipt':self.receipt(w,s)}
                     if 'handoff_to' in args: item['handoff_to'] = args['handoff_to']
                     if args.get('owner_asked') is True and not requested:
-                        item['owner_asked_ignored'] = 'wake_turn' if created_in == 'wake_turn' else 'not_owner_turn' if not evidence else 'not_one_shot'
+                        item['owner_asked_ignored'] = 'wake_turn' if created_in == 'wake_turn' else 'not_owner_turn' if not evidence else 'not_one_shot_or_watcher'
                     return item
                 if action not in {'update','pause','resume','cancel'}:
                     return {'error':'unknown_action'}

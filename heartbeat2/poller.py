@@ -795,6 +795,11 @@ class Poller:
         quiet=quiet_until(self,s.session_key,urgent=w.urgent)
         if quiet is not None and not message_held: return 'quiet_hours',w.kind not in RECURRING_KINDS,quiet
         mute=self.policy.unanswered_gate(w,s.unanswered_count)
+        if mute and w.trigger_json.get('report_back'):
+            # A watcher the owner asked for may have been held by quiet hours or a cap; the mute doesn't hold its
+            # result, so the report-back passes it on (and only it) (#108).
+            from .desk import agreed_reports
+            if agreed_reports(self.store,s.session_key): mute=None
         if mute and not message_held: return mute,mute=='held_unanswered',None
         totals=self.daily(s.session_key)
         cap='daily_model_cap' if totals['model_turns']>=self.policy.max_model_wakes_per_day else 'daily_message_cap' if totals['delivered']>=self.policy.max_messages_per_day else ''
@@ -883,7 +888,8 @@ class Poller:
         from .desk import held_report_lines, _plain, _clip, _oneline
         reports=''
         if (w.role or w.trigger_json.get('own_time') or w.trigger_json.get('report_back')) and not message_held and not o.force_silent:
-            report_lines,shown=held_report_lines(s,w.session_key,payload_ok=bool(w.trigger_json.get('report_back')))
+            report_lines,shown=held_report_lines(s,w.session_key,payload_ok=bool(w.trigger_json.get('report_back')),
+                agreed_only=bool(w.trigger_json.get('report_back') and self.policy.unanswered_gate(w,session.unanswered_count)))
             if report_lines:
                 reports='\n'.join(['Held for the owner (their limits held these earlier). If you message them this turn, include what still matters:', *report_lines])
                 s.set_meta('report_shown:'+o.id,json.dumps(shown))
