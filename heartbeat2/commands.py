@@ -290,7 +290,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
                         reason,defer,until,ahead='in_flight',True,None,x.wake_id
                         break
             retry=None
-            if reason=='not_before':
+            if reason in {'not_before','app_closed'}:
                 # The stored time is either a failed delivery's retry or an earlier hold's end (for example quiet hours).
                 until=float(engine.store.get_meta('not_before:'+o.id) or 0) or None
                 retry=o.error=='inject_failed' or int(engine.store.get_meta('inject_failures:'+o.id) or 0)>0
@@ -307,6 +307,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
         'in_flight':'another wake is running','provider_unavailable':'provider unavailable','dm_only':'DMs only',
         'plugin_off':'HeartBeat 2.0 is off in settings','paused_all':'HeartBeat 2.0 is paused',
         'not_before':'waiting to retry a failed delivery' if retry else 'waiting out an earlier hold',
+        'app_closed':'the app window is closed',
         'checkin_not_due':'the owner has not been quiet long enough','ack_timeout':'not acknowledged after three attempts',
         'eval_backoff':'retrying after an error','drop_pauses':'an earlier unacknowledged turn pauses the wake first'}
     if ahead: reasons['in_flight']=f'another wake ({ahead}) takes the turn first'
@@ -339,14 +340,22 @@ def handle(raw_args, runtime):
             session = engine.store.get_session(key)
             bound={name:session_env('HERMES_SESSION_'+name.upper()) for name in ('platform','chat_type','chat_id')}
             bound['platform']=session_platform(bound['platform'],engine.ctx)
-            if bound['platform'] and not deliverable_platform(bound['platform']):
+            # Hermes commands bind platform=local outside the model turn's surface scope. Only a known
+            # app surface in this same chat is a valid fallback; local itself never establishes delivery.
+            if bound['platform']=='local':
+                if session and session.platform in LOCAL_SURFACES:
+                    bound['platform']=session.platform
+                elif session is None:
+                    return 'Send a message in this chat first, then try /pulse again.'
+            app_off=action=='off' and session is not None and session.platform in LOCAL_SURFACES
+            if action not in {'run','test'} and not app_off and bound['platform'] and not deliverable_platform(bound['platform']):
                 return platform_refusal(bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
             if action not in {'run','test'} and deliverable_platform(bound['platform']):
                 engine.store.upsert_session(Session(key,**bound,current_session_id=session_env('HERMES_SESSION_ID')))
                 session=engine.store.get_session(key)
                 engine.store.cas_session(key,{'platform':session.platform,'chat_type':session.chat_type,'chat_id':session.chat_id},**bound)
                 session=engine.store.get_session(key)
-            if session is None or not deliverable_platform(session.platform):
+            if session is None or not (app_off or deliverable_platform(session.platform)):
                 return platform_refusal(session.platform if session else bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
             if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
         if action in {'add','role'}: return _add(engine,session,rest,role=action=='role')

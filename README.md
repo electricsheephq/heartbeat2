@@ -92,7 +92,7 @@ During quiet hours the agent still looks right away, silently, within its turn a
 **A pointless wake that catches itself.** Say the agent set up an hourly "check the inbox" wake. After three empty checks it starts stretching the interval, and after six it pauses itself. The next time you talk:
 > **Agent:** I paused "check the inbox": six checks in a row found nothing. Keep, slow, stop, or turn it into a watcher? (`/pulse keep|slow|stop|watch w_3f2a`)
 
-**A check-in after a long silence** (off by default). When it is on, the agent checks in once after a silence (24 h by default) and says how to turn check-ins off. It doesn't check in again until you've talked.
+**A check-in after a long silence** (off by default). When it is on, the agent checks in once after a silence (24 h by default) and says how to turn check-ins off. It doesn't check in again until you've talked. This built-in check-in is not created in Desktop or TUI chats; you can still explicitly arm a silence wake there.
 
 ## Why "2.0"
 Heartbeats, as OpenClaw popularised them, made agents feel alive. They also produced a well-documented list of failures. We turned each one into a deterministic scenario in the benchmark suite:
@@ -187,7 +187,7 @@ pulse tool results name the ignored setting.
 | `/pulse desk` | The agent's desk: each role's rhythm, last result and next turn; today's messages, turns and cost against your limits; and why messages are held, if they are. Finished roles stay on it until you've written in the chat (for up to 24 hours), and it counts results held for you. |
 | `/pulse budget <id> 3/day` | Set a role's daily turns. The agent can go under your number but never over it; only this command raises it. |
 | `/pulse list` · `/pulse why <id>` | Active, proposed and paused items plus the 10 most recently created finished ones; `/pulse list all` shows everything. Why lists the last 10 trigger keys, states, reasons, matched/created and held-since times, and delivered yes/no |
-| `/pulse owntime on\|off` | Own time in this chat or topic, while `own_time_hours` is set. Direct chats have it until you turn it off; a group or topic only once you turn it on there |
+| `/pulse owntime on\|off` | Own time in this chat or topic, while `own_time_hours` is set. Messaging direct chats have it until you turn it off; a Desktop/TUI chat, group or topic only once you turn it on there |
 | `/pulse run <id>` | Queue one turn of a recurring wake or role now; keeps every usual check, including busy chat, quiet hours and daily caps, and counts as one of its fires. Watchers, one-time reminders, the quiet check-in and own time fire on their own: preview those with `/pulse test` |
 | `/pulse test <id>` | Preview the checks, next fire, cache and wake text; sends nothing, calls no model and changes nothing |
 | `/pulse ledger [7d]` | Totals over the range: fires, checks, model turns, messages, replies, cache/cost and token splits |
@@ -243,7 +243,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Urgent wakes ignore quiet hours | `quiet_hours_urgent` | off | Let wakes marked urgent through quiet hours. |
 | Wake turns per day | `max_model_wakes_per_day` | 24 | Per chat, local day. Each wake turn is a full model turn. |
 | Wake messages per day | `max_messages_per_day` | 6 | Per chat, local day. |
-| Own time (hours between turns) | `own_time_hours` | 0 | 0 = off. The agent gets a turn of its own this often to work on its roles, follow things up, reflect or rest. It runs in your direct chats, and, when `dm_only` is off, in each group or topic where you send `/pulse owntime on`. Each topic counts as its own chat with its own context, so it's off in groups and topics until you turn it on (also in a Matrix direct room, where Hermes can't tell one person from a few); `/pulse owntime off` turns it off anywhere. Each is a full model turn; quiet hours hold its messages, not its work. |
+| Own time (hours between turns) | `own_time_hours` | 0 | 0 = off. The agent gets a turn of its own this often to work on its roles, follow things up, reflect or rest. It runs in your messaging direct chats, and, when `dm_only` is off, in each group or topic where you send `/pulse owntime on`. Desktop and TUI chats also require `/pulse owntime on` in that chat: each new conversation has its own context, key and budgets. It's off in groups and topics until you turn it on (also in a Matrix direct room, where Hermes can't tell one person from a few); `/pulse owntime off` turns it off anywhere. Each is a full model turn; quiet hours hold its messages, not its work. |
 | Daily priced-spend limit for the agent's own turns (USD) | `daily_cost_limit_usd` | 0 | 0 = none. Checked before each of the agent's own turns: once today's priced spend on turns it started reaches this, they stop until tomorrow. It is not a hard ceiling on a turn already running. Your own reminders still fire. Unpriced routes are not counted; /pulse status shows how many calls were unpriced. |
 | Turns per role per day (default) | `role_turns_per_day_default` | 6 | A role's budget when none is set for it. Each turn is a full model turn. |
 | Most turns a role may take per day | `role_turns_per_day_max` | 12 | Caps every role budget. A budget you set with `/pulse budget`, or a lowering you ask the agent for, is a ceiling the agent can go under but never raise. The chat's wake-turn limit still applies. |
@@ -257,7 +257,7 @@ These live under `plugins.entries.heartbeat2.settings` and appear in **Settings 
 | Active wakes across the profile | `max_active_profile` | 200 | The same count across all of this profile's chats. |
 | Longest lifetime (days) | `max_lifetime_days` | 14 | Recurring wakes, watchers and agent follow-ups expire by then; agent recurring wakes default to 7 days. Roles and own time have no lifetime limit. |
 | Longest owner one-time reminder (days) | `max_reminder_days` | 365 | Owner-requested one-time reminders, including `/pulse add`, can be due up to this many days out, with `max_lifetime_days` of grace after a long reminder's due time. The hard end is the sum of both settings. If `max_lifetime_days` is larger, its existing bound applies instead; maximum 3650 days. |
-| Check in after a long silence | `owner_silent_checkin` | off | Off by default. One check-in per silence, with how to turn it off. |
+| Check in after a long silence | `owner_silent_checkin` | off | Off by default. One check-in per silence in messaging chats, with how to turn it off. No built-in check-in in Desktop or TUI chats. |
 | Keep-warm pauses after (hours without your messages) | `keep_warm_idle_hours` | 12 | For chats where you turned on `/pulse warm`: pings stop once you haven't written for this long, and start again when you do. |
 | Keep-warm smallest context (tokens) | `keep_warm_min_tokens` | 20000 | No ping while the chat's prompt is smaller than this: a cold start is cheap then. |
 | Silence before a check-in (hours) | `checkin_after_hours` | 24 | Doubles for the next silence if a check-in is ignored. |

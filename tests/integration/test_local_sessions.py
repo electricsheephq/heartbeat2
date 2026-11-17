@@ -5,6 +5,7 @@ also applies here. Old Hermes pins without local plugin injection skip cleanly.
 """
 import asyncio
 from contextlib import asynccontextmanager
+from functools import wraps
 import importlib
 import json
 import os
@@ -316,4 +317,57 @@ def test_real_local_session_refusal(tmp_path, monkeypatch, clock, surface):
             assert result['detail'] == REFUSALS[surface]
             key = rig.authority.sessions[ref.session_id].route
             assert rig.engine.store.list_wakes(key) == []
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('surface', ['desktop', 'tui'])
+@pytest.mark.parametrize('dispatch', ['rpc', 'typed'])
+def test_real_local_pulse_commands(tmp_path, monkeypatch, clock, surface, dispatch):
+    async def run():
+        async with _rig(tmp_path, monkeypatch, clock) as rig:
+            from gateway.session_controls import AuthorityConnection
+            from gateway.session_contract import Submission
+            from gateway.session_context import get_session_env
+            from hermes_cli import plugins
+            ref, _ = await _open(rig, surface)
+            live = rig.authority.sessions[ref.session_id]
+            events, calls = [], []
+            live.event_stream.observers.add(events.append)
+            entry = plugins.get_plugin_manager()._plugin_commands['pulse']
+            handler = entry['handler']
+            @wraps(handler)
+            def observe(*args, **kwargs):
+                # Real command dispatch has no model-turn session policy scope.
+                calls.append((get_session_env('HERMES_SESSION_PLATFORM'), rig.ctx.session_surface()))
+                return handler(*args, **kwargs)
+            monkeypatch.setitem(entry, 'handler', observe)
+            connection = AuthorityConnection(rig.authority, object(), {
+                'user_id': 'test-owner', 'profile_id': str(rig.home)})
+            async def command(arg):
+                before = len(calls)
+                if dispatch == 'rpc':
+                    reply = await connection.dispatch({'id': arg, 'method': 'command.dispatch',
+                        'params': {'session_id': ref.session_id, 'name': 'pulse', 'arg': arg}})
+                    assert 'error' not in reply, reply
+                    text = reply['result']['output']
+                else:
+                    count = len(_rows(rig, ref.session_id))
+                    start = len(events)
+                    await rig.authority.submit(_viewer(rig), Submission(
+                        f'command-{arg}-{count}', ref, {'text': '/pulse '+arg}, 'queue'))
+                    await _settled(rig, ref.session_id, count + 1)
+                    text = next(event['params']['payload']['text'] for event in events[start:]
+                                if event['params']['type'] == 'message.complete')
+                assert calls[before:] == [('local', 'local')]
+                return text
+            try:
+                assert await command('status') == 'Send a message in this chat first, then try /pulse again.'
+                assert rig.engine.store.get_session(live.route) is None
+                assert (await _arm(rig, ref))['armed']
+                assert 'HeartBeat 2.0: on' in await command('status')
+                assert await command('off') == 'HeartBeat 2.0 off for this chat.'
+                assert rig.engine.store.get_session(live.route).enabled is False
+                assert 'HeartBeat 2.0: off' in await command('status')
+            finally:
+                await connection.close()
     asyncio.run(run())

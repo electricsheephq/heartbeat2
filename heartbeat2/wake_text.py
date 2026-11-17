@@ -69,7 +69,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
     why = wake.reason or trigger_summary or wake.kind
     if held_by in HOLD_LABELS:
         why += f" (held by {HOLD_LABELS[held_by]}" + (" after restart" if after_restart else "") + ")"
-    elif late_by_s is not None and late_by_s >= 60:
+    if (held_by not in HOLD_LABELS or held_by == 'app_closed') and late_by_s is not None and late_by_s >= 60:
         why += f" (late by {_age(late_by_s)}" + (" after restart" if after_restart else "") + ")"
     owner_clause = f" · owner last wrote {owner_age} ago" if session.last_human_at is not None else ""
     fire_limit = 1 if wake.kind == "at" else wake.max_fires if wake.max_fires is not None else "∞"

@@ -19,6 +19,7 @@ CREATE = dict(action='create', note='Check the task.', trigger={'kind':'at', 'at
 
 
 def bind(monkeypatch, platform, *, key=KEY):
+    if platform in policy.LOCAL_SURFACES: platform = 'local'
     values = {'KEY':key, 'PLATFORM':platform, 'CHAT_TYPE':'dm', 'CHAT_ID':'unit', 'ID':'sid'}
     env = lambda name: values.get(name.removeprefix('HERMES_SESSION_'), '')
     monkeypatch.setattr(tool, 'session_env', env)
@@ -74,9 +75,9 @@ def test_tool_surface_resolution(engine, monkeypatch, mode, expected):
         resolve = lambda: mode
     if mode != 'absent': monkeypatch.setattr(engine.ctx, 'session_surface', resolve, raising=False)
     assert engine.tool.identity().platform == expected
-    # An unknown/failed later resolution must not retain an admitted surface.
+    # An unknown/failed later resolution must retain the known app surface.
     engine.store.cas_session(key, {'platform':expected}, platform='desktop')
-    assert engine.tool.identity().platform == expected
+    assert engine.tool.identity().platform == ('desktop' if expected == 'local' else expected)
 
 
 def test_surface_resolution_does_not_rewrite_messaging(engine, monkeypatch):
@@ -118,29 +119,31 @@ def test_local_own_time_checkin_and_keep_warm(engine, monkeypatch, surface):
     monkeypatch.setattr(policy, 'local_injection_supported', lambda: True)
     session(engine, platform=surface)
     engine.policy = replace(engine.policy, own_time_hours=1, owner_silent_checkin=True)
-    assert policy.is_direct_chat(surface, 'dm', 'unit')
+    assert not policy.is_direct_chat(surface, 'dm', 'unit')
     assert engine.session_can_receive(engine.store.get_session(KEY))
     engine.own_time(); engine.silence()
     wakes = engine.store.list_wakes(KEY)
-    assert len(wakes) == 2
-    assert any(w.trigger_json.get('own_time') for w in wakes)
-    assert any(w.kind == 'owner_silent' for w in wakes)
+    assert wakes == []
     bind(monkeypatch, surface)
-    reply = commands.handle('warm on', SimpleNamespace(get_engine=lambda:engine))
+    runtime = SimpleNamespace(get_engine=lambda:engine)
+    commands.handle('owntime on', runtime)
+    engine.own_time(); engine.silence()
+    wakes = engine.store.list_wakes(KEY)
+    assert len(wakes) == 1 and wakes[0].trigger_json.get('own_time')
+    commands.handle('owntime off', runtime)
+    assert engine.store.get_wake(wakes[0].id).status == 'cancelled'
+    reply = commands.handle('warm on', runtime)
     assert 'closed app window makes it pointless' in reply
     assert not any(policy.is_keep_warm(w) for w in engine.store.list_wakes(KEY))
 
 
-@pytest.mark.parametrize('surface,raises', [('desktop',False), ('tui',False), ('desktop',True)])
-def test_closed_app_holds_without_failure_then_runs(engine, monkeypatch, surface, raises):
+@pytest.mark.parametrize('surface', ['desktop', 'tui'])
+def test_closed_app_holds_without_failure_then_runs(engine, monkeypatch, surface):
     monkeypatch.setattr(policy, 'local_injection_supported', lambda: True)
     session(engine, platform=surface)
     w = arm(engine, platform=surface)
     o = pending(engine,w)
     engine.ctx.accept = False
-    if raises:
-        def inject(*args, **kwargs): raise RuntimeError('window retired')
-        monkeypatch.setattr(engine.ctx,'inject_message',inject)
     first = engine.clock.now()
     for _ in range(7):
         engine.dispatch(o,cache_line='')
@@ -152,7 +155,7 @@ def test_closed_app_holds_without_failure_then_runs(engine, monkeypatch, surface
         assert engine.daily(KEY)['model_turns'] == 0
         assert engine.store.dispatches_today(w.id,engine.policy.resolved_timezone()) == 0
         # Retry interval is respected without changing the first waiting timestamp.
-        assert engine.gate(w,held,engine.store.get_session(KEY))[0] == 'not_before'
+        assert engine.gate(w,held,engine.store.get_session(KEY))[0] == 'app_closed'
         engine.clock.advance(60)
     runtime = SimpleNamespace(get_engine=lambda:engine)
     bind(monkeypatch,surface)
@@ -161,6 +164,7 @@ def test_closed_app_holds_without_failure_then_runs(engine, monkeypatch, surface
     monkeypatch.setattr(engine.ctx,'inject_message',lambda text, **kw: engine.ctx.calls.append((text,KEY)) or True)
     engine.dispatch(o,cache_line='')
     assert engine.store.get_occurrence(w.id,o.dedupe_key).state == 'claimed'
+    assert not engine.store.get_meta('held_since:'+o.id)
     engine.intake.pre_llm_call(session_id='sid',turn_id='turn',user_message=engine.ctx.calls[-1][0],platform=surface)
     assert end(engine,'progress',True,'Window reopened.') is None
     assert engine.store.get_occurrence(w.id,o.dedupe_key).state == 'done'
@@ -189,6 +193,24 @@ def test_closed_app_expiry_and_messaging_failure_budget(engine, monkeypatch):
     assert engine.store.get_meta('held_since:'+o.id) is None
 
 
+@pytest.mark.parametrize('surface', ['desktop', 'tui'])
+def test_local_explicit_roles_and_silence_wakes_still_work(engine, monkeypatch, surface):
+    monkeypatch.setattr(policy, 'local_injection_supported', lambda: True)
+    session(engine, platform=surface)
+    bind(monkeypatch, surface)
+    reply = commands.handle('role every 1h Keep the report current.', SimpleNamespace(get_engine=lambda:engine))
+    assert 'w_' in reply, reply
+    explicit = arm(engine, kind='owner_silent', platform=surface, trigger_json={'after':60})
+    builtin = arm(engine, kind='owner_silent', platform=surface, trigger_json={'builtin':True})
+    engine.policy = replace(engine.policy, owner_silent_checkin=True)
+    engine.clock.advance(61)
+    engine.silence()
+    assert engine.store.get_wake(builtin.id).status == 'cancelled'
+    occurrences = engine.store.list_occurrences(explicit.id)
+    assert len(occurrences) == 1 and occurrences[0].state == 'pending'
+    assert engine.gate(explicit, occurrences[0], engine.store.get_session(KEY))[0] == ''
+
+
 def test_app_hold_meta_is_garbage_collected(engine):
     w=arm(engine)
     o=pending(engine,w)
@@ -202,6 +224,21 @@ def test_app_hold_meta_is_garbage_collected(engine):
     assert engine.store.get_meta('held_since:'+o.id) is None
 
 
+def test_accepted_injection_clears_app_hold_timestamp(engine, monkeypatch):
+    monkeypatch.setattr(policy, 'local_injection_supported', lambda: True)
+    session(engine, platform='desktop')
+    w = arm(engine, platform='desktop')
+    o = pending(engine, w)
+    engine.ctx.accept = False
+    engine.dispatch(o, cache_line='')
+    assert engine.store.get_meta('held_since:'+o.id)
+    engine.clock.advance(60)
+    engine.ctx.accept = True
+    engine.dispatch(o, cache_line='')
+    assert engine.store.get_occurrence(w.id, o.dedupe_key).state == 'claimed'
+    assert not engine.store.get_meta('held_since:'+o.id)
+
+
 def test_local_prompt_line_and_byte_identical_messaging(clock):
     w,o,s=records(clock)
     messaging=render_wake(w,o,replace(s,platform='telegram'),clock=clock)
@@ -213,3 +250,103 @@ def test_local_prompt_line_and_byte_identical_messaging(clock):
         assert line in local
         assert local.replace(line+'\n','') == messaging
     assert line not in messaging
+
+
+@pytest.mark.parametrize('surface', ['desktop', 'tui'])
+@pytest.mark.parametrize('mode', ['absent', 'raising', 'unknown'])
+def test_commands_use_stored_app_surface(engine, monkeypatch, surface, mode):
+    monkeypatch.setattr(policy, 'local_injection_supported', lambda: True)
+    session(engine, platform=surface)
+    bind(monkeypatch, surface)
+    if mode != 'absent':
+        def resolve():
+            if mode == 'raising': raise RuntimeError('no policy scope')
+            return 'local'
+        monkeypatch.setattr(engine.ctx, 'session_surface', resolve, raising=False)
+    runtime = SimpleNamespace(get_engine=lambda:engine)
+    assert 'HeartBeat 2.0: on' in commands.handle('status', runtime)
+    assert engine.store.get_session(KEY).platform == surface
+    # Turning a known app chat off remains available even on an incapable host.
+    monkeypatch.setattr(policy, 'local_injection_supported', lambda: False)
+    commands.handle('off', runtime)
+    assert engine.store.get_session(KEY).enabled is False
+
+
+def test_command_without_stored_local_session_asks_for_message(engine, monkeypatch):
+    bind(monkeypatch, 'local', key='agent:main:local:dm:fresh')
+    assert commands.handle('status', SimpleNamespace(get_engine=lambda:engine)) == (
+        'Send a message in this chat first, then try /pulse again.')
+    assert engine.store.get_session('agent:main:local:dm:fresh') is None
+
+
+@pytest.mark.parametrize('action', ['run', 'test'])
+@pytest.mark.parametrize('platform', ['cli', 'api_server', 'local'])
+def test_run_and_test_use_stored_session_before_environment(engine, monkeypatch, action, platform):
+    w = arm(engine, kind='every')
+    bind(monkeypatch, platform)
+    reply = commands.handle(action+' '+w.id, SimpleNamespace(get_engine=lambda:engine))
+    assert ('Queued ' if action == 'run' else 'Test ') + w.id in reply
+    assert engine.store.get_session(KEY).platform == 'telegram'
+
+
+def test_closed_app_three_hour_hold_keeps_label_and_lateness(engine, monkeypatch):
+    monkeypatch.setattr(policy, 'local_injection_supported', lambda: True)
+    session(engine, platform='desktop')
+    w = arm(engine, platform='desktop')
+    first = engine.clock.now()
+    o = pending(engine, w, key=f't:{first:.17g}')
+    engine.ctx.accept = False
+    bind(monkeypatch, 'desktop')
+    runtime = SimpleNamespace(get_engine=lambda:engine)
+    monkeypatch.setattr(engine, 'cache_line', lambda wake, **kwargs: '')
+    for _ in range(3*3600//5):
+        engine.tick()
+        assert not engine.store.get_meta('last_error')
+        held = engine.store.get_occurrence(w.id, o.dedupe_key)
+        assert held.error == 'app_closed'
+        assert float(engine.store.get_meta('held_since:'+o.id)) == first
+        engine.clock.advance(5)
+    preview = commands.handle('test '+w.id, runtime)
+    assert 'error backoff' not in preview and 'closed app window' in preview
+    engine.ctx.accept = True
+    engine.dispatch(o, cache_line='')
+    text = engine.ctx.calls[-1][0]
+    assert 'late by 3h' in text and 'error backoff' not in text
+    assert not engine.store.get_meta('held_since:'+o.id)
+
+
+@pytest.mark.parametrize('surface', ['desktop', 'tui', 'telegram'])
+def test_injection_exceptions_retry_then_die_without_payload(engine, monkeypatch, caplog, surface):
+    monkeypatch.setattr(policy, 'local_injection_supported', lambda: True)
+    session(engine, platform=surface)
+    w = arm(engine, platform=surface)
+    o = pending(engine, w)
+    def broken(*args, **kwargs): raise ValueError('PRIVATE PAYLOAD MUST NOT APPEAR')
+    monkeypatch.setattr(engine.ctx, 'inject_message', broken)
+    for index, delay in enumerate((30,60,300,900,3600), 1):
+        engine.dispatch(o, cache_line='')
+        current = engine.store.get_occurrence(w.id, o.dedupe_key)
+        assert current.state == ('dead' if index == 5 else 'pending')
+        assert current.error == 'inject_failed'
+        assert engine.store.get_meta('inject_failures:'+o.id) == str(index)
+        assert not engine.store.get_meta('held_since:'+o.id)
+        engine.clock.advance(delay)
+    assert 'ValueError' in caplog.text
+    assert 'PRIVATE PAYLOAD' not in caplog.text and 'Check the task.' not in caplog.text
+
+
+def test_desk_bounds_closed_app_rows(engine, monkeypatch):
+    from heartbeat2.desk import render_desk
+    monkeypatch.setattr(policy, 'local_injection_supported', lambda: True)
+    session(engine, platform='desktop')
+    for _ in range(40):
+        w = arm(engine, platform='desktop')
+        o = pending(engine, w)
+        engine.store.update_occurrence(w.id, o.dedupe_key, 'pending', error='app_closed')
+        engine.store.set_meta('held_since:'+o.id, str(engine.clock.now()))
+    text = render_desk(engine, engine.store.get_session(KEY), clock=engine.clock,
+                       timezone='UTC', policy=engine.policy)
+    assert len(text) <= 1800
+    assert text.count('held: app window is closed') == 3
+    assert '- 37 more held while their app window is closed' in text
+    assert 'Owner last wrote' in text and 'Items' in text and 'quiet hours' in text

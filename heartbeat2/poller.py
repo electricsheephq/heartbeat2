@@ -582,13 +582,14 @@ class Poller:
             if (not w.trigger_json.get('builtin') or bool(w.trigger_json.get('own_time')) != own_time
                     or w.status not in {'active','proposed'}): continue
             session = self.store.get_session(w.session_key)
-            if session is not None and not deliverable_platform(session.platform):
+            if session is not None and (not deliverable_platform(session.platform)
+                    or not own_time and w.kind=='owner_silent' and session.platform in LOCAL_SURFACES):
                 if self.store.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='non_gateway'):
                     self.cancel_occurrences(w.id,'non_gateway',preserve_started=True)
 
     def own_time_refusal(self,chat,key):
         """Why own time may not run in this chat (a session or wake), or '' (#177). A chat known to be one-to-one has it
-        unless the owner turned it off there; a group, topic, group DM or a chat whose platform can't tell, only where the
+        unless the owner turned it off there; an app chat, group, topic, group DM or a chat whose platform can't tell, only where the
         owner turned it on with /pulse owntime on. Each topic is a chat."""
         meta=self.store.get_meta
         if meta('own_time_off:'+key)=='1': return 'chat_off'
@@ -688,7 +689,7 @@ class Poller:
         if self.policy.owner_silent_checkin:
             self.cancel_non_gateway_builtins()
             for session in s.list_sessions():
-                if not deliverable_platform(session.platform): continue
+                if not deliverable_platform(session.platform) or session.platform in LOCAL_SURFACES: continue
                 if session.last_human_at is None or not session.episode_id: continue
                 identity=hashlib.sha1(session.session_key.encode()).hexdigest()[:16]
                 wid='checkin_'+identity
@@ -748,6 +749,7 @@ class Poller:
         elif w.trigger_json.get('report_back'):
             if not self.store.held_reports(w.session_key): return 'nothing_to_report',False,None
         elif w.trigger_json.get('builtin'):
+            if s and s.platform in LOCAL_SURFACES: return 'setting_off',False,None
             if not self.policy.owner_silent_checkin: return 'setting_off',True,None
             after=self.policy.checkin_after_hours*3600*(2 if w.ignored_streak else 1)
             if s and s.last_human_at is not None and now-s.last_human_at<after: return 'checkin_not_due',True,None
@@ -794,7 +796,8 @@ class Poller:
             return cap,False,None
         flood=json.loads(self.store.get_meta('injections') or '[]')
         if sum(now-t<60 for t in flood)>=5: return 'global_flood',True,None
-        if now<float(self.store.get_meta('not_before:'+o.id) or 0): return 'not_before',True,None
+        if now<float(self.store.get_meta('not_before:'+o.id) or 0):
+            return ('app_closed' if o.error=='app_closed' else 'not_before'),True,None
         if s.busy_since is not None: return 'busy',True,None
         if s.last_wake_turn_at is not None and now-s.last_wake_turn_at<self.policy.wake_spacing_minutes*60: return 'wake_spacing',True,None
         if self.store.list_occurrences(session_key=s.session_key,state='claimed') or self.store.list_occurrences(session_key=s.session_key,state='started'): return 'in_flight',True,None
@@ -911,9 +914,14 @@ class Poller:
                 health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
             self.refund_claimed(o,held_by)
             return
+        inject_raised=False
         try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
-        except Exception: accepted=False
+        except Exception as exc:
+            inject_raised=True
+            accepted=False
+            self.log.warning('heartbeat2 injection failed: %s',type(exc).__name__)
         if accepted:
+            s.set_meta('held_since:'+o.id,'')
             s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))
             flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]
             s.set_meta('injections',json.dumps(flood+[self.clock.now()]))
@@ -923,7 +931,7 @@ class Poller:
         else:
             if health:
                 health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
-            if session.platform in LOCAL_SURFACES:
+            if session.platform in LOCAL_SURFACES and accepted is False and not inject_raised:
                 # A retired window rejects synchronously: no turn ran and no delivery failed. Keep its original
                 # waiting time separately from watcher/message holds, so those holds and silence still work unchanged.
                 with s.atomic():

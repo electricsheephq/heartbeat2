@@ -94,7 +94,8 @@ def deliverable_platform(platform) -> bool:
 
 # Platforms whose Hermes adapter reports 'dm' only for a one-to-one chat (checked at Hermes 04eb00cef7). Matrix can report a
 # multi-person m.direct room as 'dm', and Slack its group DMs (mpim); there, and on any platform not listed, own time needs
-# the owner's opt-in like a group (#177, #169).
+# the owner's opt-in like a group (#177, #169). App conversations also need explicit opt-in: each new
+# window/chat has its own key, so default own time would multiply turns and budgets.
 ONE_TO_ONE_DM_PLATFORMS = frozenset({"telegram", "discord", "whatsapp", "signal", "mattermost", "dingtalk", "feishu",
     "wecom", "wecom_callback", "weixin", "bluebubbles", "yuanbao", "email"})
 
@@ -105,7 +106,7 @@ def is_direct_chat(platform, chat_type, chat_id) -> bool:
         return False
     if platform == "slack":
         return str(chat_id or "").startswith("D")
-    return platform in ONE_TO_ONE_DM_PLATFORMS | LOCAL_SURFACES
+    return platform in ONE_TO_ONE_DM_PLATFORMS
 
 
 def zone_name(tz, now=0.0, *, localtime=False) -> str:

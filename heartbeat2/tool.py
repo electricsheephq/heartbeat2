@@ -8,7 +8,7 @@ import logging
 import re
 
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
-from .policy import deliverable_platform, platform_refusal, session_platform, owner_class, holds_messages, cap_counts, is_keep_warm
+from .policy import LOCAL_SURFACES, deliverable_platform, platform_refusal, session_platform, owner_class, holds_messages, cap_counts, is_keep_warm
 from .schedule import parse_at, parse_duration, next_every, next_cron
 
 
@@ -103,7 +103,8 @@ class Tool:
                         chat_id=session_env('HERMES_SESSION_CHAT_ID'),
                         current_session_id=session_env('HERMES_SESSION_ID'))
             self.engine.store.upsert_session(s)
-        elif bound_platform == 'local' and s.platform != platform:
+        elif (bound_platform == 'local' and s.platform != platform
+              and not (platform == 'local' and s.platform in LOCAL_SURFACES)):
             self.engine.store.cas_session(key, {'platform':s.platform}, platform=platform)
             s = self.engine.store.get_session(key)
         return s
