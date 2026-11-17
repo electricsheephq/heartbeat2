@@ -50,6 +50,7 @@ def busy_case(make_rig, *, mode="queue", command=False, photo=False):
         # The owner's interrupt can drop the wake turn's first model request mid-stream, and Hermes retries the same
         # request. HeartBeat still claimed and injected the wake once, and the owner sees one answer.
         assert row["attempt"] == 1, row
+        assert rig.injections() == 1  # HeartBeat's own count, from the gateway log, whatever Hermes sends.
         assert sum("WAKE-OWNER-ANSWER" in t for t in rig.texts()) == 1, rig.texts()
     else:
         assert len(rig.wake_openers()) == 1
