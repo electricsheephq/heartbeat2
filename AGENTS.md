@@ -4,7 +4,7 @@ Guidance for AI coding agents, and for people, working in this repository.
 
 ## What this is
 
-HeartBeat 2.0 is a standalone Hermes Agent plugin for bounded wakes and deterministic watchers. It schedules a turn in the messaging-gateway conversation that armed it, using that conversation's model and tools. The current release delivers into gateway DMs (group chats only when `dm_only` is off); CLI, TUI, Desktop, API server and cron arming are refused.
+HeartBeat 2.0 is a standalone Hermes Agent plugin for bounded wakes and deterministic watchers. It schedules a turn in the conversation that armed it, using that conversation's model and tools. It delivers into gateway DMs (group chats only when `dm_only` is off) and Desktop/TUI local sessions on Hermes hosts with local plugin injection (0.23+). Retired app sessions HOLD wakes until reattached; CLI, API server and cron arming are refused.
 
 ## Layout
 

@@ -49,7 +49,7 @@ Results include a `cache` line. Choose intervals it marks warm, respecting floor
   - Bounds: at least 5 minutes AND the configured owner floor; at most 4 hours / 24 fires.
   - It ends on notify=true or after three consecutive no_change outcomes. Prefer a watcher when possible.
 
-Only messaging-gateway conversations are supported: DMs by default, plus group and topic chats when `dm_only` is off.
+Messaging-gateway conversations are supported: DMs by default, plus group and topic chats when `dm_only` is off. Desktop and TUI sessions also support wakes on Hermes 0.23+ hosts with local-session plugin injection, with the same consent and limits. CLI and API-server sessions are refused; relay the returned explanation. Wakes wait while the app session is retired and retry after the conversation reopens (subject to expiry and limits). Hermes may keep a disconnected session live briefly, so a wake can run unseen during that grace period. App-session replies stream into the window even when silent or message-held: when not notifying, reply with exactly `[SILENT]` and nothing else. Nothing is pushed to a phone. Keep-warm (`/pulse warm`) is messaging-only.
 - The tool chooses this session; never supply a destination or model.
 - If the injection consent YAML is missing, show the returned YAML.
 - Respect reported clamps, and never write plugin settings to widen bounds. Proposed items need `/pulse ok`.

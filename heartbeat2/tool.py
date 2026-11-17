@@ -8,7 +8,7 @@ import logging
 import re
 
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
-from .policy import NON_GATEWAY_PLATFORMS, MESSAGING_PLATFORMS, owner_class, holds_messages, cap_counts, is_keep_warm
+from .policy import deliverable_platform, platform_refusal, session_platform, owner_class, holds_messages, cap_counts, is_keep_warm
 from .schedule import parse_at, parse_duration, next_every, next_cron
 
 
@@ -90,17 +90,22 @@ class Tool:
     def __init__(self, engine, session_key_fn=current_session_key):
         self.engine, self.session_key_fn = engine, session_key_fn
 
-    def identity(self):
+    def identity(self, *, surface=''):
         key = self.session_key_fn()
         if not key or key == 'default':
             return None
         s = self.engine.store.get_session(key)
+        bound_platform = session_env('HERMES_SESSION_PLATFORM')
+        platform = session_platform(bound_platform, self.engine.ctx, surface=surface)
         if s is None:
-            s = Session(key, platform=session_env('HERMES_SESSION_PLATFORM'),
+            s = Session(key, platform=platform,
                         chat_type=session_env('HERMES_SESSION_CHAT_TYPE'),
                         chat_id=session_env('HERMES_SESSION_CHAT_ID'),
                         current_session_id=session_env('HERMES_SESSION_ID'))
             self.engine.store.upsert_session(s)
+        elif bound_platform == 'local' and s.platform != platform:
+            self.engine.store.cas_session(key, {'platform':s.platform}, platform=platform)
+            s = self.engine.store.get_session(key)
         return s
 
     def handle(self, args, *, session_id='', **kwargs):
@@ -274,8 +279,8 @@ class Tool:
                     if action in {'resume','update'}:
                         if not s.enabled:
                             return {'error':'session_off'}
-                        if s.platform in NON_GATEWAY_PLATFORMS or s.platform not in MESSAGING_PLATFORMS:
-                            return {'error':'non_gateway'}
+                        if not deliverable_platform(s.platform):
+                            return {'error':'non_gateway', 'detail':platform_refusal(s.platform)}
                         if e.policy.dm_only and s.chat_type != 'dm':
                             return {'error':'dm_only'}
                         if not e.injection_allowed():

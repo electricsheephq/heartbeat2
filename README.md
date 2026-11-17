@@ -16,7 +16,7 @@ https://github.com/user-attachments/assets/135d08af-36e8-46d5-bc7f-7ac5e5326c03
 hermes plugins install electricsheephq/heartbeat2 --enable
 ```
 
-It needs Hermes ≥ 0.21.6 with a messaging gateway (Telegram, Discord, Slack, WhatsApp and the other gateway platforms) on macOS or Linux, with Python ≥ 3.11. No API keys, and nothing to install beyond what Hermes already ships. Next, allow it to start turns and try it:
+It needs Hermes ≥ 0.21.6 with a messaging gateway (Telegram, Discord, Slack, WhatsApp and the other gateway platforms), or Hermes 0.23+ for Desktop and TUI sessions on macOS or Linux, with Python ≥ 3.11. No API keys, and nothing to install beyond what Hermes already ships. Next, allow it to start turns and try it:
 
 ## Try it
 
@@ -145,10 +145,10 @@ Every scenario and its hard bars are in [bench/README.md](bench/README.md); the 
           ledger + no-op governor (slow down → suggest a watcher → pause → ask once)
 ```
 
-One poller per profile runs inside the messaging gateway that serves that profile and ticks every 5 seconds. Hermes loads every profile's plugins when a gateway starts; a gateway that does not serve a profile leaves that profile's schedule alone and delivers nothing for it. A file lock guarantees only one poller even when several Hermes processes share the profile. Every fire is a durable claim with an attempt marker. An accepted turn that never starts is tried three times, and a refused injection backs off and is tried five times, before it is marked dead. A turn that started but never finished (a crash or restart) is recorded as interrupted. Hermes may auto-resume that wake turn, sometimes before heartbeat2's restart recovery has run; heartbeat2 keeps the replay silent either way, never counts it as a fire or delivery, and counts it as a model turn toward the daily cap.
+One poller per profile runs inside the messaging gateway that serves that profile and ticks every 5 seconds. Hermes loads every profile's plugins when a gateway starts; a gateway that does not serve a profile leaves that profile's schedule alone and delivers nothing for it. A file lock guarantees only one poller even when several Hermes processes share the profile. Every fire is a durable claim with an attempt marker. An accepted turn that never starts is tried three times, and a refused messaging injection backs off and is tried five times, before it is marked dead. Desktop and TUI wakes wait while the app session is closed, retrying every minute until it reattaches or the wake expires. A turn that started but never finished (a crash or restart) is recorded as interrupted. Hermes may auto-resume that wake turn, sometimes before heartbeat2's restart recovery has run; heartbeat2 keeps the replay silent either way, never counts it as a fire or delivery, and counts it as a model turn toward the daily cap.
 
 ## Setup
-Requires **Hermes ≥ 0.21.6** and Python ≥ 3.11 on macOS or Linux. HeartBeat 2.0 delivers into **messaging-gateway DMs** (and group or topic chats when `dm_only` is off): Telegram, Discord, Slack, WhatsApp and the other gateway platforms.
+Requires **Hermes ≥ 0.21.6** and Python ≥ 3.11 on macOS or Linux. HeartBeat 2.0 delivers into **messaging-gateway DMs** (and group or topic chats when `dm_only` is off): Telegram, Discord, Slack, WhatsApp and the other gateway platforms. Desktop and TUI sessions also support wakes on capable Hermes 0.23+ hosts, using the same consent and limits.
 
 Install with the command at the top, add the `allow_gateway_injection` key shown in [Try it](#try-it), and restart the messaging gateway. Then send `/pulse` in your DM. It shows:
 - whether the scheduler is running;
@@ -341,9 +341,31 @@ The [roadmap tracker](https://github.com/electricsheephq/heartbeat2/issues/139) 
 - [Research / blocked](https://github.com/electricsheephq/heartbeat2/milestone/6)
 
 ## Compatibility and known issues
-- **Delivery is to messaging-gateway chats:** DMs by default, plus group and topic chats when `dm_only` is off. Group and topic delivery has passed one live test, in a Telegram forum topic ([#98](https://github.com/electricsheephq/heartbeat2/issues/98)). It refuses to arm wakes from the CLI, TUI, Desktop, the API server or cron: a CLI wake would interrupt your turn, and TUI/Desktop have no silence filter for injected turns yet. Desktop and TUI wakes are not scheduled yet: they wait on Hermes core support for silent injected turns there ([#8](https://github.com/electricsheephq/heartbeat2/issues/8), in Research / blocked).
+### Where wakes run
+
+| Conversation | Support |
+| --- | --- |
+| Messaging DMs | Hermes ≥ 0.21.6, with injection consent |
+| Messaging groups and topics | With `dm_only` off |
+| Desktop and TUI | Hermes 0.23+ with local-session plugin injection and consent |
+| CLI | Refused; plugin turns are not shown |
+| API server | Refused; plugin turns are dropped |
+| Cron | Refused |
+
+Wakes can't run in the Hermes CLI: it doesn't show plugin turns. Use the Desktop app, the TUI or a messaging chat.
+
+Wakes can't run in API-server sessions yet: Hermes drops plugin turns there. Arm it from the Desktop app, the TUI or a messaging chat.
+
+This Hermes version can't deliver wakes to app sessions. Update Hermes, or use a messaging chat.
+
+The last message applies to Desktop/TUI hosts without local-session injection support. `/pulse warm` stays messaging-only: a closed app window makes keep-warm pointless.
+
+### Known limits
+
+- **App windows:** a silent or held-message turn still shows its text in the window (a Hermes limitation, [NousResearch/hermes-agent#156465](https://github.com/NousResearch/hermes-agent/issues/156465)). The wake asks the model to reply with exactly `[SILENT]` when it is not notifying, but streaming text cannot be hidden by the plugin. Nothing is pushed to a phone. When Hermes retires a closed window's session, a wake waits and retries every minute; reopening the conversation lets it run, subject to expiry and the usual limits. Hermes may keep a disconnected window's session live for about five minutes, so a wake can run unseen during that grace period.
+- **Messaging groups/topics** require `dm_only` off. Group and topic delivery has passed one live test in a Telegram forum topic ([#98](https://github.com/electricsheephq/heartbeat2/issues/98)).
 - **A wake turn that fails at the provider** (quota, auth, outage) shows Hermes's own failure notice in the chat. The plugin cannot suppress it ([NousResearch/hermes-agent#136749](https://github.com/NousResearch/hermes-agent/issues/136749)). HeartBeat 2.0 settles that wake once Hermes ends the turn (some provider errors leave it open until the agent timeout, [#27](https://github.com/electricsheephq/heartbeat2/issues/27), blocked upstream by [NousResearch/hermes-agent#137357](https://github.com/NousResearch/hermes-agent/issues/137357)), then holds every pending wake back (5 min → 15 min → 1 h → 4 h) until a model call on the profile succeeds again. A wake already in flight when the error hits can still show one more notice. A long outage therefore costs about one notice per backoff step, not one per wake.
-- **Silence covers the final reply.** `notify=false` keeps the agent's reply out of the chat. Hermes still posts two kinds of text on its own: interim messages (text the model writes alongside a tool call; Hermes's `display.interim_assistant_messages` is on by default) and tool-progress bubbles (on by default on Discord; WhatsApp and Matrix show new tools; Telegram and Slack hide them). The wake text tells the model to write nothing alongside tool calls, but a model can still do it. To keep wakes fully silent, set `display.interim_assistant_messages: false` and, where tool progress is on, `display.platforms.<platform>.tool_progress: off`. A quiet-injection option is requested upstream ([NousResearch/hermes-agent#136825](https://github.com/NousResearch/hermes-agent/issues/136825)).
+- **In messaging chats, silence covers the final reply.** `notify=false` keeps the agent's reply out of the chat. Hermes still posts two kinds of text on its own: interim messages (text the model writes alongside a tool call; Hermes's `display.interim_assistant_messages` is on by default) and tool-progress bubbles (on by default on Discord; WhatsApp and Matrix show new tools; Telegram and Slack hide them). The wake text tells the model to write nothing alongside tool calls, but a model can still do it. To keep wakes fully silent, set `display.interim_assistant_messages: false` and, where tool progress is on, `display.platforms.<platform>.tool_progress: off`. A quiet-injection option is requested upstream ([NousResearch/hermes-agent#136825](https://github.com/NousResearch/hermes-agent/issues/136825)).
 - **Model-fallback notice.** When Hermes falls back to another model during a wake turn, its fallback notice is posted to the chat, even for a wake that stays silent ([NousResearch/hermes-agent#137738](https://github.com/NousResearch/hermes-agent/issues/137738)). The plugin cannot suppress it.
 - **Messages sent while the agent is busy.** On Signal/SimpleX, a message that waits in Hermes' queue while a turn is running (a photo, or any message when `busy_input_mode` is `queue`) reaches the agent without a message id, so HeartBeat 2.0 does not count it as your reply. The unanswered mute and the silence check-in treat you as silent until your next message. Text you send mid-turn in the default mode is counted. With the Codex app-server runtime, its native steer (text you send into a running wake turn) is not detected, so a wake that decides to stay silent can leave that steer unanswered.
 - **`/pulse` while the agent is mid-turn.** Hermes currently drops a plugin's slash command sent while the agent is running a turn: no reply, and it is not retried ([NousResearch/hermes-agent#131051](https://github.com/NousResearch/hermes-agent/issues/131051)). A `/pulse` command normally answers within seconds. If it doesn't, the agent was mid-turn (possibly a silent wake turn that posts nothing). Wait a minute and send the same command again, with its arguments (for example `/pulse off`, not bare `/pulse`). Then check its reply or `/pulse status`.
@@ -359,7 +381,7 @@ The [roadmap tracker](https://github.com/electricsheephq/heartbeat2/issues/139) 
 - **`/pulse` shows a YAML snippet.** The consent key isn't set yet: add it (see [Try it](#try-it)) and restart the messaging gateway.
 - **`/pulse` doesn't answer.** The agent was probably mid-turn: Hermes drops a plugin command sent during a turn. Wait a minute and send the same command again.
 - **A wake didn't fire.** `/pulse why <id>` lists its recent triggers, states and reasons, such as quiet hours, the unanswered mute, a daily cap or a busy chat. `/pulse test <id>` previews the checks without sending anything or calling a model.
-- **Arming is refused in the CLI, TUI or Desktop.** Wakes run in messaging-gateway chats only for now (see [known issues](#compatibility-and-known-issues)).
+- **Arming is refused in the CLI or API server.** Use the Desktop app, the TUI or a messaging chat (see [Where wakes run](#where-wakes-run)). If a Desktop/TUI host cannot deliver to app sessions, update Hermes or use a messaging chat.
 - **A group chat is refused.** `dm_only` is on by default; turn it off in **Settings ▸ Plugins** to allow group and topic chats.
 - **The agent's messages stopped.** `/pulse desk` says why messages are held: quiet hours, the unanswered mute (after 2 unanswered messages by default) or the daily message cap. Those messages aren't sent later on their own: on your next message, or on the agent's next turn that can send, it gets a short list of the held results and tells you what still matters.
 

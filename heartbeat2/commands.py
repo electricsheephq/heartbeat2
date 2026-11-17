@@ -7,7 +7,7 @@ import re
 from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES, RUN_KEY_PREFIX, RUN_PAYLOAD
 from . import governor
 from . import cache
-from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested, cap_counts, is_keep_warm, is_watcher
+from .policy import INJECTION_CONFIG, LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, platform_refusal, session_platform, owner_requested, cap_counts, is_keep_warm, is_watcher
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible, filter_text
 
@@ -140,11 +140,20 @@ def _item(engine, wake, today_budget=None):
     role = f' · today {today_budget[0]}/{today_budget[1]}' if today_budget else ''
     if is_keep_warm(wake) and wake.status == 'active' and wake.next_due_at is None: due = 'no ping due now'
     kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
-    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+    held = app_closed_hold(engine, wake)
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '') + (' · '+held if held else '')
+
+
+def app_closed_hold(engine, wake):
+    if wake.platform not in LOCAL_SURFACES: return ''
+    since = [float(stamp) for o in engine.store.list_occurrences(wake.id, state='pending')
+             if (stamp := engine.store.get_meta('held_since:'+o.id))]
+    return 'held: app window is closed · since '+_time(engine,min(since)) if since else ''
 
 
 def _occurrences(engine, wake):
     reasons={'held_unanswered':'held: waiting for your reply', 'held_daily_cap':'held: waiting for daily capacity', 'held_paused':'held: wake paused',
+        'app_closed':'held: app window is closed',
         'unanswered':'dropped: unanswered mute', 'daily_model_cap':f'dropped: daily model cap ({engine.policy.max_model_wakes_per_day})',
         'daily_message_cap':f'dropped: daily message cap ({engine.policy.max_messages_per_day})', 'expired_held':'expired while held'}
     def held_clause(o):
@@ -158,8 +167,11 @@ def _occurrences(engine, wake):
                      'unanswered':'unanswered mute'}.get(code, code.replace('_', ' '))
             return ' · message held: '+label
         return ' · was held: '+held.replace('_', ' ')
+    def held_since(o):
+        stamp = engine.store.get_meta('held_since:'+o.id)
+        return float(stamp) if stamp else o.held_since
     return '\n'.join(f'{o.dedupe_key} · {o.state} · {reasons.get(o.error,o.error.replace("_"," ") or o.outcome or "none")} · '
-        f'matched/created {_time(engine,o.matched_at) if o.matched_at is not None else _time(engine,o.created_at) if o.created_at else "before v0.1.2"} · held-since {_time(engine,o.held_since)} · delivered {"yes" if o.delivered else "no"}'+held_clause(o)
+        f'matched/created {_time(engine,o.matched_at) if o.matched_at is not None else _time(engine,o.created_at) if o.created_at else "before v0.1.2"} · held-since {_time(engine,held_since(o))} · delivered {"yes" if o.delivered else "no"}'+held_clause(o)
         for o in engine.store.list_occurrences(wake.id)[-10:])
 
 
@@ -326,13 +338,16 @@ def handle(raw_args, runtime):
         with engine.store.atomic():
             session = engine.store.get_session(key)
             bound={name:session_env('HERMES_SESSION_'+name.upper()) for name in ('platform','chat_type','chat_id')}
-            if action not in {'run','test'} and bound['platform'] in MESSAGING_PLATFORMS:
+            bound['platform']=session_platform(bound['platform'],engine.ctx)
+            if bound['platform'] and not deliverable_platform(bound['platform']):
+                return platform_refusal(bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
+            if action not in {'run','test'} and deliverable_platform(bound['platform']):
                 engine.store.upsert_session(Session(key,**bound,current_session_id=session_env('HERMES_SESSION_ID')))
                 session=engine.store.get_session(key)
                 engine.store.cas_session(key,{'platform':session.platform,'chat_type':session.chat_type,'chat_id':session.chat_id},**bound)
                 session=engine.store.get_session(key)
-            if session is None or session.platform not in MESSAGING_PLATFORMS:
-                return 'Error: /pulse needs a known messaging-gateway session.'
+            if session is None or not deliverable_platform(session.platform):
+                return platform_refusal(session.platform if session else bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
             if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
         if action in {'add','role'}: return _add(engine,session,rest,role=action=='role')
         if action == 'warm' and rest in {'','on','off'}: return _warm(engine,key,rest)
@@ -403,7 +418,8 @@ def handle(raw_args, runtime):
                 if bridge_id:
                     from .voice_bridge import voice_bridge_for
                     lines.append(f'voice bridge: {bridge_id} ({"connected" if voice_bridge_for(engine) else "not connected"})')
-                held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
+                held=sum(o.held_since is not None or bool(engine.store.get_meta('held_since:'+o.id))
+                         for o in engine.store.list_occurrences(session_key=key,state='pending'))
                 kw=engine.store.get_wake(keep_warm_id(key))
                 if kw is not None and kw.status in {'active','paused'}: lines.append(_keep_warm_line(engine,session,kw,warm))
                 from .desk import cost_line
@@ -618,6 +634,8 @@ def _warm(engine, key, rest):
             engine.store.set_meta('card:'+wid,'')
             engine.signal()
             return 'Keep-warm is off for this chat.'
+        if session.platform not in MESSAGING_PLATFORMS:
+            raise ValueError('Keep-warm needs a messaging chat: a closed app window makes it pointless.')
         if not session.enabled: raise ValueError('this chat is off; use /pulse on')
         gate = engine.policy.creation_gate(session_key=key, platform=session.platform, chat_type=session.chat_type,
             allow_gateway_injection=engine.injection_allowed(), creator='user', kind='self')

@@ -506,7 +506,7 @@ class Intake:
         self._follow(session_id)
         key=self._key(session_id)
         if not key: return None
-        identity=e.tool.identity()
+        identity=e.tool.identity(surface=platform)
         if identity is None: return None
         key=identity.session_key
         owner_seen=key in self.inbounds or self.owner_turns.get(session_id)==turn_id

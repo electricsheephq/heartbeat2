@@ -16,7 +16,7 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat
+from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every
 from . import governor
 
@@ -100,7 +100,7 @@ class Poller:
         now=self.clock.now()
         return bool(self.policy.enabled and not self.paused() and self.injection_allowed() and s is not None and s.enabled
                     and not (s.paused_until is not None and s.paused_until>now)
-                    and not (self.policy.dm_only and s.chat_type!='dm') and s.platform in MESSAGING_PLATFORMS)
+                    and not (self.policy.dm_only and s.chat_type!='dm') and deliverable_platform(s.platform))
 
     def injection_allowed(self):
         try:
@@ -672,7 +672,7 @@ class Poller:
         from .cache import keep_warm_plan, keep_warm_key
         s,now=self.store,self.clock.now()
         session=s.get_session(w.session_key)
-        if session is None or not deliverable_platform(session.platform): return
+        if session is None or session.platform not in MESSAGING_PLATFORMS: return
         plan=keep_warm_plan(s,session,self.policy,now)
         due=plan.get('due_at')
         if due!=w.next_due_at:
@@ -923,6 +923,14 @@ class Poller:
         else:
             if health:
                 health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
+            if session.platform in LOCAL_SURFACES:
+                # A retired window rejects synchronously: no turn ran and no delivery failed. Keep its original
+                # waiting time separately from watcher/message holds, so those holds and silence still work unchanged.
+                with s.atomic():
+                    if self.refund_claimed(o,'app_closed'):
+                        if not s.get_meta('held_since:'+o.id): s.set_meta('held_since:'+o.id,str(self.clock.now()))
+                        s.set_meta('not_before:'+o.id,str(self.clock.now()+60))
+                return
             count=int(s.get_meta('inject_failures:'+o.id) or 0)+1
             s.set_meta('inject_failures:'+o.id,str(count))
             s.set_meta('not_before:'+o.id,str(self.clock.now()+RETRY_DELAYS[min(count-1,4)]))

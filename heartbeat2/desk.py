@@ -2,7 +2,7 @@
 import json
 from types import SimpleNamespace
 
-from .commands import _clip, _oneline, _paused, _time, messages_count, quiet_until, quiet_window
+from .commands import _clip, _oneline, _paused, _time, app_closed_hold, messages_count, quiet_until, quiet_window
 from .model import reads_outside_text
 from .policy import is_watcher, is_keep_warm
 from .schedule import quiet_end, zone
@@ -107,6 +107,9 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
             f', {watchers} watcher' + ('s' if watchers != 1 else '') + ' · next due ' +
             (f'{_time(view,next_due[0],compact=True)} ({_clip(_oneline(next_due[1].title or next_due[1].note),40)})'
              if next_due else 'none')]
+    for w in wakes:
+        held = app_closed_hold(view, w)
+        if held: tail.append(f'- {w.id}: '+held)
     counts = store.daily_counts(key, zone(timezone))
     in_flight = store.messages_in_flight(key)
     # Inside a wake's own text, its own reserved slot is not a held message: its cap check ran before it was claimed.
