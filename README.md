@@ -300,7 +300,7 @@ A wake turn is an ordinary model turn in that conversation. It is billed like a 
 ## Prompt cache
 Claude marker routes use Hermes' 5m/1h/auto setting; GPT-5.6+ and GPT-6.x on OpenAI API routes use 30m.
 The Codex OAuth route is reported as unknown until learned.
-Other routes learn a conservative TTL only after both warm and cold gaps are observed. A cache miss less than 5 minutes after the previous call means the prompt changed, not that the cache expired, so it doesn't count as a cold gap.
+Other routes learn a conservative TTL only after both warm and cold gaps are observed. On Claude models, whose caches last at least 5 minutes, a cache miss less than 5 minutes after the previous call means the prompt changed, not that the cache expired, so it doesn't count as a cold gap.
 Agent recurring intervals near the TTL snap below it with downward jitter, respecting floors.
 Owner wakes, cron and anchored repeats retain their timing. Cache lines show the effect and warm interval.
 

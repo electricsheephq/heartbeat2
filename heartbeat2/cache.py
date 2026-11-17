@@ -19,15 +19,21 @@ def _base(part):
     return part if '://' in part else 'https://'+part
 
 
-# No provider keeps a prompt cache for less than 5 minutes, so a miss after a shorter gap means the prompt changed
-# (compression, a model or tool switch), not that the cache expired. Such a miss says nothing about the lifetime (#203).
+# A Claude prompt cache lives at least 5 minutes on every provider, so on a Claude model a miss after a shorter gap means
+# the prompt changed (compression, a model or tool switch), not that the cache expired, and says nothing about the
+# lifetime (#203). Other routes may evict early (local LRU caches), so every miss counts there.
 COLD_GAP_FLOOR = 300
 
 
-def _gaps(row):
-    """A route row's longest warm gap and shortest cold gap, without colds that can't be expiry."""
+def _floor(route):
+    model = (route or '||').split('|', 2)[1]
+    return COLD_GAP_FLOOR if 'claude' in model.lower() else 0
+
+
+def _gaps(row, route):
+    """A route row's longest warm gap and shortest cold gap, without colds that can't be expiry on that route."""
     cold = row.get('min_cold_gap')
-    return row.get('max_warm_gap'), (cold if cold is not None and cold >= COLD_GAP_FLOOR else None)
+    return row.get('max_warm_gap'), (cold if cold is not None and cold >= _floor(route) else None)
 
 
 def cache_ttl_for(route, *, store=None, platform='', api_mode=''):
@@ -54,7 +60,7 @@ def cache_ttl_for(route, *, store=None, platform='', api_mode=''):
             return 1800, 'openai'
     rows = json.loads(store.get_meta('cache_routes') or '{}') if store else {}
     learned = rows.get(route, rows.get(f'{provider}|{model}|{host}', {}))
-    warm, cold = _gaps(learned)
+    warm, cold = _gaps(learned, route)
     return (warm, 'learned') if warm is not None and cold is not None and warm < cold else (None, 'unknown')
 
 
@@ -70,7 +76,9 @@ def touch(store, session, *, started_at, route, prompt, read, api_mode=''):
             routes = json.loads(store.get_meta('cache_routes') or '{}')
             row = routes.pop(route, {})
             if ratio >= .5: row['max_warm_gap'] = max(row.get('max_warm_gap',0), gap)
-            elif ratio < .1 and gap >= COLD_GAP_FLOOR: row['min_cold_gap'] = min(row.get('min_cold_gap',float('inf')), gap)
+            elif ratio < .1 and gap >= _floor(route):
+                # A stored cold below the floor (recorded before #203) must not hide this real one.
+                row['min_cold_gap'] = min(_gaps(row, route)[1] or float('inf'), gap)
             routes[route] = row
             store.set_meta('cache_routes',json.dumps(dict(list(routes.items())[-32:])))
 
@@ -123,7 +131,7 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
             host = urlsplit(_base(part)).hostname or ''
             rows = json.loads(store.get_meta('cache_routes') or '{}')
             row = rows.get(session.last_route, rows.get(f'{route_provider}|{model}|{host}', {}))
-            bracket = ', '.join(f'{label}{minutes(gap)}' for gap,label in zip(_gaps(row),('warm seen ≤','cold ≥')) if gap is not None)
+            bracket = ', '.join(f'{label}{minutes(gap)}' for gap,label in zip(_gaps(row,session.last_route),('warm seen ≤','cold ≥')) if gap is not None)
             return f'Cache: {provider} TTL {source}'+(f' ({bracket})' if bracket else '')
         label = f'Cache: {provider} {"1h" if ttl==3600 else minutes(ttl)} · last touch {age:.0f}m ago'
         if watcher: return label
@@ -162,7 +170,7 @@ def warm_lifetime(store, session):
     host = (urlsplit(_base(part)).hostname or '') if part else ''
     rows = json.loads(store.get_meta('cache_routes') or '{}')
     row = rows.get(session.last_route, rows.get(f'{provider}|{model}|{host}', {}))
-    warm, cold = _gaps(row)
+    warm, cold = _gaps(row, session.last_route)
     # A warm gap is a lower bound on the lifetime, unless a shorter gap was already seen cold.
     if warm and (cold is None or warm < cold): return warm, 'warm_seen'
     return None, 'unknown'
@@ -174,7 +182,7 @@ def _unknown_reason(store, session):
         provider, model, part = session.last_route.split('|', 2)
         host = (urlsplit(_base(part)).hostname or '') if part else ''
         rows = json.loads(store.get_meta('cache_routes') or '{}')
-        warm, cold = _gaps(rows.get(session.last_route, rows.get(f'{provider}|{model}|{host}', {})))
+        warm, cold = _gaps(rows.get(session.last_route, rows.get(f'{provider}|{model}|{host}', {})), session.last_route)
     except Exception:
         warm = cold = None
     if warm and cold:
