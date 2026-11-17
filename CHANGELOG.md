@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.22 — 2026-11-17
+
+- **Installing an update while Hermes is running no longer breaks wakes.** An install replaces HeartBeat's files on disk, but Hermes keeps running the code it already loaded until it restarts. HeartBeat loaded some of its files only when a wake first needed them, so a wake could pull a newer file into older running code, fail with an import error on every try, and end up paused. HeartBeat now loads all of its files when Hermes starts it, so the running version keeps working until the restart. `/pulse status` now says when a newer version is installed than the one running: "restart Hermes to finish the upgrade." The fix applies to upgrades from this version on, so restart Hermes after installing this one. (#207)
+
 ## 0.4.21 — 2026-11-17
 
 - **Keep-warm now works on Claude routes where it never fired.** HeartBeat learns a route's cache lifetime from the gaps between calls. One cache miss a few seconds after the previous call came from a prompt change, not from the cache expiring, but it was still recorded as the route going cold after seconds. A route that had stayed warm across an hour then never got a known lifetime, and keep-warm never planned a ping. On Claude models, whose caches last at least 5 minutes, such misses no longer count, and routes that already recorded one recover by themselves. Other routes may evict early, so every miss still counts there. If a keep-warm ping lands on a cold cache, the lifetime becomes unknown and the pings stop. When keep-warm can't tell the lifetime, `/pulse warm` now says why. (#203)
