@@ -131,6 +131,15 @@ def _resting(engine, wake, today_budget=None):
     return today >= budget
 
 
+def _sleeping(engine, wake):
+    """True for an active wake the gate holds because the chat is asleep (#62): it takes no turn until the owner writes.
+    A report-back still runs for results of watchers the owner asked for, as the gate allows."""
+    if wake.status != 'active' or not sleeps(wake): return False
+    if not engine.policy.asleep(engine.store.get_session(wake.session_key), engine.clock.now()): return False
+    from .desk import agreed_reports
+    return not (wake.trigger_json.get('report_back') and agreed_reports(engine.store, wake.session_key))
+
+
 def _item(engine, wake, today_budget=None):
     today_budget = (today_budget or _role_today(engine, wake)) if wake.role else None
     if wake.status in FINISHED_STATUSES: due = ''
@@ -141,11 +150,7 @@ def _item(engine, wake, today_budget=None):
     if is_keep_warm(wake) and wake.status == 'active' and wake.next_due_at is None: due = 'no ping due now'
     kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
     held = app_closed_hold(engine, wake)
-    if not held and wake.status == 'active' and sleeps(wake) and engine.policy.asleep(engine.store.get_session(wake.session_key), engine.clock.now()):
-        from .desk import agreed_reports
-        # A report-back still runs for results of watchers the owner asked for, as the gate allows.
-        if not (wake.trigger_json.get('report_back') and agreed_reports(engine.store, wake.session_key)):
-            held = 'asleep until you write'
+    if not held and _sleeping(engine, wake): held = 'asleep until you write'
     return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) or agreed_watcher(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '') + (' · '+held if held else '')
 
 
@@ -428,7 +433,7 @@ def handle(raw_args, runtime):
                             target[name]=target.get(name,0)+value
                 active = [w for w in engine.store.list_wakes(key) if w.status in {'active','proposed','paused'}]
                 role_today = {w.id: _role_today(engine,w) for w in active if w.role}  # read once: header and rows agree
-                next_due = min((x for w in active if w.status=='active' and not is_keep_warm(w) and not _resting(engine,w,role_today.get(w.id))
+                next_due = min((x for w in active if w.status=='active' and not is_keep_warm(w) and not _resting(engine,w,role_today.get(w.id)) and not _sleeping(engine,w)
                                 for x in (w.next_due_at,w.deadline_at) if x is not None),default=None)
                 lines = [f'HeartBeat 2.0: {"on" if session.enabled and engine.policy.enabled else "off"} · poller {status["state"]}'
                          + (f' ({status["reason"]})' if status.get('reason') else ''),

@@ -224,3 +224,14 @@ def test_the_list_agrees_with_the_gate_for_a_report_back(engine, monkeypatch, ag
     lines = [l for l in commands.handle('list', SimpleNamespace(get_engine=lambda: e)).splitlines() if back.id in l]
     assert verdict == ('' if agreed else 'asleep')
     assert len(lines) == 1 and ('asleep until you write' in lines[0]) is (not agreed), lines
+
+
+def test_status_next_due_leaves_out_sleeping_wakes(engine, monkeypatch):
+    # Review (PM gate, 0.4.27): a sleeping wake takes no turn until the owner writes, so it is not "next due".
+    monkeypatch.setattr(commands, 'session_env', lambda n: KEY if n == 'HERMES_SESSION_KEY' else '')
+    now = engine.clock.now()
+    arm(engine, 'every', next_due_at=now + 3600, expires_at=now + 7*DAY)
+    mine = arm(engine, 'at', creator='user', next_due_at=now + 3*3600)
+    away(engine)
+    out = commands.handle('status', SimpleNamespace(get_engine=lambda: engine))
+    assert 'next due: ' + commands._time(engine, mine.next_due_at) in out, out
