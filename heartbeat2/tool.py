@@ -8,7 +8,7 @@ import logging
 import re
 
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
-from .policy import LOCAL_SURFACES, deliverable_platform, platform_refusal, session_platform, owner_class, holds_messages, cap_counts, is_keep_warm
+from .policy import LOCAL_SURFACES, deliverable_platform, platform_refusal, session_platform, owner_class, holds_messages, cap_counts, is_keep_warm, agreed_watcher
 from .schedule import parse_at, parse_duration, next_every, next_cron
 
 
@@ -44,8 +44,9 @@ DESCRIPTION = ('Your own time in this chat. Use create to arm a wake/watcher (no
                'If a result is proposed (armed=false and its receipt names a /pulse ok command), nothing is set yet: say so first and ask the owner to send that command; never call it set, done or scheduled. '
                'When a create is refused, tell the owner why and what can be done; never arm a stand-in or relay wake '
                'that re-arms later to get around a limit. '
-               'For a one-time "at" wake the owner asks for in their current message, set owner_asked=true: '
-               "it then fires like the owner's own reminder (not muted, not capped). Never set it for your own follow-ups.")
+               'For a one-time "at" wake or a watcher the owner asks for in their current message, set owner_asked=true: '
+               "a reminder then fires like the owner's own (not muted, not capped); a watcher's alerts are not held by the "
+               "unanswered mute, but daily caps still apply. Never set it for your own follow-ups.")
 SCHEMA = {'name':'pulse','description':DESCRIPTION,'parameters':PARAMETERS}
 NOT_IN_FLIGHT = {'error':'not_in_flight','detail':'respond is only for answering a wake turn; in an ordinary conversation, just reply to the owner (use create/update/cancel to manage wakes).'}
 
@@ -219,7 +220,7 @@ class Tool:
                                 gate.reason, hashlib.sha256(s.session_key.encode()).hexdigest()[:16])
                         return {'error':gate.reason,'detail':gate.detail}
                     kind = (args.get('trigger') or {})['kind']
-                    requested = args.get('owner_asked') is True and evidence and kind == 'at'
+                    requested = args.get('owner_asked') is True and evidence and (kind == 'at' or kind in PROBE_KINDS|EVENT_KINDS)
                     w = Wake(s.session_key, args.get('note',''), (args.get('trigger') or {})['kind'],
                              platform=s.platform, chat_type=s.chat_type, chat_id=s.chat_id,
                              armed_session_id=session_id or s.current_session_id, created_in=created_in,
@@ -242,7 +243,7 @@ class Tool:
                     item = {'ok':True,'armed':w.status=='active','wake':asdict(w),'clamped':result.clamped,'cache':self.cache_result(w),'receipt':self.receipt(w,s)}
                     if 'handoff_to' in args: item['handoff_to'] = args['handoff_to']
                     if args.get('owner_asked') is True and not requested:
-                        item['owner_asked_ignored'] = 'wake_turn' if created_in == 'wake_turn' else 'not_owner_turn' if not evidence else 'not_one_shot'
+                        item['owner_asked_ignored'] = 'wake_turn' if created_in == 'wake_turn' else 'not_owner_turn' if not evidence else 'not_one_shot_or_watcher'
                     return item
                 if action not in {'update','pause','resume','cancel'}:
                     return {'error':'unknown_action'}
@@ -353,7 +354,8 @@ class Tool:
                             if w.status_reason == 'watch_requested':
                                 candidate = replace(candidate,status_reason='')
                         if w.creator == 'agent' and not w.trigger_json.get('builtin') and w.parent_wake_id is None:
-                            granted = args.get('owner_asked') is True and evidence and candidate.kind == 'at'
+                            granted = (args.get('owner_asked') is True and evidence
+                                       and (candidate.kind == 'at' or candidate.kind in PROBE_KINDS|EVENT_KINDS))
                             if granted:
                                 candidate = replace(candidate,owner_requested=True)
                             elif action == 'resume' or changed:
@@ -483,6 +485,7 @@ class Tool:
         if w.status not in {'proposed','paused'}:
             from .policy import owner_requested
             if owner_requested(w): parts.append('Counts as your own reminder: not muted or capped.')
+            elif agreed_watcher(w): parts.append('You asked for this watcher: not muted; daily caps still apply.')
             if w.kind in TIME_KINDS or watcher or w.kind=='owner_silent' and not w.trigger_json.get('builtin'):
                 from .commands import quiet_until
                 due=((s.last_human_at or e.clock.now())+parse_duration(w.trigger_json.get('after',p.checkin_after_hours*3600)) if w.kind=='owner_silent' else
@@ -498,7 +501,7 @@ class Tool:
                     due=max(due,spacing)
                 release=quiet_until(e,w.session_key,urgent=w.urgent,now=due)
                 if release and release>due: parts.append(f'Quiet hours {"hold its messages" if holds_messages(w) else "skip its ticks" if skip else "hold it"} until {local(release)}.')
-            if not owner_class(w) and s.unanswered_count>=p.max_unanswered:
+            if p.unanswered_gate(w,s.unanswered_count):
                 parts.append('Muted: messages are held; work still runs.' if holds_messages(w) else
                              'Muted: it waits for your reply.' if watcher else 'Muted: it is dropped unless you reply first.')
             if p.wake_spacing_minutes>0 and (w.kind in TIME_KINDS or watcher or w.kind=='owner_silent'):

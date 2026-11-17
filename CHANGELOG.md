@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.25 — 2026-11-17
+
+- **A watcher you ask for reaches you even when you haven't replied.** After two of the agent's messages go unanswered, HeartBeat holds its watchers' alerts until you reply. A watcher you asked for yourself, such as "tell me if my flight is delayed", was held too, so the alert could arrive after the flight. Now, when you ask for a watcher in your own message, the agent marks it as yours (`owner_asked`), and its alerts are no longer held by that mute. Quiet hours, the daily message and model-turn caps and the spending limit still apply to it, as to the agent's other work. An alert that quiet hours or the daily message cap held is passed on once that hold ends, even if you still haven't replied. Other held results keep waiting for your reply. The arm receipt says "You asked for this watcher: not muted; daily caps still apply." If the agent later edits it without you asking again, it goes back to the usual mute, and if the watcher is cancelled, a result it left waits for your reply. (#108)
+
 ## 0.4.24 — 2026-11-17
 
 - **`/pulse test` gets competing wakes right.** When two wakes in one chat both had a turn waiting, the preview could say the other wake "takes the turn first" when it would not. That happens when the other wake's earlier turn goes unacknowledged three times: HeartBeat drops that turn, and if the drop pauses the wake, its next turn waits or is skipped. The previewed wake is then sent after all, and the preview now says so. It also no longer says the report-back wake HeartBeat arms to deliver held watcher reports will pause after a drop, because HeartBeat never pauses it. The preview still sends nothing and changes nothing. (#167)

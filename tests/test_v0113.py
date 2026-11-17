@@ -76,7 +76,8 @@ def test_requested_reminder_bypasses_daily_caps(engine, cap):
     assert len(engine.ctx.calls) == 1 and flag(engine.store.get_wake(w.id)) is True
 
 
-@pytest.mark.parametrize('control', ['undeclared', 'internal', 'empty', 'every', 'watcher', 'stale'])
+# A watcher the owner asks for is no longer a negative control: tests/test_108_agreed_watchers.py (#108 item 1).
+@pytest.mark.parametrize('control', ['undeclared', 'internal', 'empty', 'every', 'stale'])
 def test_negative_controls(engine, control):
     if control == 'internal':
         engine.intake.pre_llm_call(session_id='sid', turn_id='internal',
@@ -90,7 +91,7 @@ def test_negative_controls(engine, control):
     w, result = create(engine, requested=control != 'undeclared', kind=kind)
     assert flag(w) is False
     if control != 'undeclared':
-        assert result.get('owner_asked_ignored') == ('not_one_shot' if kind != 'at' else 'not_owner_turn')
+        assert result.get('owner_asked_ignored') == ('not_one_shot_or_watcher' if kind != 'at' else 'not_owner_turn')
     else:
         assert 'owner_asked_ignored' not in result
     finish(engine)

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from .commands import _clip, _oneline, _paused, _time, app_closed_hold, messages_count, quiet_until, quiet_window
 from .model import reads_outside_text
-from .policy import is_watcher, is_keep_warm
+from .policy import is_watcher, is_keep_warm, agreed_watcher
 from .schedule import quiet_end, zone
 from .wake_text import _age
 
@@ -25,9 +25,19 @@ def _plain(text: str) -> str:
     return text.replace('`', "'")
 
 
-def held_report_lines(store, session_key, *, limit=5, payload_ok=True) -> tuple[list[str], list[tuple[str, str]]]:
+def agreed_reports(store, session_key):
+    """Held results of watchers the owner asked for: the unanswered mute doesn't hold them (#108).
+
+    A watcher cancelled since loses this, so its result waits for the owner like any other; one that finished keeps it."""
+    return [o for o in store.held_reports(session_key)
+            if (w := store.get_wake(o.wake_id)) is not None and w.status != 'cancelled' and agreed_watcher(w)]
+
+
+def held_report_lines(store, session_key, *, limit=5, payload_ok=True, agreed_only=False) -> tuple[list[str], list[tuple[str, str]]]:
     # Results of turns that read outside text go only to the owner and the fenced report-back turn (#137).
-    pending = [o for o in store.held_reports(session_key) if payload_ok or not reads_outside_text(o)]
+    # Under the unanswered mute a report-back passes on only the results of watchers the owner asked for (#108).
+    pending = [o for o in (agreed_reports(store, session_key) if agreed_only else store.held_reports(session_key))
+               if payload_ok or not reads_outside_text(o)]
     shown = pending[:limit]
     lines = []
     for o in shown:
@@ -153,6 +163,8 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
     held = ('quiet hours' if quiet_until(view,key) is not None else
             "the owner hasn't replied yet" if session.unanswered_count >= policy.max_unanswered else
             "today's message limit" if counts['delivered'] - own >= policy.max_messages_per_day else '')
+    if held and held == "the owner hasn't replied yet" and any(agreed_watcher(w) for w in store.list_wakes(key, status='active')):
+        held += ' (watchers the owner asked for still send their alerts)'
     if held: tail.append('- Messages held now: '+held)
     omitted = 0
     while True:
