@@ -11,6 +11,7 @@ import threading
 import hashlib
 import json
 import os
+import re
 import stat as stat_module
 from pathlib import Path
 import shlex
@@ -67,6 +68,33 @@ def _allowlist_entry(entry):
     # would admit any script appended to it, so it allows nothing.
     if prefix[:1] == [PYTHON_TOKEN] and (len(prefix) < 2 or prefix[1].startswith('-')): return []
     return prefix
+
+
+# A name the owner passes to a command (#108 item 3). Names that change how the program runs, rather than what it reads,
+# are refused.
+ENV_NAME = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+RESERVED_ENV = re.compile(r'(PATH|HOME|USER|LOGNAME|SHELL|LANG|TMPDIR|IFS|ENV|BASH_ENV|LD_.*|DYLD_.*|PYTHON.*|HERMES_.*|LC_.*)')
+
+
+def command_env_rules(text):
+    """The owner's `<allowlist entry> = NAME[, NAME...]` rules, `;`-separated, as {entry argv prefix: names}."""
+    rules = {}
+    for part in (text or '').split(';'):
+        if not part.strip(): continue
+        entry, sep, names = part.rpartition('=')
+        prefix = tuple(shlex.split(entry.strip())) if sep else ()
+        listed = [name.strip() for name in names.split(',')]
+        if not prefix or any(not ENV_NAME.fullmatch(name) or RESERVED_ENV.fullmatch(name) for name in listed):
+            raise ValueError('each rule is "<allowed command> = NAME[, NAME...]" with upper-case names that do not change how the program runs')
+        rules[prefix] = listed
+    return rules
+
+
+def command_env_names(argv, allowlist, rules_text):
+    """Names the owner passes to argv: those of the longest allowlist entry that admits it."""
+    admitting = [prefix for entry in allowlist.split(',') if (prefix := _allowlist_entry(entry)) and argv[:len(prefix)] == prefix]
+    if not admitting: return []
+    return command_env_rules(rules_text).get(tuple(max(admitting, key=len)), [])
 
 
 def command_allowed(argv, allowlist):
@@ -408,10 +436,12 @@ def _command_env():
     return env
 
 
-def _run_command(argv, cwd):
+def _run_command(argv, cwd, secrets=()):
     """Capture while reading; both the pipe and process lifetime have one deadline."""
     deadline = time.monotonic() + COMMAND_DEADLINE_S
     env = _command_env()
+    # Only the names the owner granted this command's allowlist entry; a missing one is skipped (#108 item 3).
+    env.update({name: os.environ[name] for name in secrets if name in os.environ})
     proc = subprocess.Popen(argv, shell=False, cwd=cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             env=env, start_new_session=True)
@@ -448,7 +478,8 @@ def _command(wake, policy, home):
     if home is None: raise ValueError('command probe requires profile home')
     cwd = Path(trigger.get('cwd') or home).expanduser()
     if not cwd.is_absolute(): cwd = Path(home) / cwd
-    returncode, body = _run_command(resolve_program(argv), cwd)
+    secrets = command_env_names(argv, policy.probe_commands, policy.probe_command_env)
+    returncode, body = _run_command(resolve_program(argv), cwd, secrets)
     success = returncode == 0
     if mode in {'change','json'} and not success:
         raise ValueError('command failed')

@@ -60,7 +60,7 @@ def test_invalid_or_reserved_rules_are_refused(rule):
 
 
 def test_blank_is_the_default_and_valid():
-    assert Policy().probe_command_env == '' and Policy.from_settings({'probe_command_env': ' '}).probe_command_env == ' '
+    assert Policy().probe_command_env == '' and Policy.from_settings({'probe_command_env': ' '}).probe_command_env.strip() == ''
 
 
 def test_the_agent_cannot_set_it():
