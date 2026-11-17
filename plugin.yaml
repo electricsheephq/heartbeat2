@@ -114,7 +114,7 @@ config_schema:
     type: int
     default: 3
     label: "Follow-ups a role may arm per turn"
-    description: "How many wakes or watchers one role turn may create. Other wake turns may create two, or this many if it is lower."
+    description: "How many wakes or watchers one role or own-time turn may create. Other wake turns may create two, or this many if it is lower."
   max_unanswered:
     type: int
     default: 2
