@@ -440,8 +440,9 @@ def _command_env(secrets=()):
         env = hermes_subprocess_env(inherit_credentials=False, base_env=allowlisted)
     except Exception:
         env = allowlisted
-    # Only the names the owner granted this command's allowlist entry; a missing one is skipped (#108 item 3). They go
-    # in before the pager and no-prompt settings, which stay last.
+    # Only the names the owner granted this command's allowlist entry; a missing one is skipped (#108 item 3). They are
+    # added after hermes_subprocess_env on purpose: it drops credential-like names, and passing one the owner named is the
+    # point. They go in before the pager and no-prompt settings, which stay last.
     env.update({name: os.environ[name] for name in secrets if name in os.environ})
     env.update({'GIT_OPTIONAL_LOCKS':'0', 'GIT_PAGER':'cat',
            'GH_PAGER':'cat', 'PAGER':'cat', 'GIT_TERMINAL_PROMPT':'0',
