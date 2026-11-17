@@ -162,3 +162,48 @@ def test_a_held_watcher_that_was_silenced_by_a_message_hold_speaks_after_the_own
     engine.tick()
     o = engine.store.get_occurrence(w.id, o.dedupe_key)
     assert o.state != 'pending' and not o.force_silent
+
+
+def test_a_report_back_while_asleep_passes_on_only_the_owners_watcher_results(engine):
+    # Review (scout): spec test 7. Quiet hours held both results; the chat then fell asleep.
+    import test_v049_watchers_while_held as held
+    e = engine
+    held.hold(e, 'quiet_hours')
+    e.policy = replace(e.policy, wake_spacing_minutes=0)
+    agreed = held.watch(e, '90', owner_requested=True)
+    other = held.watch(e, '91')
+    held.finish_watch(e, agreed, summary='Your flight is delayed two hours.', muted=True)
+    held.finish_watch(e, other, summary='The nightly build is green.', muted=True)
+    back, pending = held.queued_report(e)
+    e.clock.advance(1200)
+    away(e)
+    s = e.store.get_session(KEY)
+    assert e.gate(back, e.store.get_occurrence(back.id, pending.dedupe_key), s)[0] == ''
+    e.dispatch(e.store.get_occurrence(back.id, pending.dedupe_key))
+    text = e.ctx.calls[-1][0]
+    assert 'Your flight is delayed two hours.' in text and 'The nightly build is green.' not in text
+
+
+def test_a_report_back_while_asleep_with_only_the_agents_results_sleeps(engine):
+    import test_v049_watchers_while_held as held
+    e = engine
+    held.hold(e, 'quiet_hours')
+    held.finish_watch(e, held.watch(e, '91'), muted=True)
+    back, pending = held.queued_report(e)
+    e.clock.advance(1200)
+    away(e)
+    assert e.gate(back, e.store.get_occurrence(back.id, pending.dedupe_key), e.store.get_session(KEY))[0] == 'asleep'
+
+
+def test_several_held_watchers_come_back_spaced_when_the_owner_writes(engine):
+    # Review (scout): spec test 4, with the default wake spacing.
+    assert engine.policy.wake_spacing_minutes > 0
+    wakes = [arm(engine, 'subagent_done'), arm(engine, 'subagent_done')]
+    away(engine)
+    for w in wakes: pending(engine, w)
+    engine.tick()
+    admit(engine, mid='back', text='I am back')
+    engine.clock.advance(61)
+    engine.tick()
+    states = [[o.state for o in engine.store.list_occurrences(w.id)] for w in wakes]
+    assert sum(s != ['pending'] for s in states) == 1, states  # one runs now; the other waits for the spacing

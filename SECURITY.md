@@ -151,8 +151,9 @@ A watcher the agent arms because the owner asked for it in their own message is 
 held by the unanswered mute; quiet hours and the daily message cap still hold it.
 The optional `sleep_after_days` (off by default) goes further: once the owner has
 written nothing in a chat for that many days, the agent's own work there, roles and
-own time included, runs no turn at all until the owner writes again. The owner's own
-wakes, reminders and watchers the owner asked for still run.
+own time included, runs no turn until the owner writes again. The owner's own wakes,
+reminders and watchers the owner asked for still run, and so does a report-back of
+those watchers' held results.
 Roles and own-time turns are full model turns with the conversation's normal tools;
 turn them on only in conversations whose tools you are happy to have run on their
 own.

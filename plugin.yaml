@@ -125,7 +125,7 @@ config_schema:
     type: int
     default: 0
     label: "Sleep the agent's wakes after days without your message"
-    description: "0 is off. After this many days with no message from you in a chat, the agent's own wakes, roles, own time and watchers there run no turn until you write again (a /pulse command doesn't count). Its one-time reminders are dropped; its watchers keep checking and hold one result for your return. Your own wakes, reminders and watchers you asked for, and the keep-warm, still run."
+    description: "0 is off. After this many days with no message from you in a chat, the agent's own wakes, roles, own time and watchers there run no turn until you write again (a /pulse command doesn't count). Its one-time reminders are dropped; its watchers keep checking and hold one result for your return, unless they expire first. Your own wakes, reminders and watchers you asked for, and the keep-warm, still run."
   min_interval_minutes:
     type: int
     default: 15
