@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.24 — 2026-11-18
+## 0.4.24 — 2026-11-17
 
 - **`/pulse test` gets competing wakes right.** When two wakes in one chat both had a turn waiting, the preview could say the other wake "takes the turn first" when it would not. That happens when the other wake's earlier turn goes unacknowledged three times: HeartBeat drops that turn, and if the drop pauses the wake, its next turn waits or is skipped. The previewed wake is then sent after all, and the preview now says so. It also no longer says the report-back wake HeartBeat arms to deliver held watcher reports will pause after a drop, because HeartBeat never pauses it. The preview still sends nothing and changes nothing. (#167)
 
