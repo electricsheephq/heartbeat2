@@ -321,7 +321,8 @@ def test_I13_structured_silence_and_bare_unreported(engine):
     assert e.intake.transform_llm_output(response_text='hello', session_id='sid') is None
 
 
-def test_I14_non_gateway_arming_refused(engine):
+def test_I14_non_gateway_arming_refused(engine, monkeypatch):
+    monkeypatch.setattr('heartbeat2.policy.local_injection_supported', lambda: False)
     e = engine
     for platform in ('cli', 'tui', 'desktop', 'api_server'):
         session(e, platform=platform)

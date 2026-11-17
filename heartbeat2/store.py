@@ -146,7 +146,7 @@ def _validate_wake(wake: Wake):
 # Keys that guard owner input against replay (human:, nonhuman:), and keys per wake, session or day, are never pruned here.
 # Nor is children:<occurrence id>:<attempt>: a recovered turn can stay bound to an old occurrence after gc removes its row,
 # and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
-OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'ignored:', 'inject_failures:',
+OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'held_since:', 'ignored:', 'inject_failures:',
                             'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
                             'stop_hint_offered:', 'supersede_on_refund:')
 

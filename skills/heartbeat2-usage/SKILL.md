@@ -13,7 +13,7 @@ Between the owner's messages you would normally not exist. HeartBeat gives you t
   Set `handoff_to` on a role create or update to another role id in this chat: a `progress` or `done` turn with a summary brings that role forward within its usual limits and passes it the result; `handoff_to: ""` clears the link.
 - **Follow-ups.** Come back to something you promised, a task still in flight, or a question left open.
 - **Watchers.** Watch the real thing (a file, a process, a URL, a read-only command or an event) for free, and wake only when it changes.
-- **Own time.** When the owner turns on own time, you get regular turns with no assigned task. Look at your desk and decide: work on a role, follow something up, set up a watcher, tidy your notes or memory, think something over, or rest. Own time is the owner's setting: you can pace it with `next_check`, but not cancel or pause it. It runs in direct chats, and in a group or topic only where the owner turned it on with `/pulse owntime on`; the owner turns it off in a chat with `/pulse owntime off`.
+- **Own time.** When the owner turns on own time, you get regular turns with no assigned task. Look at your desk and decide: work on a role, follow something up, set up a watcher, tidy your notes or memory, think something over, or rest. Own time is the owner's setting: you can pace it with `next_check`, but not cancel or pause it. It runs in messaging direct chats, and in a Desktop/TUI chat, group or topic only where the owner turned it on with `/pulse owntime on`; the owner turns it off in a chat with `/pulse owntime off`. Desktop and TUI chats have no built-in silence check-in; explicitly armed silence wakes still work.
 - **Asking and sharing.** Ask the owner a question you need answered, or tell them something they'd want to know. Check in because you noticed something or have something to bring, not out of habit.
 
 Silent work is real work. A turn that researches, writes, organises or prepares something without messaging the owner counts as progress. End it with `outcome: "progress"`, `notify: false` and a summary of what you did, written as a plain sentence: the owner sees role summaries on the desk.
@@ -49,7 +49,7 @@ Results include a `cache` line. Choose intervals it marks warm, respecting floor
   - Bounds: at least 5 minutes AND the configured owner floor; at most 4 hours / 24 fires.
   - It ends on notify=true or after three consecutive no_change outcomes. Prefer a watcher when possible.
 
-Only messaging-gateway conversations are supported: DMs by default, plus group and topic chats when `dm_only` is off.
+Messaging-gateway conversations are supported: DMs by default, plus group and topic chats when `dm_only` is off. Desktop and TUI sessions also support wakes on Hermes 0.23+ hosts with local-session plugin injection, with the same consent and limits. CLI and API-server sessions are refused; relay the returned explanation. Wakes wait while the app session is retired and retry after the conversation reopens (subject to expiry and limits). Hermes may keep a disconnected session live briefly, so a wake can run unseen during that grace period. App-session replies stream into the window even when silent or message-held: when not notifying, or whenever messages are held, reply with exactly `[SILENT]` and nothing else. Nothing is pushed to a phone. Keep-warm (`/pulse warm`) is messaging-only.
 - The tool chooses this session; never supply a destination or model.
 - If the injection consent YAML is missing, show the returned YAML.
 - Respect reported clamps, and never write plugin settings to widen bounds. Proposed items need `/pulse ok`.
@@ -132,8 +132,9 @@ Do the work, then call:
 ```
 
 Outcomes: `progress` (you did something useful, even silently), `no_change` (nothing to do), `done` (finished for good), `blocked`, `needs_attention`.
-- notify=false → your final reply is not posted; the work still counts. Write no text alongside tool calls on a wake turn: Hermes can post that text even when you stay silent.
-- Never type silence markers. `notify=true` delivers one short, specific message. Do not guilt an absent owner or mention machinery, IDs or ledgers in that message.
+- In messaging chats, notify=false → your final reply is not posted; the work still counts. Write no text alongside tool calls on a wake turn: Hermes can post that text even when you stay silent. Never type silence markers in messaging chats.
+- In Desktop and TUI chats everything you write shows in the window. When notify=false, still call pulse respond, then reply with exactly `[SILENT]` and nothing else. While messages are held, reply with exactly `[SILENT]` even when you respond with notify=true: HeartBeat keeps the summary, not your reply.
+- `notify=true` delivers one short, specific message. Do not guilt an absent owner or mention machinery, IDs or ledgers in that message.
 - Scratch is your notebook for this wake: it replaces the prior scratch. Scratch and next_check commit only when the turn completes successfully. `next_check` applies to `every`, `self` and role wakes that aren't cron, not to probes or one-time wakes; a cron wake follows its schedule. The last respond wins.
 
 For an `every`, `self` or role wake (not cron), you may request the next check:

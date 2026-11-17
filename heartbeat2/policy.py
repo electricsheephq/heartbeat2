@@ -1,6 +1,8 @@
 """Settings-owned bounds. Decisions never mutate settings or perform delivery."""
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, tzinfo
+from functools import lru_cache
+import importlib
 import math
 import os
 import re
@@ -48,17 +50,52 @@ def is_keep_warm(wake):
 MESSAGING_PLATFORMS = frozenset({"telegram", "discord", "whatsapp", "whatsapp_cloud",
     "slack", "signal", "mattermost", "matrix", "email", "sms", "dingtalk", "feishu",
     "wecom", "wecom_callback", "weixin", "bluebubbles", "qqbot", "yuanbao", "relay"})
-NON_GATEWAY_PLATFORMS = frozenset({"cli", "tui", "desktop", "api_server", "cron", "local"})
+LOCAL_SURFACES = frozenset({"desktop", "tui"})
+NON_GATEWAY_PLATFORMS = frozenset({"cli", "api_server", "cron", "local"})
 INJECTION_CONFIG = "plugins:\n  entries:\n    heartbeat2:\n      allow_gateway_injection: true"
 
 
+@lru_cache(maxsize=1)
+def local_injection_supported() -> bool:
+    # No public injection capability flag exists. This live-local-session admission marker is present in
+    # v0.23.0/v0.23.1, absent in v0.21.6/v0.21.7/main-04eb00c; session_surface alone isn't delivery support.
+    try:
+        module = importlib.import_module('gateway.run_plugin_injection')
+        return callable(getattr(getattr(module, 'GatewayPluginInjectionMixin', None), '_plugin_local_session', None))
+    except Exception:
+        return False
+
+
+def session_platform(platform, ctx=None, *, surface=''):
+    """Only local routes need resolving; never reinterpret a messaging platform."""
+    if platform != 'local': return platform
+    if not surface:
+        try:
+            resolve = getattr(ctx, 'session_surface', None)
+            surface = resolve() if callable(resolve) else ''
+        except Exception:
+            surface = ''
+    return surface if isinstance(surface, str) and surface in LOCAL_SURFACES | {'cli'} else 'local'
+
+
+def platform_refusal(platform) -> str:
+    if platform == 'cli':
+        return "Wakes can't run in the Hermes CLI: it doesn't show plugin turns. Use the Desktop app, the TUI or a messaging chat."
+    if platform == 'api_server':
+        return "Wakes can't run in API-server sessions yet: Hermes drops plugin turns there. Arm it from the Desktop app, the TUI or a messaging chat."
+    if platform in LOCAL_SURFACES and not local_injection_supported():
+        return "This Hermes version can't deliver wakes to app sessions. Update Hermes, or use a messaging chat."
+    return ''
+
+
 def deliverable_platform(platform) -> bool:
-    return platform in MESSAGING_PLATFORMS
+    return platform in MESSAGING_PLATFORMS or platform in LOCAL_SURFACES and local_injection_supported()
 
 
 # Platforms whose Hermes adapter reports 'dm' only for a one-to-one chat (checked at Hermes 04eb00cef7). Matrix can report a
 # multi-person m.direct room as 'dm', and Slack its group DMs (mpim); there, and on any platform not listed, own time needs
-# the owner's opt-in like a group (#177, #169).
+# the owner's opt-in like a group (#177, #169). App conversations also need explicit opt-in: each new
+# window/chat has its own key, so default own time would multiply turns and budgets.
 ONE_TO_ONE_DM_PLATFORMS = frozenset({"telegram", "discord", "whatsapp", "signal", "mattermost", "dingtalk", "feishu",
     "wecom", "wecom_callback", "weixin", "bluebubbles", "yuanbao", "email"})
 
@@ -347,8 +384,10 @@ class Policy:
                       registered_gateway: bool = False, parent_role: bool = False) -> Gate:
         if not session_key or session_key == "default":
             return Gate(False, "missing_session")
-        if not platform or platform in NON_GATEWAY_PLATFORMS or (platform not in MESSAGING_PLATFORMS and not registered_gateway):
-            return Gate(False, "non_gateway")
+        if (not platform or platform in NON_GATEWAY_PLATFORMS
+                or platform in LOCAL_SURFACES and not local_injection_supported()
+                or not deliverable_platform(platform) and not registered_gateway):
+            return Gate(False, "non_gateway", platform_refusal(platform))
         if self.dm_only and chat_type != "dm":
             return Gate(False, "dm_only")
         if not self.enabled:
