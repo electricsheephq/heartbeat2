@@ -11,6 +11,7 @@ import threading
 import hashlib
 import json
 import os
+import re
 import stat as stat_module
 from pathlib import Path
 import shlex
@@ -67,6 +68,43 @@ def _allowlist_entry(entry):
     # would admit any script appended to it, so it allows nothing.
     if prefix[:1] == [PYTHON_TOKEN] and (len(prefix) < 2 or prefix[1].startswith('-')): return []
     return prefix
+
+
+# A name the owner passes to a command (#108 item 3). Names that change how the program runs, rather than what it reads,
+# are refused.
+ENV_NAME = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+RESERVED_ENV = frozenset({'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TMPDIR', 'IFS', 'ENV', 'BASH_ENV'})
+RESERVED_ENV_PREFIXES = ('LD_', 'DYLD_', 'PYTHON', 'HERMES_', 'LC_')
+
+
+def command_env_rules(text):
+    """The owner's `<allowlist entry> = NAME[, NAME...]` rules, `;`-separated, as {entry argv prefix: names}."""
+    rules = {}
+    for part in (text or '').split(';'):
+        if not part.strip(): continue
+        entry, sep, names = part.rpartition('=')
+        prefix = tuple(shlex.split(entry.strip())) if sep else ()
+        listed = [name.strip() for name in names.split(',')]
+        if not prefix or any(not ENV_NAME.fullmatch(name) or name in RESERVED_ENV or name.startswith(RESERVED_ENV_PREFIXES) for name in listed):
+            raise ValueError('each rule is "<allowed command> = NAME[, NAME...]" with upper-case names that do not change how the program runs')
+        # A relative path resolves in the watcher's cwd, which the agent chooses, so another file could get the secret.
+        program = prefix[1] if prefix[0] == PYTHON_TOKEN and len(prefix) > 1 else prefix[0]
+        if not os.path.isabs(program) and ('/' in program or program.startswith('~') or prefix[0] == PYTHON_TOKEN):
+            raise ValueError('a rule names its program as a bare command name or an absolute path, and a {python} script by absolute path')
+        rules[prefix] = listed
+    return rules
+
+
+def command_env_names(argv, allowlist, rules_text):
+    """Names the owner passes to argv: those of the longest allowlist entry that admits it."""
+    if not (rules_text or '').strip(): return []
+    admitting = []
+    for entry in allowlist.split(','):
+        try: prefix = _allowlist_entry(entry)
+        except ValueError: continue  # a malformed entry admits nothing, as in command_allowed
+        if prefix and argv[:len(prefix)] == prefix: admitting.append(prefix)
+    if not admitting: return []
+    return command_env_rules(rules_text).get(tuple(max(admitting, key=len)), [])
 
 
 def command_allowed(argv, allowlist):
@@ -392,7 +430,7 @@ def _kill_group(proc):
     proc.wait()
 
 
-def _command_env():
+def _command_env(secrets=()):
     allowed = {'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'TMPDIR', 'SSH_AUTH_SOCK',
                'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'GH_HOST'}
     allowlisted = {key: value for key, value in os.environ.items()
@@ -402,16 +440,19 @@ def _command_env():
         env = hermes_subprocess_env(inherit_credentials=False, base_env=allowlisted)
     except Exception:
         env = allowlisted
+    # Only the names the owner granted this command's allowlist entry; a missing one is skipped (#108 item 3). They go
+    # in before the pager and no-prompt settings, which stay last.
+    env.update({name: os.environ[name] for name in secrets if name in os.environ})
     env.update({'GIT_OPTIONAL_LOCKS':'0', 'GIT_PAGER':'cat',
            'GH_PAGER':'cat', 'PAGER':'cat', 'GIT_TERMINAL_PROMPT':'0',
            'GH_PROMPT_DISABLED':'1', 'GCM_INTERACTIVE':'never'})
     return env
 
 
-def _run_command(argv, cwd):
+def _run_command(argv, cwd, secrets=()):
     """Capture while reading; both the pipe and process lifetime have one deadline."""
     deadline = time.monotonic() + COMMAND_DEADLINE_S
-    env = _command_env()
+    env = _command_env(secrets)
     proc = subprocess.Popen(argv, shell=False, cwd=cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             env=env, start_new_session=True)
@@ -448,7 +489,8 @@ def _command(wake, policy, home):
     if home is None: raise ValueError('command probe requires profile home')
     cwd = Path(trigger.get('cwd') or home).expanduser()
     if not cwd.is_absolute(): cwd = Path(home) / cwd
-    returncode, body = _run_command(resolve_program(argv), cwd)
+    secrets = command_env_names(argv, policy.probe_commands, policy.probe_command_env)
+    returncode, body = _run_command(resolve_program(argv), cwd, secrets)
     success = returncode == 0
     if mode in {'change','json'} and not success:
         raise ValueError('command failed')

@@ -25,7 +25,8 @@ must be trusted and read-only. Model wake turns retain the conversation's tools
 and permissions. GET requests include the configured URL, including its query;
 URL userinfo, cookies, Authorization headers and ambient proxies are refused or
 unused by the probe. Command probes use Hermes' sanitizer on an allowlisted
-environment, without provider, bot or GitHub tokens; gh uses its own hosts.yml
+environment, without provider, bot or GitHub tokens unless the owner names
+one for an allowed command in probe_command_env; gh uses its own hosts.yml
 or keyring. URL probes always block cloud metadata and block private/local
 addresses unless url_allow_private is enabled, checking each hop at connect
 time. File probes honor Hermes read blocks at arm/update and every check,
@@ -77,6 +78,24 @@ These same disclosure and exception paragraphs appear in README and the manifest
   Capture is bounded while reading to 256 KB plus one overflow-detection byte.
   Timeout or overflow kills the entire process group, including descendants that
   remain in it. Deliberately detached processes remain outside that guarantee.
+- `probe_command_env` is the owner's only route for a secret into a command
+  watcher: rules `<allowed command> = NAME, NAME`, separated by `;`. A rule applies
+  to the longest `probe_commands` entry that admits the watcher's argv, and only
+  the named variables are copied from Hermes' environment into the child. Names
+  that change how a program runs (PATH, HOME, USER, LOGNAME, SHELL, LANG, TMPDIR,
+  IFS, ENV, BASH_ENV, LD_*, DYLD_*, PYTHON*, HERMES_*, LC_*) and malformed rules
+  are refused when settings load, as is a rule whose program (or `{python}`
+  script) is a relative path, since that resolves in the watcher's cwd, which
+  the agent chooses. Other variables that change how a program runs (such as
+  GIT_SSH_COMMAND or NODE_OPTIONS) are not refused: name only what the command
+  needs. The agent cannot set it. Values are never logged
+  or shown, but the command's output still reaches the agent, and the agent still
+  chooses the arguments after the allowed command and the watcher's working
+  directory. Grant a secret only to a command that does not print it, cannot be
+  pointed at another host, and does not read configuration or code from its
+  working directory (git and npm do: a repository's config can run its own
+  helpers). A bare program name is looked up on Hermes' PATH, which should hold
+  no relative entries.
 - A `{python}` program token matches allowlist entries literally and resolves to
   the Python running Hermes only when the command runs. The next word in such an
   entry must be the script: with nothing or an option (such as `-I` or `-X`) after
@@ -85,12 +104,13 @@ These same disclosure and exception paragraphs appear in README and the manifest
   TMPDIR, SSH_AUTH_SOCK, XDG_CONFIG_HOME, GH_CONFIG_DIR and GH_HOST. Hermes'
   `tools.environments.local.hermes_subprocess_env(inherit_credentials=False,
   base_env=allowlisted)` sanitizes that base; import/call failures use the same
-  allowlisted base. Pager and no-prompt variables are applied last. GH_TOKEN and
-  GITHUB_TOKEN are never passed; gh authenticates through its own hosts.yml or
-  keyring. No token passthrough setting is offered, so a gh that was authenticated
-  only through those variables needs `gh auth login`. Proxy, custom-CA and D-Bus
+  allowlisted base. Pager and no-prompt variables are applied last. No credential is passed
+  unless the owner names it for that command in `probe_command_env` (above):
+  by default GH_TOKEN and GITHUB_TOKEN are not passed, and gh authenticates
+  through its own hosts.yml or keyring. Proxy, custom-CA and D-Bus
   variables are not part of the allowlisted base. The command watcher's
-  allowlisted environment does not pass proxy or custom-CA variables yet.
+  allowlisted environment does not pass proxy or custom-CA variables yet, unless
+  the owner grants them in `probe_command_env`.
 - Pool probes enter the wake's pinned Hermes home scope; the URL worker copies
   that context. Child HOME handling, adapter secrets, URL configuration and file
   blocks therefore use the wake's profile rather than the launch profile.

@@ -207,6 +207,7 @@ class Policy:
     engagement_window_hours: int = 6
     catch_up_hours: int = 6
     probe_commands: str = "gh pr view, gh pr checks, gh run view, gh run list, git ls-remote, git status, git log"
+    probe_command_env: str = ""
     source_silence: bool = True
     source_process: bool = True
     source_file: bool = True
@@ -230,6 +231,10 @@ class Policy:
             value, default = settings[f.name], getattr(defaults, f.name)
             if value is None:
                 continue
+            if f.name == 'probe_command_env':
+                from .probes import command_env_rules
+                if not isinstance(value, str): raise ValueError('probe_command_env must be text')
+                command_env_rules(value)
             if f.name == 'notify_via' and (not isinstance(value, str) or
                     value.strip() and not re.fullmatch(r'[a-z0-9_-]{1,64}:[A-Za-z0-9._-]{1,64}', value.strip())):
                 raise ValueError('notify_via must be <plugin>:<target> or blank')

@@ -672,7 +672,7 @@ class Intake:
                     ending = '.' if w.role or w.trigger_json.get('own_time') else f'; convert with /pulse watch {w.id}.'
                     lines.append(f'{w.title or "A wake"} ({w.id}) paused ({card}): keep / slow / stop via /pulse{ending}')
                     s.set_meta('card:'+w.id,'')
-            limits={f.name:getattr(e.policy,f.name) for f in fields(e.policy) if f.name not in {'clock','profile_timezone','voice_bridge','notify_via','stop_hint'}}
+            limits={f.name:getattr(e.policy,f.name) for f in fields(e.policy) if f.name not in {'clock','profile_timezone','voice_bridge','notify_via','stop_hint','probe_command_env'}}
             fingerprint=hashlib.sha256(json.dumps(limits,sort_keys=True).encode()).hexdigest()
             session=s.get_session(key)
             if session.limits_fingerprint and session.limits_fingerprint!=fingerprint:

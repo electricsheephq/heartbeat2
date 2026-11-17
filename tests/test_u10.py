@@ -314,7 +314,7 @@ def test_R10_A6_off_stops_probes_and_preserves_due(runtime, route):
 
 def test_R10_A7_command_change_silent_baseline_then_change(engine, monkeypatch):
     e = engine; output = [b'pending', 0]
-    monkeypatch.setattr(probes, '_run_command', lambda argv,cwd:(output[1],output[0]))
+    monkeypatch.setattr(probes, '_run_command', lambda argv,cwd,secrets=():(output[1],output[0]))
     w = arm(e, 'command', trigger_json={'command':['git','status'],'fire_on':'change'})
     e.tick()
     assert not e.ctx.calls and e.store.get_wake(w.id).probe_state_json['fingerprint']
