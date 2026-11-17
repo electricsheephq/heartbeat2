@@ -426,7 +426,7 @@ def handle(raw_args, runtime):
                          "(check-in, own time and keep-warm don't count; the owner can raise max_active / max_active_profile in settings)"]
                 if engine.policy.timezone_pin_notice(): lines.append(engine.policy.timezone_pin_notice())
                 from .registration import version_skew
-                if version_skew(): lines.append(version_skew())
+                if skew := version_skew(): lines.append(skew)
                 bridge_id=getattr(runtime,'voice_bridge_id',engine.policy.voice_bridge)
                 if bridge_id:
                     from .voice_bridge import voice_bridge_for

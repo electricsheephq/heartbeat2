@@ -74,3 +74,20 @@ def test_status_says_when_an_upgrade_waits_for_a_restart(engine, pulse, monkeypa
     monkeypatch.setattr(registration, 'LOADED_VERSION', '0.0.1')
     reply = pulse(engine, 'status')
     assert f'Upgrade pending: {registration.installed_version()} is installed but 0.0.1 is running' in reply
+
+
+def test_installed_version_reads_utf8_whatever_the_locale(monkeypatch):
+    # A legacy-locale host (EUC-JP, GBK, Shift-JIS) can't decode plugin.yaml's non-ASCII bytes with the default codec.
+    original = Path.read_text
+    def legacy_locale(self, encoding=None, errors=None):
+        if encoding is None: raise UnicodeDecodeError('euc_jp', b'\xe2\x80', 0, 1, 'illegal multibyte sequence')
+        return original(self, encoding=encoding, errors=errors)
+    monkeypatch.setattr(Path, 'read_text', legacy_locale)
+    assert registration.installed_version() == registration.LOADED_VERSION
+
+
+def test_undecodable_manifest_never_stops_the_plugin_loading(tmp_path, monkeypatch):
+    (tmp_path/'plugin.yaml').write_bytes(b'version: "\xff\xfe"\n')
+    monkeypatch.setattr(registration, 'PLUGIN_ROOT', tmp_path)
+    assert registration.installed_version() is None
+    assert registration.version_skew() == ''

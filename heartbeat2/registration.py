@@ -21,11 +21,12 @@ MODULES=('cache','clock','commands','desk','governor','intake','model','notifier
 
 
 def installed_version():
+    # Read at import: an unreadable or undecodable manifest must never stop the plugin loading, whatever the host locale.
     try:
         import re
-        match=re.search(r'^version:\s*"?([^"\n]+)',(PLUGIN_ROOT/'plugin.yaml').read_text(),re.M)
+        match=re.search(r'^version:\s*"?([^"\n]+)',(PLUGIN_ROOT/'plugin.yaml').read_text(encoding='utf-8'),re.M)
         return match.group(1).strip() if match else None
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
