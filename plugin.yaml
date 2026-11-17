@@ -119,7 +119,7 @@ config_schema:
     type: int
     default: 2
     label: "Unanswered messages before mute"
-    description: "Wakes you armed always fire; agent watchers wait for your reply; agent one-time reminders are dropped; the agent's recurring work keeps running, with its messages held."
+    description: "Wakes you armed always fire; agent watchers wait for your reply; agent one-time reminders are dropped; the agent's recurring work keeps running, with its messages held. Watchers you ask for in chat still send their alerts."
   min_interval_minutes:
     type: int
     default: 15
