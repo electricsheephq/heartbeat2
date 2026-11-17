@@ -78,3 +78,26 @@ def test_a_granted_name_cannot_undo_the_pager_and_no_prompt_settings(tmp_path, m
     result = probes.check(wake(['{python}', str(script)]), policy=policy, home=tmp_path)
     assert result.get('error') is None, result
     assert result['message'].strip() == 'cat 0'
+
+
+@pytest.mark.parametrize('rules', ['', 'git status = HB_T_KEY'])
+def test_the_setting_does_not_change_the_limits_fingerprint(tmp_path, clock, rules):
+    from test_engine import GatewayCtx, KEY, admit
+    from heartbeat2.model import Session
+    from heartbeat2.poller import Poller
+    from heartbeat2.store import Store
+    # Default Policy limits at main 645877f (the baseline tests/test_v05_voice_bridge.py pins).
+    baseline = 'c8ea8abc6d7f5f05b08f0edeb020602464461c74b7dd60138848b5c0ad34c1fb'
+    store = Store(tmp_path/'pulse.db', clock)
+    store.upsert_session(Session(KEY, 'telegram', 'dm', 'unit', 'sid', clock.now(),
+                                 clock.now(), 'episode', limits_fingerprint=baseline))
+    e = Poller(GatewayCtx(tmp_path), store, Policy(clock=clock, probe_command_env=rules), clock,
+               session_key_fn=lambda: KEY, paused=lambda: False, compression_tip=lambda sid: sid)
+    try:
+        admit(e)
+        result = e.intake.pre_llm_call(session_id='sid', user_message='hello')
+        assert 'limits changed' not in (result or {}).get('context', '')
+        assert store.get_session(KEY).limits_fingerprint == baseline
+    finally:
+        e.close()
+        store.close()
