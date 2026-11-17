@@ -214,13 +214,13 @@ def test_learned_routes_and_provider_only_display(engine, legacy):
     route = ('custom|qwen|localhost' if legacy else
              cache.route_key('custom', 'qwen', 'http://localhost:4000/v1'))
     now = engine.clock.now()
-    for at, read in [(now, 100), (now + 100, 100), (now + 300, 0)]:
+    for at, read in [(now, 100), (now + 1000, 100), (now + 3000, 0)]:
         cache.touch(engine.store, engine.store.get_session(KEY), started_at=at,
             route=route, prompt=100, read=read)
-    assert cache.ttl_for_session(engine.store, engine.store.get_session(KEY)) == (100, 'learned')
+    assert cache.ttl_for_session(engine.store, engine.store.get_session(KEY)) == (1000, 'learned')
     assert json.loads(engine.store.get_meta('cache_routes'))[route] == {
-        'max_warm_gap': 100, 'min_cold_gap': 200}
-    text = cache.line(engine.store, engine.store.get_session(KEY), now + 310, pricing=False)
+        'max_warm_gap': 1000, 'min_cold_gap': 2000}
+    text = cache.line(engine.store, engine.store.get_session(KEY), now + 3010, pricing=False)
     assert text.startswith('Cache: custom ') and 'localhost' not in text and 'qwen' not in text
     if not legacy:
         assert route != cache.route_key('custom', 'qwen', 'http://localhost:4001/v1')
