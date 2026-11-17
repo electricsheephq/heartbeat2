@@ -390,6 +390,13 @@ class PulseRig:
         return [r for r in self.llm.main_requests() if r["messages"][-1].get("role") == "user"
                 and MARKER.match(Director._text(r["messages"][-1]))]
 
+    def opener_retried(self):
+        """Hermes retried the wake's first model request: exactly two openers with byte-identical messages. An owner
+        interrupt can drop that request's stream, and Hermes retries it ("Stream drop on attempt 1/3"). A second
+        HeartBeat injection would be a new turn whose history includes the first, so its messages would differ."""
+        openers = self.wake_openers()
+        return len(openers) == 2 and openers[0]["messages"] == openers[1]["messages"]
+
     def tick_barrier(self, seconds=12):
         start = time.time()
         self.wait(lambda: any(r["key"] == "last_tick_at" and float(r["value"]) >= start + seconds
