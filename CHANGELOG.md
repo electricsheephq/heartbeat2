@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.23 — 2026-11-17
+
+- **Python watchers survive Hermes updating its bundled Python.** A command watcher can name `{python}` as its program, and HeartBeat runs it with the Python running Hermes at each check. Allowlist the observer as `{python} /path/to/check.py` in `probe_commands` instead of the interpreter's full path, which changes when Hermes moves to a new bundled Python and then breaks the watcher until both are re-pinned. The script must be the next word in the entry: an entry with nothing or an option such as `-I` after `{python}` allows nothing. (#108)
+- **A held keep-warm ping shows when it started waiting.** A keep-warm ping armed in an app chat before 0.4.17 that waits on a closed app window retries every minute, and `/pulse status` showed it as held since the last retry. It now keeps the time it started waiting. Notices are unchanged. (#209)
+
 ## 0.4.22 — 2026-11-17
 
 - **Installing an update while Hermes is running no longer breaks wakes.** An install replaces HeartBeat's files on disk, but Hermes keeps running the code it already loaded until it restarts. HeartBeat loaded some of its files only when a wake first needed them, so a wake could pull a newer file into older running code, fail with an import error on every try, and end up paused. HeartBeat now loads all of its files when Hermes starts it, so the running version keeps working until the restart. `/pulse status` now says when a newer version is installed than the one running: "restart Hermes to finish the upgrade." The fix applies to upgrades from this version on, so restart Hermes after installing this one. (#207)

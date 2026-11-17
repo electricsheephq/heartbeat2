@@ -50,6 +50,25 @@ UNSAFE_VERBS = frozenset({'sh','bash','zsh','fish','python','python3','node','ru
     'edit','create','close','delete','rerun','cancel','workflow'})
 
 
+# As a command's program, this stands for the Python running Hermes, resolved at each check. A stored watcher then
+# survives Hermes moving to a new bundled Python (#108). An allowlist entry has to name a script after it.
+PYTHON_TOKEN = '{python}'
+
+
+def resolve_program(argv):
+    if argv[0] != PYTHON_TOKEN: return argv
+    if not sys.executable: raise ValueError('the Python running Hermes is unknown')
+    return [sys.executable, *argv[1:]]
+
+
+def _allowlist_entry(entry):
+    prefix = shlex.split(entry.strip())
+    # `{python}` must be followed by its script. With nothing after it, or an option such as -I or -X next, the entry
+    # would admit any script appended to it, so it allows nothing.
+    if prefix[:1] == [PYTHON_TOKEN] and (len(prefix) < 2 or prefix[1].startswith('-')): return []
+    return prefix
+
+
 def command_allowed(argv, allowlist):
     if not isinstance(argv, list) or not argv or not isinstance(allowlist, str):
         return False
@@ -68,7 +87,7 @@ def command_allowed(argv, allowlist):
             return False
     try:
         return any(argv[:len(prefix)] == prefix for entry in allowlist.split(',')
-                   if (prefix := shlex.split(entry.strip())))
+                   if (prefix := _allowlist_entry(entry)))
     except ValueError:
         return False
 
@@ -429,7 +448,7 @@ def _command(wake, policy, home):
     if home is None: raise ValueError('command probe requires profile home')
     cwd = Path(trigger.get('cwd') or home).expanduser()
     if not cwd.is_absolute(): cwd = Path(home) / cwd
-    returncode, body = _run_command(argv, cwd)
+    returncode, body = _run_command(resolve_program(argv), cwd)
     success = returncode == 0
     if mode in {'change','json'} and not success:
         raise ValueError('command failed')
