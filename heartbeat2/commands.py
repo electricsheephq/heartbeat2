@@ -260,17 +260,20 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             off=(('plugin_off',True,None) if not engine.policy.enabled else ('paused_all',True,None) if engine.paused() else None)
             # Dispatch walks waiting occurrences in order and sends the first that passes; if none passes, the first one's reason applies.
             # One accepted three times without an acknowledgement passes the gate but is dropped at the claim, and the walk goes on.
-            dies=lambda c:bool(waiting) and int(engine.store.get_meta('accepted:'+c.id) or 0)>=3
+            unacknowledged=lambda c:int(engine.store.get_meta('accepted:'+c.id) or 0)>=3
+            dies=lambda c:bool(waiting) and unacknowledged(c)
+            # Each drop counts as an error, and enough in a row pause the wake before its next turn is sent; the
+            # report-back is never paused (governor.error).
+            pauses=lambda x,drops:bool(drops) and x.error_streak+drops>=engine.policy.error_pause_after and not x.trigger_json.get('report_back')
             verdicts=[off or engine.gate(w,c,session) for c in candidates]
             passing=[n for n,v in enumerate(verdicts) if not v[0]]
             pick=next((n for n in passing if not dies(candidates[n])),passing[0] if passing else 0)
             o,(reason,defer,until)=candidates[pick],verdicts[pick]
-            # Each drop counts as an error, and enough in a row pause the wake before the next one is sent: a watcher's
-            # waiting match, or a turn already held, is then held while paused; any other one is skipped (Poller.gate).
+            # Once paused, a watcher's waiting match, or a turn already held, is held; any other one is skipped (Poller.gate).
             dropped=sum(dies(candidates[n]) for n in passing if n<pick)
             if not reason and dies(o):
                 reason,defer,until='ack_timeout',False,None
-            elif not reason and dropped and w.error_streak+dropped>=engine.policy.error_pause_after:
+            elif not reason and pauses(w,dropped):
                 reason,defer,until='drop_pauses',is_watcher(w) or o.held_since is not None,None
             ahead=''
             # After an evaluation error a tick leaves the wake alone until its retry time (Poller.evaluate).
@@ -279,16 +282,22 @@ def _test(engine,w,session,cache_line,wake_cache=''):
                 reason,defer,until='eval_backoff',True,backoff_until(w)
             if not reason:
                 # The tick walks every waiting occurrence in order: an earlier one in this chat that passes takes the turn first.
-                def goes_first(other,x):
-                    try: return (engine.clock.now()>=backoff_until(other) and not engine.gate(other,x,session)[0]
-                                 and int(engine.store.get_meta('accepted:'+x.id) or 0)<3)
+                # One accepted three times without an acknowledgement is dropped instead, and once another wake's drops pause
+                # it, its later turns are held or skipped: neither takes the turn (#167).
+                def passes(other,x):
+                    try: return engine.clock.now()>=backoff_until(other) and not engine.gate(other,x,session)[0]
                     except Exception: return False  # A tick isolates a broken wake (Poller.evaluate); so does the preview.
+                drops={}
                 for x in engine.store.list_occurrences(state='pending'):
                     if x.wake_id==w.id and (not waiting or x.dedupe_key==o.dedupe_key): break
                     other=engine.store.get_wake(x.wake_id)
-                    if x.wake_id!=w.id and other is not None and other.session_key==w.session_key and goes_first(other,x):
-                        reason,defer,until,ahead='in_flight',True,None,x.wake_id
-                        break
+                    if x.wake_id==w.id or other is None or other.session_key!=w.session_key: continue
+                    if pauses(other,drops.get(other.id,0)) or not passes(other,x): continue
+                    if unacknowledged(x):
+                        drops[other.id]=drops.get(other.id,0)+1
+                        continue
+                    reason,defer,until,ahead='in_flight',True,None,x.wake_id
+                    break
             retry=None
             if reason in {'not_before','app_closed'}:
                 # The stored time is either a failed delivery's retry or an earlier hold's end (for example quiet hours).
