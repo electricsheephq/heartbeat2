@@ -429,6 +429,8 @@ def handle(raw_args, runtime):
                 if bridge_id:
                     from .voice_bridge import voice_bridge_for
                     lines.append(f'voice bridge: {bridge_id} ({"connected" if voice_bridge_for(engine) else "not connected"})')
+                from .notifier import notifier_line
+                lines.append(notifier_line(engine,key))
                 held=sum(o.held_since is not None or bool(engine.store.get_meta('held_since:'+o.id))
                          for o in engine.store.list_occurrences(session_key=key,state='pending'))
                 kw=engine.store.get_wake(keep_warm_id(key))

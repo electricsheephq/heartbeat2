@@ -156,6 +156,7 @@ class Store:
         self.path, self.clock = Path(path), clock
         self._lock = threading.RLock()
         self._savepoint = 0
+        self.notify_reservation = None
         self._after_commit = []
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(str(self.path), timeout=5, isolation_level=None,
@@ -435,6 +436,9 @@ class Store:
             if o.state in {'claimed', 'started'}:
                 if o.state == 'claimed': totals['model_turns'] += 1
                 if not o.force_silent: totals['delivered'] += 1
+        # A send that crosses midnight is charged on completion, so reserve its slot on the current day too.
+        if self.notify_reservation is not None and self.notify_reservation[0] == key:
+            totals['delivered'] += 1
         return totals
 
     def agent_cost_today(self, key, timezone):

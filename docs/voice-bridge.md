@@ -144,3 +144,5 @@ delivery; no import of a voice plugin is required.
 `tests/integration/test_voice_bridge_real.py` covers Hermes PluginManager load
 orders, profile isolation and forced reload. Neither proves a voice plugin's
 device authentication, event-loop races, audio playback or actual client delivery.
+
+For closed-window notices through another plugin, see the separate [notifier handshake](notifier.md).

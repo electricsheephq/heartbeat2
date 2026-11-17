@@ -62,6 +62,11 @@ config_schema:
     default: ""
     label: "Voice bridge plugin"
     description: "Trusted voice bridge plugin id; blank disables registration, and changes take effect at the next gateway restart."
+  notify_via:
+    type: str
+    default: ""
+    label: "Closed-window notifier"
+    description: "Owner-only plugin:target, for example birdie:assistant; blank disables notices. Restart Hermes after changing it."
   quiet_hours:
     type: str
     default: "22:00-08:00"

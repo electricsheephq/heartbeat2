@@ -26,7 +26,7 @@ promised. Most of that work is silent. The agent speaks when it has something wo
 | Messaging DMs (Telegram, Discord, Slack, Signal, WhatsApp and the other gateway platforms) | Supported | The default target. |
 | Messaging groups and topics | Supported when `dm_only` is off | Own time needs `/pulse owntime on` in each group. |
 | Hermes Desktop app sessions | Supported on Hermes 0.23+ | Runs while the app window is open; a wake waits (held) while it is closed. A silent turn's text still shows in the window until Hermes filters it (upstream NousResearch/hermes-agent#156465). Nothing is pushed to a phone. |
-| Hermes TUI sessions | Supported on Hermes 0.23+ | Same rules as Desktop. |
+| Hermes TUI sessions | Supported on Hermes 0.23+ | Same rules as Desktop, including optional `notify_via` notices after ten minutes held. |
 | Hermes CLI | Refused | The CLI doesn't show plugin turns. |
 | API-server sessions | Refused | Hermes drops plugin turns there today (upstream #156466). Planned: run silent, with an optional notify target. |
 
@@ -34,7 +34,6 @@ promised. Most of that work is silent. The agent speaks when it has something wo
 
 - Run app-session wakes with the window closed, once Hermes can revive a closed local chat for a plugin turn
   (upstream NousResearch/hermes-agent#156894).
-- An optional notify fallback (`notify_via`) so a long-held wake reaches the owner through another channel.
 - One cache clock per chat: defer keep-warm to Hermes's own cache warmer once it can be read.
 
 ## Not goals

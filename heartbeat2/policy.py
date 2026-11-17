@@ -161,6 +161,7 @@ class Policy:
     stop_hint: str = "once"
     dm_only: bool = True
     voice_bridge: str = ""
+    notify_via: str = ""
     timezone: str = ""
     quiet_hours: str = "22:00-08:00"
     quiet_hours_urgent: bool = False
@@ -217,7 +218,11 @@ class Policy:
                 continue
             value, default = settings[f.name], getattr(defaults, f.name)
             if value is None:
+                if f.name == 'notify_via': raise ValueError('notify_via must be <plugin>:<target> or blank')
                 continue
+            if f.name == 'notify_via' and (not isinstance(value, str) or
+                    value.strip() and not re.fullmatch(r'[a-z0-9_-]{1,64}:[A-Za-z0-9._-]{1,64}', value.strip())):
+                raise ValueError('notify_via must be <plugin>:<target> or blank')
             if f.name == 'voice_bridge' and (not isinstance(value, str) or
                     value.strip() and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?', value.strip())):
                 raise ValueError('voice_bridge must be a plugin id or blank')
