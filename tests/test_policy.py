@@ -51,7 +51,7 @@ def test_I14_non_gateway_refused(platform, clock):
     ({"active_count": 50}, "max_active"),
     ({"global_active_count": 200}, "global_max_active"),
     ({"created_in": "wake_turn", "depth": 3}, "rearm_depth"),
-    ({"created_in": "wake_turn", "children_created": 1}, "rearm_child"),
+    ({"created_in": "wake_turn", "children_created": 2}, "rearm_child"),
     ({"untrusted_payload": True, "created_in": "wake_turn", "kind": "file"}, "untrusted_rearm"),
     ({"untrusted_payload": True, "created_in": "wake_turn", "kind": "every"}, "untrusted_rearm"),
 ])
@@ -167,3 +167,14 @@ def test_pacing_min_max_and_cron_floor_are_reported(clock):
     cron = p.clamp(make_wake(kind="cron", base_interval_s=None, trigger_json={"cron": "* * * * *"}))
     assert cron.wake.base_interval_s == cron.wake.eff_interval_s == 3300
     assert "cron" in cron.clamped
+
+@pytest.mark.parametrize("parent_role,setting,children,allowed", [
+    (False, 3, 1, True), (False, 3, 2, False),   # a non-role wake turn may arm two follow-ups (#200)
+    (False, 1, 1, False),                        # never more than the role limit when the owner lowers it
+    (True, 3, 2, True), (True, 3, 3, False),     # role turns keep their own limit
+])
+def test_200_children_per_wake_turn(parent_role, setting, children, allowed, clock):
+    policy = replace(Policy.from_settings({}, clock=clock), max_children_per_wake_turn=setting)
+    gate = policy.creation_gate(session_key="s", platform="telegram", chat_type="dm", allow_gateway_injection=True,
+                                created_in="wake_turn", parent_role=parent_role, children_created=children)
+    assert gate.allowed is allowed and (allowed or gate.reason == "rearm_child")

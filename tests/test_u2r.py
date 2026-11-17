@@ -107,7 +107,8 @@ def test_R2_G2_child_inherits_wake_limits(engine, guard):
     else: e.tick()
     start(e)
     if guard=='child':
-        assert e.tool.handle({'action':'create','note':'child','trigger':{'kind':'at','at':'+1h'}},session_id='sid')['ok']
+        for _ in range(2):
+            assert e.tool.handle({'action':'create','note':'child','trigger':{'kind':'at','at':'+1h'}},session_id='sid')['ok']
     if guard=='owner':
         owner=arm(e,'every',creator='user',next_due_at=e.clock.now()+3600)
         args={'action':'pause','id':owner.id}
