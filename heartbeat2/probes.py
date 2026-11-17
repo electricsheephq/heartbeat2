@@ -420,7 +420,7 @@ def _kill_group(proc):
     proc.wait()
 
 
-def _command_env():
+def _command_env(secrets=()):
     allowed = {'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'TMPDIR', 'SSH_AUTH_SOCK',
                'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'GH_HOST'}
     allowlisted = {key: value for key, value in os.environ.items()
@@ -430,6 +430,9 @@ def _command_env():
         env = hermes_subprocess_env(inherit_credentials=False, base_env=allowlisted)
     except Exception:
         env = allowlisted
+    # Only the names the owner granted this command's allowlist entry; a missing one is skipped (#108 item 3). They go
+    # in before the pager and no-prompt settings, which stay last.
+    env.update({name: os.environ[name] for name in secrets if name in os.environ})
     env.update({'GIT_OPTIONAL_LOCKS':'0', 'GIT_PAGER':'cat',
            'GH_PAGER':'cat', 'PAGER':'cat', 'GIT_TERMINAL_PROMPT':'0',
            'GH_PROMPT_DISABLED':'1', 'GCM_INTERACTIVE':'never'})
@@ -439,9 +442,7 @@ def _command_env():
 def _run_command(argv, cwd, secrets=()):
     """Capture while reading; both the pipe and process lifetime have one deadline."""
     deadline = time.monotonic() + COMMAND_DEADLINE_S
-    env = _command_env()
-    # Only the names the owner granted this command's allowlist entry; a missing one is skipped (#108 item 3).
-    env.update({name: os.environ[name] for name in secrets if name in os.environ})
+    env = _command_env(secrets)
     proc = subprocess.Popen(argv, shell=False, cwd=cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             env=env, start_new_session=True)

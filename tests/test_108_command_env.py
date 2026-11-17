@@ -66,3 +66,15 @@ def test_blank_is_the_default_and_valid():
 def test_the_agent_cannot_set_it():
     from heartbeat2.tool import PARAMETERS
     assert 'probe_command_env' not in str(PARAMETERS)
+
+
+def test_a_granted_name_cannot_undo_the_pager_and_no_prompt_settings(tmp_path, monkeypatch):
+    script = tmp_path/'pager.py'
+    script.write_text("import os\nprint(os.environ.get('PAGER'), os.environ.get('GIT_TERMINAL_PROMPT'))\n")
+    monkeypatch.setenv('PAGER', 'less')
+    monkeypatch.setenv('GIT_TERMINAL_PROMPT', '1')
+    policy = Policy.from_settings({'probe_commands': f'{{python}} {script}',
+                                   'probe_command_env': f'{{python}} {script} = PAGER, GIT_TERMINAL_PROMPT'})
+    result = probes.check(wake(['{python}', str(script)]), policy=policy, home=tmp_path)
+    assert result.get('error') is None, result
+    assert result['message'].strip() == 'cat 0'
