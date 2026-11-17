@@ -390,15 +390,12 @@ class PulseRig:
         return [r for r in self.llm.main_requests() if r["messages"][-1].get("role") == "user"
                 and MARKER.match(Director._text(r["messages"][-1]))]
 
-    def opener_replayed_after_redirect(self):
-        """Hermes re-sent the wake's opener after an owner redirect interrupted the wake turn: exactly two openers with the
-        redirect correction between them. Hermes' behaviour, not HeartBeat's: HeartBeat injected the wake once."""
-        requests = self.llm.main_requests()
-        at = [n for n, r in enumerate(requests) if r["messages"][-1].get("role") == "user"
-              and MARKER.match(Director._text(r["messages"][-1]))]
-        return len(at) == 2 and any(
-            Director._text(r["messages"][-1]).startswith("[Context from the interrupted assistant response]")
-            for r in requests[at[0]+1:at[1]])
+    def opener_retried(self):
+        """Hermes retried the wake's first model request: exactly two openers with byte-identical messages. An owner
+        interrupt can drop that request's stream, and Hermes retries it ("Stream drop on attempt 1/3"). A second
+        HeartBeat injection would be a new turn whose history includes the first, so its messages would differ."""
+        openers = self.wake_openers()
+        return len(openers) == 2 and openers[0]["messages"] == openers[1]["messages"]
 
     def tick_barrier(self, seconds=12):
         start = time.time()
