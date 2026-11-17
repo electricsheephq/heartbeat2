@@ -86,13 +86,22 @@ def command_env_rules(text):
         listed = [name.strip() for name in names.split(',')]
         if not prefix or any(not ENV_NAME.fullmatch(name) or RESERVED_ENV.fullmatch(name) for name in listed):
             raise ValueError('each rule is "<allowed command> = NAME[, NAME...]" with upper-case names that do not change how the program runs')
+        # A relative path resolves in the watcher's cwd, which the agent chooses, so another file could get the secret.
+        program = prefix[1] if prefix[0] == PYTHON_TOKEN and len(prefix) > 1 else prefix[0]
+        if not os.path.isabs(program) and ('/' in program or program.startswith('~') or prefix[0] == PYTHON_TOKEN):
+            raise ValueError('a rule names its program as a bare command name or an absolute path, and a {python} script by absolute path')
         rules[prefix] = listed
     return rules
 
 
 def command_env_names(argv, allowlist, rules_text):
     """Names the owner passes to argv: those of the longest allowlist entry that admits it."""
-    admitting = [prefix for entry in allowlist.split(',') if (prefix := _allowlist_entry(entry)) and argv[:len(prefix)] == prefix]
+    if not (rules_text or '').strip(): return []
+    admitting = []
+    for entry in allowlist.split(','):
+        try: prefix = _allowlist_entry(entry)
+        except ValueError: continue  # a malformed entry admits nothing, as in command_allowed
+        if prefix and argv[:len(prefix)] == prefix: admitting.append(prefix)
     if not admitting: return []
     return command_env_rules(rules_text).get(tuple(max(admitting, key=len)), [])
 

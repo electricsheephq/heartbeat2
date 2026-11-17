@@ -101,3 +101,26 @@ def test_the_setting_does_not_change_the_limits_fingerprint(tmp_path, clock, rul
     finally:
         e.close()
         store.close()
+
+
+def test_a_blank_setting_leaves_a_malformed_later_allowlist_entry_harmless(tmp_path, monkeypatch):
+    assert run(tmp_path, monkeypatch, commands='{{python}} {script}, git "status') == 'none'
+
+
+def test_a_grant_skips_a_malformed_allowlist_entry(tmp_path, monkeypatch):
+    assert run(tmp_path, monkeypatch, commands='{{python}} {script}, git "status',
+               env='{{python}} {script} = HB_T_KEY') == 'HB_T_KEY:12'
+
+
+@pytest.mark.parametrize('rule', ['{python} check.py = HB_T_KEY', '{python} ./bin/check.py = HB_T_KEY',
+                                  './check = HB_T_KEY', 'bin/check --x = HB_T_KEY', '~/bin/check = HB_T_KEY'])
+def test_a_grant_must_name_its_program_and_script_by_absolute_path(rule):
+    # A relative path resolves in the watcher's cwd, which the agent chooses, so another file could get the secret.
+    with pytest.raises(ValueError):
+        Policy.from_settings({'probe_command_env': rule})
+
+
+@pytest.mark.parametrize('rule', ['gh pr view = HB_T_KEY', '/usr/bin/git status = HB_T_KEY',
+                                  '{python} /srv/trip/check.py --trip = HB_T_KEY'])
+def test_bare_program_names_and_absolute_paths_are_accepted(rule):
+    assert Policy.from_settings({'probe_command_env': rule}).probe_command_env == rule

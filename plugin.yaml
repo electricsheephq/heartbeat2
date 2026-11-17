@@ -248,7 +248,7 @@ config_schema:
     type: str
     default: ""
     label: "Secrets for watcher commands"
-    description: "Optional `<allowed command> = NAME, NAME` rules, separated by `;`. A command watcher admitted by that allowed command gets those variables from Hermes' environment, such as an API key in your .env. Names only. The command's output still reaches your agent, and your agent chooses the arguments after the allowed command, so pass a secret only to a command that doesn't print it and can't be pointed at another host."
+    description: "Optional `<allowed command> = NAME, NAME` rules, separated by `;`. A command watcher admitted by that allowed command gets those variables from Hermes' environment, such as an API key in your .env. Name the program by a bare command name or an absolute path, and a `{python}` script by absolute path. Names only. The command's output still reaches your agent, and your agent chooses the arguments after the allowed command, so pass a secret only to a command that doesn't print it and can't be pointed at another host."
   source_silence:
     type: bool
     default: true

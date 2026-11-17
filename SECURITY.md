@@ -84,7 +84,9 @@ These same disclosure and exception paragraphs appear in README and the manifest
   the named variables are copied from Hermes' environment into the child. Names
   that change how a program runs (PATH, HOME, USER, LOGNAME, SHELL, LANG, TMPDIR,
   IFS, ENV, BASH_ENV, LD_*, DYLD_*, PYTHON*, HERMES_*, LC_*) and malformed rules
-  are refused when settings load. The agent cannot set it. Values are never logged
+  are refused when settings load, as is a rule whose program (or `{python}`
+  script) is a relative path, since that resolves in the watcher's cwd, which
+  the agent chooses. The agent cannot set it. Values are never logged
   or shown, but the command's output still reaches the agent, and the agent still
   chooses the arguments after the allowed command. Grant a secret only to a
   command that does not print it and cannot be pointed at another host.
@@ -101,7 +103,8 @@ These same disclosure and exception paragraphs appear in README and the manifest
   by default GH_TOKEN and GITHUB_TOKEN are not passed, and gh authenticates
   through its own hosts.yml or keyring. Proxy, custom-CA and D-Bus
   variables are not part of the allowlisted base. The command watcher's
-  allowlisted environment does not pass proxy or custom-CA variables yet.
+  allowlisted environment does not pass proxy or custom-CA variables yet, unless
+  the owner grants them in `probe_command_env`.
 - Pool probes enter the wake's pinned Hermes home scope; the URL worker copies
   that context. Child HOME handling, adapter secrets, URL configuration and file
   blocks therefore use the wake's profile rather than the launch profile.
