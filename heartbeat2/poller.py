@@ -222,7 +222,10 @@ class Poller:
     def cancel_occurrences(self,wid,reason,*,preserve_started=False):
         for o in self.store.list_occurrences(wid):
             if reason=='paused' and o.state=='pending' and o.held_since is not None:
-                self.store.update_occurrence(wid,o.dedupe_key,'pending',error='held_paused',held_reason='held_paused')
+                # The pause replaces a message hold's reason, so drop its silence with it, as a held_ deferral does
+                # (#217); dispatch checks the message holds again before the turn.
+                unsilence={'force_silent':False} if o.force_silent and o.held_reason.startswith('message_held:') else {}
+                self.store.update_occurrence(wid,o.dedupe_key,'pending',error='held_paused',held_reason='held_paused',**unsilence)
                 self.store.set_meta('not_before:'+o.id,'')
                 continue
             if o.state=='started' and (preserve_started or reason=='owner_replied'): continue
