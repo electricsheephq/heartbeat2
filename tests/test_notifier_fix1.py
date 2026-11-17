@@ -314,3 +314,26 @@ def test_queued_wait_without_stamps_ends_after_a_day(engine, monkeypatch):
     assert engine.store.get_meta(EPISODE_PREFIX+KEY) is not None
     engine.clock.advance(86400); engine.notifications.tick(engine)
     assert engine.store.get_meta(EPISODE_PREFIX+KEY) is None
+
+
+def test_new_wait_after_a_day_gets_its_own_notice_and_owner_write_resets(engine, monkeypatch):
+    calls, _, rows = held(engine, monkeypatch)
+    w, o = rows[0]
+    engine.clock.advance(600); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 1
+    engine.store.cas_wake(w.id, 'active', status='cancelled')
+    engine.cancel_occurrences(w.id, 'cancelled', preserve_started=True)
+    engine.clock.advance(20*3600)
+    n = arm(engine, platform='desktop', title='PRIVATE TITLE')
+    _hold_again(engine, n)
+    engine.clock.advance(3*3600); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 1                     # still the same closed-window wait, inside the day
+    engine.clock.advance(3600); engine.notifications.tick(engine); settle(engine)
+    assert engine.store.get_meta(EPISODE_PREFIX+KEY) is None   # a day after the notice the wait ends; stamps cleared
+    nxt = _hold_again(engine, n)              # the next attempt meets the closed window: a fresh wait
+    engine.clock.advance(600); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 2
+    # The owner writes in the chat while a stamp remains: the wait ends, with no immediate notice.
+    session(engine, last_human_at=engine.clock.now()+1)
+    engine.clock.advance(60); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 2 and engine.store.get_meta(EPISODE_PREFIX+KEY) is None
