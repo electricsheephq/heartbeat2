@@ -125,3 +125,10 @@ def test_a_grant_must_name_its_program_and_script_by_absolute_path(rule):
                                   '{python} /srv/trip/check.py --trip = HB_T_KEY'])
 def test_bare_program_names_and_absolute_paths_are_accepted(rule):
     assert Policy.from_settings({'probe_command_env': rule}).probe_command_env == rule
+
+
+@pytest.mark.parametrize('rule', ['FLIGHT_API_KEY = ABCDEF123', 'GH_TOKEN=GHPXYZ'])
+def test_a_pasted_name_and_value_is_refused_with_a_clear_error(rule):
+    # The left side must be the allowed command; a lone upper-case name there is a NAME=VALUE pasted by mistake.
+    with pytest.raises(ValueError, match='.env'):
+        Policy.from_settings({'probe_command_env': rule})
