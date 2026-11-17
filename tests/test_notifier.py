@@ -24,14 +24,14 @@ def offer(registry, stamp=1, **kw):
 
 
 @pytest.mark.parametrize('value', ['Birdie:assistant', 'birdie:', ':assistant', 'birdie:a/b', 'birdie:a b',
-    'a'*65+':b', 'a:'+'b'*65, True, 3, None])
+    'a'*65+':b', 'a:'+'b'*65, True, 3])
 def test_invalid_setting(value):
     with pytest.raises(ValueError): Policy.from_settings({'notify_via': value})
 
 
-@pytest.mark.parametrize('value', ['', '  ', 'birdie:assistant', 'a_-:A.1_-'])
+@pytest.mark.parametrize('value', [None, '', '  ', 'birdie:assistant', 'a_-:A.1_-'])
 def test_valid_setting(value):
-    assert Policy.from_settings({'notify_via':value}).notify_via == value.strip()
+    assert Policy.from_settings({'notify_via':value}).notify_via == (value or '').strip()
 
 
 def test_registry_lifecycle(monkeypatch):

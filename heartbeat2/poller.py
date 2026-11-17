@@ -953,9 +953,10 @@ class Poller:
                         if not held_wakes(self,w.session_key): end_episode(self,w.session_key)
                         if not s.get_meta('held_since:'+o.id): s.set_meta('held_since:'+o.id,str(self.clock.now()))
                         s.set_meta('not_before:'+o.id,str(self.clock.now()+60))
-                        from .notifier import episode, EPISODE_PREFIX
-                        if not s.get_meta(EPISODE_PREFIX+w.session_key):
-                            s.set_meta(EPISODE_PREFIX+w.session_key,json.dumps(episode(self,w.session_key)))
+                        if not is_keep_warm(w):
+                            from .notifier import episode, EPISODE_PREFIX
+                            if not s.get_meta(EPISODE_PREFIX+w.session_key):
+                                s.set_meta(EPISODE_PREFIX+w.session_key,json.dumps(episode(self,w.session_key)))
                 return
             count=int(s.get_meta('inject_failures:'+o.id) or 0)+1
             s.set_meta('inject_failures:'+o.id,str(count))

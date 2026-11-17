@@ -218,7 +218,6 @@ class Policy:
                 continue
             value, default = settings[f.name], getattr(defaults, f.name)
             if value is None:
-                if f.name == 'notify_via': raise ValueError('notify_via must be <plugin>:<target> or blank')
                 continue
             if f.name == 'notify_via' and (not isinstance(value, str) or
                     value.strip() and not re.fullmatch(r'[a-z0-9_-]{1,64}:[A-Za-z0-9._-]{1,64}', value.strip())):

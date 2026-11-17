@@ -299,28 +299,29 @@ class Runtime:
             if runner: runner.close()
 
     def close(self):
-        # Keep replacement registration behind settlement of this profile's old send.
-        with _GUARD:
-            with self._engine_lock:
-                if self.closed: return
-                self.closed=True
-                self._voice_bridge.close()
-                self._notifier.close()
-                if self._engine: self._engine.notifications.close()
-                self._stop.set()
-                self._wake.set()
-            for thread in self._threads:
-                if thread is not threading.current_thread(): thread.join(timeout=.5)
-            if self._engine:
-                # This runtime's turns are abandoned even when a tick outlives the join below.
-                from .poller import LOCAL_EPOCHS
-                LOCAL_EPOCHS.discard(self._engine.epoch)
-            # Do not close a connection under a still-running old tick.
-            if self._engine and all(not t.is_alive() for t in self._threads):
+        with self._engine_lock:
+            if self.closed: return
+            self.closed=True
+            self._stop.set()
+            self._wake.set()
+            if self._engine: self._engine.notifications.stop()
+        self._voice_bridge.close()
+        self._notifier.close()
+        # No engine, store or global registration lock is held while joining.
+        if self._engine: self._engine.notifications.close()
+        for thread in self._threads:
+            if thread is not threading.current_thread(): thread.join(timeout=.5)
+        if self._engine:
+            from .poller import LOCAL_EPOCHS
+            LOCAL_EPOCHS.discard(self._engine.epoch)
+            worker=self._engine.notifications.thread
+            threads=self._threads+([worker] if worker is not None else [])
+            # A live tick or transport still owns this connection.
+            if all(not t.is_alive() for t in threads):
                 self._engine.close()
                 self._engine.store.close()
-            with _GUARD:
-                if _RUNTIMES.get(self.scope) is self: _RUNTIMES.pop(self.scope,None)
+        with _GUARD:
+            if _RUNTIMES.get(self.scope) is self: _RUNTIMES.pop(self.scope,None)
 
 
 def _register_surfaces(ctx,runtime):

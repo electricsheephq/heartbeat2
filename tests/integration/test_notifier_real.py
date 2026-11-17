@@ -88,7 +88,7 @@ def test_real_notifier_held_episode(tmp_path,monkeypatch,clock,birdie_first):
         runner=NS(_served_profile_for_home=lambda h:'default' if Path(h)==home else None)
         manager.set_gateway_message_injector(runner,lambda **kw:False)
         e=rt.get_engine()
-        e.paused=lambda:False
+        assert not e.paused(), 'isolated profile must use the real unpaused state'
         e.compression_tip=lambda sid:sid
         e.jitter=lambda:0
         prefix=manager._plugins['heartbeat2'].module.__name__+'.heartbeat2.'

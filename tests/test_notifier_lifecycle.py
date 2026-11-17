@@ -9,13 +9,13 @@ from test_notifier import held, offer, settle
 from heartbeat2.registration import Runtime, register
 
 
-def test_inflight_unload_records_success_before_reload(engine,monkeypatch):
+def test_inflight_unload_stops_result_writes_before_reload(engine,monkeypatch):
     monkeypatch.setattr(Runtime,'start',lambda s:None)
     rt=register(engine.ctx,clock=engine.clock)
     rt._engine=engine
     calls,r,_=held(engine,monkeypatch)
     entered=threading.Event(); release=threading.Event()
-    closing=threading.Event(); successor_ready=threading.Event()
+    closing=threading.Event()
     def send(*a):
         calls.append(a); entered.set(); assert release.wait(3)
         return {'ok':True,'status':'queued'}
@@ -27,23 +27,19 @@ def test_inflight_unload_records_success_before_reload(engine,monkeypatch):
     monkeypatch.setattr(engine.notifications,'close',tracked_close)
     closer=threading.Thread(target=rt.close)
     successors=[]
-    def reload():
-        successors.append(register(engine.ctx,clock=engine.clock)); successor_ready.set()
-    successor=threading.Thread(target=reload)
     try:
         closer.start(); assert closing.wait(1)
-        successor.start()
-        assert not successor_ready.wait(.05), 'replacement admitted before old send settled'
-        release.set(); closer.join(2); successor.join(2)
-        assert not closer.is_alive() and not successor.is_alive()
+        release.set(); closer.join(2)
+        assert not closer.is_alive()
+        successors.append(register(engine.ctx,clock=engine.clock))
         new=successors[0].get_engine()
         data=json.loads(new.store.get_meta('notify_episode:'+KEY))
-        assert 'queued' in data and new.daily(KEY)['delivered']==1
+        assert 'queued' not in data and data['attempts']==1 and data['next']>engine.clock.now()
+        assert new.daily(KEY)['delivered']==0
         events=new.store.connection.execute("SELECT count(*) FROM events WHERE kind='notify'").fetchone()[0]
-        assert events==1 and len(calls)==1
+        assert events==0 and len(calls)==1
     finally:
         release.set(); closer.join(3)
-        if successor.ident is not None: successor.join(3)
         for runtime in successors: runtime.close()
 
 

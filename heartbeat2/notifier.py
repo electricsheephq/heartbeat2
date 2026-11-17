@@ -106,11 +106,12 @@ EPISODE_PREFIX = 'notify_episode:'
 
 
 def held_wakes(engine, key):
-    """App-close stamps are independent of watcher/message hold reasons."""
+    """Count only active wakes whose pending occurrence still waits on app_closed."""
     rows = []
     for w in engine.store.list_wakes(key):
-        if w.status not in {'active', 'paused'} or is_keep_warm(w): continue
+        if w.status != 'active' or is_keep_warm(w): continue
         for o in engine.store.list_occurrences(w.id, state='pending'):
+            if o.error != 'app_closed': continue
             stamp = engine.store.get_meta('held_since:'+o.id)
             if stamp: rows.append((w, o, float(stamp)))
     return rows
@@ -144,8 +145,8 @@ def _gate(engine, chat, data, now):
     if chat.paused_until is not None and chat.paused_until > now: return 'chat paused', chat.paused_until
     if not engine.policy.notify_via: return 'disabled', None
     if notifier_for(engine) is None: return 'not connected', None
-    # These notices respect the profile window even when a chat overrides its own wake window.
-    until = engine.policy.quiet_until(now=now)
+    from .commands import quiet_until
+    until = quiet_until(engine, chat.session_key, now=now)
     if until is not None: return 'quiet hours', until
     if engine.daily(chat.session_key)['delivered'] >= engine.policy.max_messages_per_day:
         tz=engine.policy.resolved_timezone()
@@ -159,19 +160,21 @@ def notice_state(engine, key):
     if chat is None or chat.platform not in LOCAL_SURFACES: return ''
     data=episode(engine,key)
     if data is None: return ''
+    error=' · '+data['error'][:80] if data.get('error') else ''
     if 'queued' in data: return 'queued at '+_time(engine,data['queued'])
     if data.get('failed') or data.get('first') is not None and engine.clock.now()-data['first'] >= 86400:
-        return 'notify failed'
+        return 'notify failed'+error
     reason,until=_gate(engine,chat,data,engine.clock.now())
     if reason and until is None: return reason
-    if until is not None: return 'waiting until '+_time(engine,until)+' ('+reason+')'
-    if data.get('state') in {'may repeat','notifier not ready'}: return data['state']
-    return 'waiting until '+_time(engine,max(data['since']+NOTIFY_AFTER_S,data.get('next',0)))
+    if until is not None: return 'waiting until '+_time(engine,until)+' ('+reason+')'+error
+    if data.get('state') in {'may repeat','notifier not ready'}: return data['state']+error
+    return 'waiting until '+_time(engine,max(data['since']+NOTIFY_AFTER_S,data.get('next',0)))+error
 
 
 def notifier_line(engine, key=None):
     invalid=getattr(engine,'notify_via_invalid',False)
     setting=engine.policy.notify_via
+    if not setting and not invalid: return ''
     state='invalid' if invalid else 'connected' if setting and notifier_for(engine) else 'not connected'
     text=f'notify_via: {setting or "blank"}, {state}'
     if key:
@@ -210,13 +213,16 @@ class NotificationWorker:
         self.idle=threading.Event()
         self.idle.set()
 
+    def stop(self):
+        # Never wait for the store while Runtime closes under its engine lock.
+        self.closed=True
+        self.ready.set()
+
     def close(self):
-        with self.store._lock:
-            self.closed=True
-            self.ready.set()
-        # Teardown may wait; ticks never do. Settle an already-sent result before the store closes.
+        self.stop()
+        # A transport can hang despite its contract. Never hold up Hermes unload indefinitely.
         if self.thread is not None and self.thread is not threading.current_thread():
-            self.thread.join()
+            self.thread.join(timeout=5)
 
     def tick(self, engine):
         s,now=self.store,engine.clock.now()
@@ -294,6 +300,7 @@ class NotificationWorker:
         if not isinstance(result,dict): result={'ok':False,'error':'invalid notifier result'}
         now=engine.clock.now()
         with s._lock:
+            if self.closed: return
             with s.atomic():
                 s.notify_reservation=None
                 if result.get('ok') is True:
@@ -309,7 +316,7 @@ class NotificationWorker:
                     lower=error.lower()
                     data['error']=error[:120]
                     data['state']=('notifier not ready' if any(x in lower for x in ('no token','no-token','no_token',"doesn't have the birdie_hermes_token secret")) else
-                                   'may repeat' if any(x in lower for x in ('timeout','timed out','timedout')) else '')
+                                   'may repeat' if any(x in lower for x in ("can't reach birdie",'timeout','timed out','timedout')) else '')
                     data['failed']=now-data['first']>=86400
                 current=json.loads(s.get_meta(EPISODE_PREFIX+key) or '{}')
                 if current.get('id')==ident: s.set_meta(EPISODE_PREFIX+key,json.dumps(data))
