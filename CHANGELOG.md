@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.19 — 2026-11-17
+
+- **A paused wake no longer brings a second closed-window notice.** With `notify_via` set, pausing or cancelling the last waiting wake while HeartBeat was sending the notice ended the wait before the send was recorded. Resuming that wake, or arming another, while the app window was still closed then sent a second notice for the same wait. The wait now lasts until the send's result is recorded. (#197)
+
 ## 0.4.18 — 2026-11-17
 
 - **A wake waiting on a closed app window can tell you through another plugin.** A new owner setting, `notify_via` (blank by default), names a plugin and a target, for example `birdie:assistant`. That plugin offers HeartBeat a way to send a message over Hermes's plugin event bus: [docs/notifier.md](docs/notifier.md) has the handshake. When a Desktop or TUI chat has had a wake waiting for 10 minutes because its app window is closed, HeartBeat sends one short notice: how many wakes are waiting, since when, and in which profile and app. No wake titles, notes or payloads are sent. Quiet hours and the chat's daily message cap delay the notice, and it counts as one message toward that cap. The unanswered mute doesn't delay it, because the mute can only clear once you write in that chat. If sending fails, HeartBeat tries again after 5 and 10 minutes, then hourly for up to a day. `/pulse status` and the desk show whether the notifier is connected and what happened to the notice: "notifier not ready" when the other plugin can't send yet, and "may repeat" when it couldn't confirm the send (the message may already have gone out). One notice goes out per wait. The wait ends when a wake runs in the reopened chat or you write there, and a day after its notice at the latest, so a window closed for days gets at most one notice a day. (#197)
