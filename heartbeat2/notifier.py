@@ -117,6 +117,19 @@ def held_wakes(engine, key):
     return rows
 
 
+def stamped(engine, key):
+    """Whether any wake in the chat still carries a closed-window stamp, whatever holds it right now.
+
+    A held wake can be deferred for another reason meanwhile (quiet hours overnight, a provider outage, a pause). Its
+    episode, and the notice already sent for it, last until the stamp clears on an accepted injection or the wake ends.
+    """
+    for w in engine.store.list_wakes(key):
+        if w.status not in {'active', 'paused'} or is_keep_warm(w): continue
+        if any(engine.store.get_meta('held_since:'+o.id) for o in engine.store.list_occurrences(w.id, state='pending')):
+            return True
+    return False
+
+
 def end_episode(engine, key):
     # Accepted injection ends the whole chat episode, even if sibling wakes still wait.
     with engine.store.atomic():
@@ -231,7 +244,7 @@ class NotificationWorker:
             chats={chat.session_key:chat for chat in s.list_sessions() if chat.platform in LOCAL_SURFACES}
             for row in s.connection.execute('SELECT key FROM meta WHERE key LIKE ?', (EPISODE_PREFIX+'%',)).fetchall():
                 key=row[0][len(EPISODE_PREFIX):]
-                if key not in chats or not held_wakes(engine,key):
+                if key not in chats or not stamped(engine,key):
                     s.connection.execute('DELETE FROM meta WHERE key=?',(row[0],))
             for key,chat in chats.items():
                 rows=held_wakes(engine,key)

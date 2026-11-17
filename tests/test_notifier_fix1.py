@@ -156,7 +156,8 @@ def test_stale_app_closed_stamp_does_not_count(engine, monkeypatch, reason):
     assert held_wakes(engine, KEY) == []
     assert commands.app_closed_hold(engine, engine.store.get_wake(w.id)) == ''
     engine.notifications.tick(engine); settle(engine)
-    assert calls == [] and engine.store.get_meta(EPISODE_PREFIX+KEY) is None
+    # No notice while another reason holds the wake, but the wait (its episode) lasts while the stamp remains.
+    assert calls == [] and engine.store.get_meta(EPISODE_PREFIX+KEY) is not None
 
 
 def test_paused_held_wake_does_not_count(engine, monkeypatch):
@@ -222,3 +223,24 @@ def test_runtime_restart_preserves_episode_and_retry_deadline(engine, monkeypatc
         assert len(calls) == 2
         assert json.loads(new.store.get_meta(EPISODE_PREFIX+KEY))['id'] == before['id']
     finally: successor.close()
+
+
+@pytest.mark.parametrize('reason', ['quiet_hours', 'provider_unavailable', 'paused'])
+def test_deferral_flip_keeps_episode_and_sends_one_notice(engine, monkeypatch, reason):
+    """A wake held overnight is deferred by quiet hours (or an outage, or a pause) and then held again: one notice per wait."""
+    calls, _, rows = held(engine, monkeypatch)
+    w, o = rows[0]
+    engine.clock.advance(600); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 1
+    if reason == 'paused': engine.store.cas_wake(w.id, 'active', status='paused')
+    else: engine.store.update_occurrence(w.id, o.dedupe_key, 'pending', error=reason)
+    engine.clock.advance(8*3600); engine.notifications.tick(engine); settle(engine)
+    assert engine.store.get_meta(EPISODE_PREFIX+KEY) is not None
+    if reason == 'paused': engine.store.cas_wake(w.id, 'paused', status='active')
+    else: engine.store.update_occurrence(w.id, o.dedupe_key, 'pending', error='app_closed')
+    engine.clock.advance(60); engine.notifications.tick(engine); settle(engine)
+    assert len(calls) == 1
+    # Reopening ends the wait; a later close starts a new one with its own single notice.
+    engine.ctx.accept = True
+    engine.dispatch(engine.store.get_occurrence(w.id, o.dedupe_key), cache_line='')
+    assert engine.store.get_meta(EPISODE_PREFIX+KEY) is None
