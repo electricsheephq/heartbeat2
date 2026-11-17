@@ -367,3 +367,35 @@ def test_daily_counts_survive_reservation_cleared_concurrently(engine):
     finally:
         if original is None: del cls.notify_reservation
         else: cls.notify_reservation = original
+
+
+@pytest.mark.parametrize('path', ['tool_pause', 'cancel'])
+def test_wait_cannot_end_while_its_notice_is_being_sent(engine, monkeypatch, path):
+    """Review of 0.4.18: pausing or cancelling the last held wake mid-send ended the wait, so the send's receipt was lost
+    and a resume or a new hold in the still-closed window sent a second notice."""
+    _, registry, rows = held(engine, monkeypatch)
+    w, _ = rows[0]
+    sent, entered, release = [], threading.Event(), threading.Event()
+    def send(target, text):
+        sent.append(text)
+        entered.set()
+        release.wait(5)
+        return {'ok': True}
+    offer(registry, 2, send=send)
+    engine.clock.advance(600); engine.notifications.tick(engine)
+    try:
+        assert entered.wait(2)
+        # The same calls the pulse tool makes while the notifier waits on the other plugin.
+        status = 'paused' if path == 'tool_pause' else 'cancelled'
+        engine.store.cas_wake(w.id, 'active', status=status)
+        engine.cancel_occurrences(w.id, status, preserve_started=True)
+        engine.notifications.tick(engine)
+    finally:
+        release.set()
+    settle(engine)
+    data = json.loads(engine.store.get_meta(EPISODE_PREFIX+KEY) or '{}')
+    assert 'queued' in data, data
+    engine.store.cas_wake(w.id, status, status='active')
+    _hold_again(engine, w)
+    engine.clock.advance(3600); engine.notifications.tick(engine); settle(engine)
+    assert len(sent) == 1
