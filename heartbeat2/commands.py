@@ -7,7 +7,7 @@ import re
 from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES, RUN_KEY_PREFIX, RUN_PAYLOAD
 from . import governor
 from . import cache
-from .policy import INJECTION_CONFIG, LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, platform_refusal, session_platform, owner_requested, cap_counts, is_keep_warm, is_watcher
+from .policy import INJECTION_CONFIG, LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, platform_refusal, session_platform, owner_requested, agreed_watcher, cap_counts, is_keep_warm, is_watcher
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
 from .tool import session_env, Infeasible, filter_text
 
@@ -141,7 +141,7 @@ def _item(engine, wake, today_budget=None):
     if is_keep_warm(wake) and wake.status == 'active' and wake.next_due_at is None: due = 'no ping due now'
     kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
     held = app_closed_hold(engine, wake)
-    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '') + (' · '+held if held else '')
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) or agreed_watcher(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '') + (' · '+held if held else '')
 
 
 def app_closed_hold(engine, wake):
@@ -521,7 +521,7 @@ def handle(raw_args, runtime):
             lines = []
             for wake in wakes:
                 if action == 'why':
-                    reason=wake.reason or ('you asked (via /pulse add)' if wake.creator=='user' else 'you asked in chat' if owner_requested(wake) else 'the named task')
+                    reason=wake.reason or ('you asked (via /pulse add)' if wake.creator=='user' else 'you asked in chat' if owner_requested(wake) or agreed_watcher(wake) else 'the named task')
                     filters=filter_text(wake)
                     return f'{_item(engine,wake)}\nWhy: {reason}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\n'+(f'Filters: {filters.strip()}\n' if filters else '')+f'Fires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}\n'+_occurrences(engine,wake)
                 try:

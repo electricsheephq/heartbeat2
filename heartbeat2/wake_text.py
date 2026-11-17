@@ -6,7 +6,7 @@ import re
 
 from .clock import Clock
 from .model import Wake, Occurrence, Session, TIME_KINDS, PROBE_KINDS, EVENT_KINDS
-from .policy import LOCAL_SURFACES, owner_requested
+from .policy import LOCAL_SURFACES, owner_requested, agreed_watcher
 from .schedule import zone
 
 HOLD_LABELS = {
@@ -67,7 +67,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
     local = datetime.fromtimestamp(now, zone(timezone))
     label = ("role" if wake.role else "check-in" if wake.kind == "owner_silent"
              else "wake" if wake.kind in TIME_KINDS else "watcher")
-    owner = "you at the owner's request" if owner_requested(wake) else "you" if wake.creator == "agent" else "the owner"
+    owner = "you at the owner's request" if owner_requested(wake) or agreed_watcher(wake) else "you" if wake.creator == "agent" else "the owner"
     owner_age = _age(now - session.last_human_at) if session.last_human_at is not None else "unknown"
     why = wake.reason or trigger_summary or wake.kind
     if held_by in HOLD_LABELS:

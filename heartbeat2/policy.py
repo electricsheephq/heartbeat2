@@ -28,6 +28,15 @@ def owner_class(wake):
     return is_owner(wake) or owner_requested(wake)
 
 
+def agreed_watcher(wake):
+    """A watcher the agent armed because the owner asked for it in their own message (#108).
+
+    The unanswered mute does not hold its alerts. It is otherwise the agent's work: daily caps, the cost cap and
+    agent spend still apply, so it is not owner_class."""
+    return (bool(wake.owner_requested) and wake.creator == 'agent' and is_watcher(wake) and wake.parent_wake_id is None
+            and not wake.babysit and not wake.role and not wake.trigger_json.get('builtin'))
+
+
 def is_watcher(wake):
     return wake.kind in PROBE_KINDS | EVENT_KINDS
 
@@ -601,7 +610,7 @@ class Policy:
                           else self.role_turns_per_day_default, self.role_turns_per_day_max))
 
     def unanswered_gate(self, wake: Wake, unanswered_count: int) -> str | None:
-        if unanswered_count >= self.max_unanswered and not owner_class(wake):
+        if unanswered_count >= self.max_unanswered and not owner_class(wake) and not agreed_watcher(wake):
             return "held_unanswered" if is_watcher(wake) else "unanswered"
         return None
 
