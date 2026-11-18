@@ -30,6 +30,16 @@ python -m pytest -q
 The integration and gateway E2E jobs install pinned Hermes and run `tests/integration` and the E2E harness. Leave those to CI unless
 your change touches them.
 
+A pull request merges only when these 12 required checks pass:
+
+- `Unit (ubuntu-latest, Python 3.11)`, `Unit (ubuntu-latest, Python 3.13)`, `Unit (ubuntu-latest, Python 3.14)`
+- `Unit (macos-latest, Python 3.11)`, `Unit (macos-latest, Python 3.13)`, `Unit (macos-latest, Python 3.14)`
+- `Real Hermes loader (v0.21.6)`, `Real Hermes loader (pinned-main)`
+- `Real Telegram gateway (v0.21.6)`, `Real Telegram gateway (v0.21.7)`, `Real Telegram gateway (v0.23.1)`, `Real Telegram gateway (main)`
+
+Renaming one of these jobs, or changing the Hermes versions they pin, changes the check names. Maintainers update the required
+checks in the same change.
+
 ## Rules
 
 - Keep each change small and focused: one change per PR.
