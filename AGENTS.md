@@ -41,6 +41,19 @@ your change touches them.
 - Never commit secrets, tokens, real user data, or machine-specific paths.
 - Tests use a temporary `HERMES_HOME`, never a real one.
 
+## Release closeout (maintainers, after every release)
+
+After the release is published:
+
+1. Close every issue the release fully served, with a comment naming the version. Don't close an umbrella or parent issue
+   whose own acceptance isn't met: split what is left into its own issue, or narrow it.
+2. Tick the boxes it completed in VISION.md, the roadmap tracker (#139) and issue checklists. Close a milestone once all its
+   issues are closed, and move work that is parked or waits on Hermes to the Backlog or Research / blocked milestones.
+3. Update every line in the README, VISION.md, #139 and milestone descriptions that names the latest release or what ships
+   next.
+4. Add the release's row to #139, and post one closeout line as a comment on the release pull request: issues closed, boxes
+   ticked, docs updated (or "none").
+
 ## Filing issues
 
 - Search first: `gh issue list -R electricsheephq/heartbeat2 --state all --search "<key words>"`.
