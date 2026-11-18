@@ -32,9 +32,17 @@ promised. Most of that work is silent. The agent speaks when it has something wo
 
 ## Next
 
+- Owner-authenticated per-chat grants: the owner turns on a topic and sets its time zone from chat, without the agent
+  editing config (#97).
+
+## Later: waits on a Hermes change
+
 - Run app-session wakes with the window closed, once Hermes can revive a closed local chat for a plugin turn
   (upstream NousResearch/hermes-agent#156894).
-- One cache clock per chat: defer keep-warm to Hermes's own cache warmer once it can be read.
+- API-server sessions: roles that run silent with an optional notify target, once Hermes runs plugin turns there
+  (#221, upstream NousResearch/hermes-agent#156466).
+- One cache clock per chat: defer keep-warm to Hermes's own cache warmer once it can be read (#23).
+- Per-wake feedback: a reaction marks a wake useful or annoying, once Hermes tells plugins which messages it sent (#60).
 
 ## Not goals
 
