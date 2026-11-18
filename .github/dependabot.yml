@@ -1,0 +1,12 @@
+# Version updates for the GitHub Actions used in CI. Actions are pinned by commit SHA;
+# Dependabot keeps those SHAs and their version comments current, in one grouped PR a month.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
