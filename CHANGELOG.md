@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.29 — 2026-11-19
+
+- **File watchers no longer depend on `os.O_NONBLOCK`.** A file watcher opens the watched file with only the open flags the platform defines, and in binary mode where the platform has one, so a Python build without `os.O_NONBLOCK` no longer fails every check. Linux and macOS open files exactly as before. Native Windows is still not supported (the README lists macOS and Linux). Thanks to @zparallel5. (#115)
+
 ## 0.4.28 — 2026-11-17
 
 - **A paused watcher's result speaks once the holds clear.** When quiet hours, the unanswered mute or the daily message cap silenced a held watcher result, its delivery failed, and you then paused and resumed the wake, the result still ran silently even with no message hold left. It now runs normally, unless a message hold still applies. (#217)
