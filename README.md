@@ -319,6 +319,10 @@ turn ("reply [SILENT]", no tools) that reads the cache and keeps it alive, so th
 - Only you turn it on or off (`/pulse warm off`); the agent can't. When the route doesn't report the cache lifetime,
   HeartBeat uses the longest gap it has seen stay warm on that route. When it can't tell the lifetime, `/pulse warm` says why.
 - Hermes has no per-turn output cap for plugins, so the ping asks for a one-word reply rather than enforcing it.
+- Hermes builds that include its own prompt-cache warmer (NousResearch/hermes-agent#156455, merged after Hermes 0.23.2) keep
+  a chat's cache warm by themselves, and HeartBeat can't yet see that schedule. On such a build, turn `/pulse warm off`, so the
+  chat doesn't run two warmers that each bill their pings. HeartBeat will step aside on its own once Hermes lets plugins read the
+  warm schedule (#23).
 
 ## Security and privacy
 Disclosure — wakes and watchers run full turns on the conversation's own model, billed like any message; command watchers run allowlisted read-only commands without an approval prompt; URL watchers make the GET requests you configured; state stays in the profile's plugin-data; no telemetry. Command environments use Hermes' sanitizer on an allowlisted base and carry no provider, bot or GitHub tokens unless you name one for an allowed command in `probe_command_env`; gh uses its own hosts.yml or keyring. URL watchers always block cloud metadata, and block private/local addresses unless `url_allow_private` is enabled, checking every hop at connect time. File watchers honor Hermes read blocks at arm/update and every check, including rotation. Helpers run in the watcher's profile scope.
