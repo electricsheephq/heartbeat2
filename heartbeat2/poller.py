@@ -5,6 +5,7 @@ cron/monitor.py; estop and busy ordering follows gateway/run_goals.py.
 """
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -15,18 +16,29 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import MESSAGING_PLATFORMS, owner_class, is_watcher, one_shot
-from .schedule import time_due, local_day, parse_duration, next_every
+from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
+from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every
 from . import governor
 
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
-FINAL_SKIP_REASONS = frozenset({'unanswered','daily_model_cap','daily_message_cap','dm_only',
-    'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires'})
+PROBES_PER_TICK = 16
+FINAL_SKIP_REASONS = frozenset({'unanswered','asleep','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
+    'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires','nothing_to_report'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
 # by another (for a startup replay: the crashed) process.
 LOCAL_EPOCHS = set()
 CREATED_EPOCHS = set()  # Every poller epoch this process made; never discarded.
+
+
+def event_matches(w,payload) -> bool:
+    filters=w.trigger_json
+    if w.kind=='reaction' and filters.get('emojis') and not set(filters['emojis']) & set(payload.get('emojis',[])): return False
+    if any(filters.get(k) is not None and payload.get(k)!=filters[k] for k in ('task_id','board')): return False
+    if w.kind=='reaction' and filters.get('message_id') is not None:
+        mid=payload.get('message_id')
+        if mid is None or str(mid).strip()!=str(filters['message_id']).strip(): return False
+    return True
 
 
 def check_paused():
@@ -64,6 +76,9 @@ class Poller:
         self.restart=lambda: None
         self.signal=lambda: None
         self.needs_restart=self._needs_restart
+        from .notifier import NotificationWorker
+        self.notifications=NotificationWorker(store)
+        self._owns_notifications=True
 
     def _needs_restart(self):
         last=self.store.get_meta('last_tick_monotonic')
@@ -82,6 +97,13 @@ class Poller:
     def settings_notice(self):
         errors=json.loads(self.store.get_meta('settings_error') or '[]')
         return '\n'.join(f'Setting ignored: {e["key"]} ({e["reason"]}); using {e["effective"]!r}' for e in errors)
+
+    def session_can_receive(self,s):
+        """Whether HeartBeat may speak into this chat now: the same session-level checks dispatch applies (#145 review)."""
+        now=self.clock.now()
+        return bool(self.policy.enabled and not self.paused() and self.injection_allowed() and s is not None and s.enabled
+                    and not (s.paused_until is not None and s.paused_until>now)
+                    and not (self.policy.dm_only and s.chat_type!='dm') and deliverable_platform(s.platform))
 
     def injection_allowed(self):
         try:
@@ -124,6 +146,7 @@ class Poller:
 
     def close(self):
         self.closed=True
+        if self._owns_notifications: self.notifications.close()
         # A closed poller's turns are abandoned; a re-registered runtime must not treat them as live.
         LOCAL_EPOCHS.discard(self.epoch)
         self.release()
@@ -144,7 +167,7 @@ class Poller:
                             noticed.add(w.session_key)
             for o in s.list_occurrences() if self.process_start else []:
                 if o.state=='claimed':
-                    s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error='restart_refund')
+                    self.refund_claimed(o,'restart_refund')
                     s.set_meta('recovered:'+o.id,'1')
                 elif o.state=='started': self.interrupt(o,'restart')
             for session in s.list_sessions() if self.process_start else []:
@@ -194,22 +217,15 @@ class Poller:
                 'minimum_s':max(self.policy.interval_floor(w),w.pacing_min_s or 0)}
 
     def daily(self,key):
-        day=local_day(self.clock.now(),self.policy.resolved_timezone())
-        totals={'model_turns':0,'delivered':0}
-        for w in self.store.list_wakes(key):
-            row=self.store.get_ledger(day,w.id) or {}
-            for k in totals: totals[k]+=row.get(k,0)
-        # Reserve daily capacity for accepted work that has not ended yet.
-        for o in self.store.list_occurrences(session_key=key):
-            if o.state in {'claimed','started'}:
-                if o.state=='claimed': totals['model_turns']+=1
-                totals['delivered']+=1
-        return totals
+        return self.store.daily_counts(key,self.policy.resolved_timezone())
 
     def cancel_occurrences(self,wid,reason,*,preserve_started=False):
         for o in self.store.list_occurrences(wid):
             if reason=='paused' and o.state=='pending' and o.held_since is not None:
-                self.store.update_occurrence(wid,o.dedupe_key,'pending',error='held_paused',held_reason='held_paused')
+                # The pause replaces a message hold's reason, so drop its silence with it, as a held_ deferral does
+                # (#217); dispatch checks the message holds again before the turn.
+                unsilence={'force_silent':False} if o.force_silent and o.held_reason.startswith('message_held:') else {}
+                self.store.update_occurrence(wid,o.dedupe_key,'pending',error='held_paused',held_reason='held_paused',**unsilence)
                 self.store.set_meta('not_before:'+o.id,'')
                 continue
             if o.state=='started' and (preserve_started or reason=='owner_replied'): continue
@@ -217,6 +233,62 @@ class Poller:
                 self.store.cas_occurrence(wid,o.dedupe_key,o.state,'superseded',
                     attempt=o.attempt if o.state!='pending' else None,force_silent=True,
                     error='expired_held' if o.state=='pending' and o.held_since is not None and reason in {'expired','max_fires','max_lifetime_changed'} else reason)
+
+        wake=self.store.get_wake(wid)
+        if wake is not None and wake.platform in LOCAL_SURFACES:
+            from .notifier import episode_over, end_episode
+            if episode_over(self,wake.session_key): end_episode(self,wake.session_key)
+
+    def recheck_pending(self,old,new):
+        target_changed=any(old.trigger_json.get(k)!=new.trigger_json.get(k)
+                           for k in ('path','url','command','pattern','pid','cwd','fire_on'))
+        watchers=PROBE_KINDS | EVENT_KINDS
+        supersede=(old.kind!=new.kind and (old.kind in watchers or new.kind in watchers)
+                   or old.kind==new.kind and old.kind in PROBE_KINDS and target_changed)
+        refilter=(old.kind==new.kind and new.kind in EVENT_KINDS
+                  and any(old.trigger_json.get(k)!=new.trigger_json.get(k) for k in ('emojis','message_id','task_id','board')))
+        if new.kind in PROBE_KINDS and (old.kind!=new.kind or target_changed):
+            self.store.set_meta('probe_generation:'+new.id,str(int(self.store.get_meta('probe_generation:'+new.id) or 0)+1))
+        if not supersede and not refilter: return
+        # A wider filter still matches every event folded into a held count; only a narrower one makes it unknowable.
+        ot,nt=old.trigger_json,new.trigger_json
+        widened=(all(nt.get(k) is None or nt.get(k)==ot.get(k) for k in ('message_id','task_id','board'))
+                 and (not nt.get('emojis') or bool(ot.get('emojis')) and set(ot['emojis'])<=set(nt['emojis'])))
+        if supersede:
+            for o in self.store.list_occurrences(old.id,state='claimed'):
+                self.store.set_meta('supersede_on_refund:'+o.id,'trigger_changed')
+        for o in self.store.list_occurrences(old.id,state='pending'):
+            reason='trigger_changed'
+            if refilter:
+                if not o.dedupe_key.startswith('e:'): continue
+                kept=[p for p in o.payload_json if not isinstance(p,dict) or event_matches(new,p)]
+                if kept:
+                    updates={'payload_json':kept} if kept!=o.payload_json else {}
+                    if o.held_since is not None and not widened: updates['held_matches']=len(kept)
+                    if updates: self.store.update_occurrence(old.id,o.dedupe_key,'pending',**updates)
+                    continue
+                reason='filter_changed'
+            if not self.store.cas_occurrence(old.id,o.dedupe_key,'pending','superseded',
+                                             force_silent=True,error=reason):
+                continue  # A claimed/started occurrence is already in flight.
+
+    def supersede_claimed(self,o):
+        """Retire a trigger-invalidated claim before refund or attempt-cap handling."""
+        s=self.store
+        with s.atomic():
+            if s.get_meta('supersede_on_refund:'+o.id):
+                # Like an unsent refund, release the daily dispatch reservation.
+                # Model turns/spend are charged only after start/API usage.
+                return s.cas_occurrence(o.wake_id,o.dedupe_key,'claimed','superseded',attempt=o.attempt,
+                    epoch=None,pid=None,claimed_at=None,force_silent=True,error='trigger_changed')
+            return False
+
+    def refund_claimed(self,o,error):
+        """A claim invalidated by a trigger edit must never return to the queue."""
+        s=self.store
+        with s.atomic():
+            if self.supersede_claimed(o): return True
+            return s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error=error)
 
     def evaluate(self,w,fn):
         """One wake's invalid stored data cannot roll back healthy siblings."""
@@ -264,6 +336,8 @@ class Poller:
             if not self.eligible(): return  # Probes can block; the home may be unserved by now.
             with s.atomic():
                 for w in s.list_wakes(): self.terminal_one_shot(w)
+                self.own_time()
+                self.keep_warm()
                 self.times()
                 self.silence()
                 if now-float(s.get_meta('last_gc_at') or 0)>=3600:
@@ -274,6 +348,7 @@ class Poller:
                 w=s.get_wake(o.wake_id)
                 cache_line=self.cache_line(w)  # Pricing may fetch metadata; never hold the write lock.
                 self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
+            self.notifications.tick(self)
         except Exception as exc:
             self.log.warning('heartbeat2 tick failed',exc_info=True)
             try: self.store.set_meta('last_error',type(exc).__name__)
@@ -299,11 +374,12 @@ class Poller:
         for o in s.list_occurrences(state='claimed'):
             if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
+                if self.supersede_claimed(o): continue
                 s.cas_occurrence(o.wake_id,o.dedupe_key,'claimed','dead',attempt=o.attempt,error='ack_timeout')
                 self.notice(s.get_wake(o.wake_id).session_key,'A wake was not acknowledged after three attempts.')
                 self.terminal_one_shot(s.get_wake(o.wake_id))
                 governor.error(self,s.get_wake(o.wake_id))
-            else: s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error='ack_timeout')
+            else: self.refund_claimed(o,'ack_timeout')
 
     def family_enabled(self,w):
         family='silence' if w.kind=='owner_silent' else 'events' if w.kind in EVENT_KINDS else w.kind if w.kind in PROBE_KINDS else None
@@ -324,9 +400,7 @@ class Poller:
         if event['session_key'] and event['session_key']!=w.session_key: return
         if event['chat_id'] and event['chat_id']!=w.chat_id: return
         payload=event['payload_json']
-        filters=w.trigger_json
-        if w.kind=='reaction' and filters.get('emojis') and not set(filters['emojis']) & set(payload.get('emojis',[])): return
-        if any(filters.get(k) is not None and payload.get(k)!=filters[k] for k in ('task_id','board')): return
+        if not event_matches(w,payload): return
         if w.kind=='api_error':
             last=float(s.get_meta('api_cooldown:'+w.id) or 0)
             if last and self.clock.now()-last<1800: return
@@ -340,7 +414,10 @@ class Poller:
         s,now=self.store,self.clock.now()
         due=[]
         with s.atomic():
-            for w in s.list_wakes(status='active'):
+            # A bounded batch per tick (four waves of the four-worker pool), so many slow watchers can't hold
+            # back time wakes for long; the rest stay due and run on the next tick, most overdue first.
+            for w in sorted(s.list_wakes(status='active'),key=lambda w: w.next_due_at if w.next_due_at is not None else math.inf):
+                if len(due)>=PROBES_PER_TICK: break
                 if w.kind not in PROBE_KINDS or not self.family_enabled(w): continue
                 session=s.get_session(w.session_key)
                 if session is None or not session.enabled or session.paused_until is not None and session.paused_until>now: continue
@@ -384,7 +461,9 @@ class Poller:
             w=s.get_wake(w.id)
         if result.get('fire'):
             identity=str(result.get('identity') or json.dumps(result.get('state',result.get('message','')),sort_keys=True))
-            digest=hashlib.sha1(identity.encode()).hexdigest()
+            # A retargeted check starts a fresh namespace, so its first result is never deduplicated against the old target (#149).
+            generation=s.get_meta('probe_generation:'+w.id)
+            digest=hashlib.sha1((identity+(':g'+generation if generation else '')).encode()).hexdigest()
             payload=[{'message':result.get('message','')}]
             pending=s.list_occurrences(w.id,state='pending')
             coalesced=bool(pending and s.coalesce(w.id,pending[-1].dedupe_key,payload))
@@ -404,9 +483,37 @@ class Poller:
         for w in self.store.list_wakes(status='active'):
             self.evaluate(w,lambda w=w:self._time(w))
 
+    def bring_role_forward(self, wake_id):
+        """Make work due without bypassing any of the normal dispatch gates."""
+        s,now=self.store,self.clock.now()
+        with s.atomic():
+            target=s.get_wake(wake_id)
+            if target is not None and target.role and target.status=='active':
+                if ((target.next_due_at is None or target.next_due_at>now)
+                        and s.cas_wake(target.id,'active',expected_version=target.version,next_due_at=now)):
+                    # Marks this time as due on purpose, so follow_zone doesn't take it for one set in another zone.
+                    s.set_meta('brought_forward:'+target.id,f'{now:.17g}')
+
+    def handoff(self, source, o):
+        s,now=self.store,self.clock.now()
+        with s.atomic():
+            target=s.get_wake(s.get_meta('handoff_to:'+source.id) or '')
+            if (target is None or not target.role or target.session_key!=source.session_key
+                    or target.id==source.id or target.status!='active'):
+                self.log.info('role handoff skipped: target is not an active role in the same chat')
+                return
+            key='handoff_in:'+target.id
+            items=json.loads(s.get_meta(key) or '[]')
+            if any(item['occ']==o.id for item in items): return
+            items.append({'from':source.id,'title':source.title or source.note,
+                          'summary':o.summary[:500],'occ':o.id,'at':now})
+            s.set_meta(key,json.dumps(items[-10:]))
+            self.bring_role_forward(target.id)
+
     def _time(self,w):
         s,now=self.store,self.clock.now()
         if self.end_max_fires(w): return
+        if is_keep_warm(w): return  # keep_warm() schedules it from the chat's last cache touch.
         # Retain the existing schedule decisions, isolated per wake/savepoint.
         if w.status=='active':
             if w.expires_at is not None and w.expires_at<=now:
@@ -417,7 +524,7 @@ class Poller:
             # A reminder still not due at its due bound (the setting was lowered) ends there; the grace is for a due one.
             due_end=w.created_at+self.policy.due_bound_s(w)
             late=due_end<=now and w.next_due_at is not None and w.next_due_at>due_end
-            if not w.trigger_json.get('builtin') and (hard_end<=now or late):
+            if not (w.role or w.trigger_json.get('builtin')) and (hard_end<=now or late):
                 s.cas_wake(w.id,'active',status='expired',status_reason='max_lifetime_changed')
                 self.cancel_occurrences(w.id,'max_lifetime_changed')
                 return
@@ -428,8 +535,11 @@ class Poller:
                     s.cas_wake(w.id,'active',expected_version=w.version,**changes)
                     w=s.get_wake(w.id)
             if w.kind in TIME_KINDS:
-                due=time_due(w,now=now,catch_up_s=self.policy.catch_up_hours*3600,
-                             timezone=self.policy.resolved_timezone(),jitter_unit=self.jitter(),**self.timing(w))
+                tz=self.policy.resolved_timezone()
+                w=self.follow_zone(w,tz,now)
+                # A report-back is due now by design and waits on holds, so the timer catch-up cutoff never misses it (#137).
+                due=time_due(w,now=now,catch_up_s=10**9 if w.trigger_json.get('report_back') else self.policy.catch_up_hours*3600,
+                             timezone=tz,jitter_unit=self.jitter(),**self.timing(w))
                 if due:
                     if not (w.kind in RECURRING_KINDS and due.state=='pending' and s.list_occurrences(w.id,state='pending')):
                         s.add_occurrence(w.id,due.dedupe_key,state=due.state)
@@ -446,15 +556,153 @@ class Poller:
             elif w.kind in PROBE_KINDS|EVENT_KINDS and w.deadline_at is not None and w.deadline_at<=now:
                 # Deadline fallback is one fire only, and only when no trigger
                 # occurrence has already been produced (including pending).
-                if not s.list_occurrences(w.id):
+                # Marked occurrences belong to an old trigger, in any state.
+                if not [o for o in s.list_occurrences(w.id)
+                        if not (o.state=='superseded' and o.error in {'filter_changed','trigger_changed'})
+                        and not s.get_meta('supersede_on_refund:'+o.id)]:
                     s.add_occurrence(w.id,f't:{w.deadline_at:.17g}',payload=[{'message':'deadline passed — nothing happened'}])
                 s.cas_wake(w.id,'active',expected_version=w.version,deadline_at=None)
+
+    def follow_zone(self,w,tz,now):
+        """A cron or `every … at` time set in another zone moves to the nearest of the wake's local times in this one (#170).
+
+        West, the stored time comes early: it moves on to the local time, which hasn't come yet. East, the local time comes
+        first: the wake moves back to it, or, when it has already passed and wasn't served, fires once now in its place.
+        Either way the wake fires once for that local time, then the scheduler carries on in the new zone.
+        """
+        due=w.next_due_at
+        if due is None: return w
+        # A handoff made the role due now (#138): off its local schedule on purpose, not set in another zone.
+        if self.store.get_meta('brought_forward:'+w.id)==f'{due:.17g}': return w
+        around=local_neighbours(w,due,tz)
+        if around is None: return w
+        before,after=around
+        target=before if due-before<after-due else after
+        if target<=now:
+            if due<=now: return w  # Due either way: it fires now.
+            served=((w.last_fired_at is not None and w.last_fired_at>=target)
+                    or self.store.get_occurrence(w.id,f't:{target:.17g}') is not None)
+            # However late, like any overdue recurring time: the move is at most the zone shift, and waiting loses the day.
+            target=after if served else now
+        if target==due: return w
+        if not self.store.cas_wake(w.id,'active',expected_version=w.version,next_due_at=target): return w
+        self.log.info('heartbeat2 wake %s: next time %.0f is off its local schedule in this zone, now %.0f',w.id,due,target)
+        return self.store.get_wake(w.id)
+
+    def cancel_non_gateway_builtins(self, *, own_time=False):
+        for w in self.store.list_wakes():
+            # Only live built-ins: a paused one doesn't fire and keeps the owner's or governor's pause.
+            if (not w.trigger_json.get('builtin') or bool(w.trigger_json.get('own_time')) != own_time
+                    or w.status not in {'active','proposed'}): continue
+            session = self.store.get_session(w.session_key)
+            if session is not None and (not deliverable_platform(session.platform)
+                    or not own_time and w.kind=='owner_silent' and session.platform in LOCAL_SURFACES):
+                if self.store.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='non_gateway'):
+                    self.cancel_occurrences(w.id,'non_gateway',preserve_started=True)
+
+    def own_time_refusal(self,chat,key):
+        """Why own time may not run in this chat (a session or wake), or '' (#177). A chat known to be one-to-one has it
+        unless the owner turned it off there; an app chat, group, topic, group DM or a chat whose platform can't tell, only where the
+        owner turned it on with /pulse owntime on. Each topic is a chat."""
+        meta=self.store.get_meta
+        if meta('own_time_off:'+key)=='1': return 'chat_off'
+        if is_direct_chat(chat.platform,chat.chat_type,chat.chat_id): return ''
+        if self.policy.dm_only and chat.chat_type!='dm': return 'dm_only'
+        return '' if meta('own_time_on:'+key)=='1' else 'not_opted_in'
+
+    def own_time(self):
+        s,now=self.store,self.clock.now()
+        hours=self.policy.own_time_hours
+        for w in s.list_wakes():
+            if w.trigger_json.get('own_time') and not hours and (w.status != 'cancelled' or w.status_reason != 'settings'):
+                if s.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason='settings'):
+                    self.cancel_occurrences(w.id,'settings',preserve_started=True)
+        if not hours: return
+        self.cancel_non_gateway_builtins(own_time=True)
+        for w in s.list_wakes():
+            # A paused wake is left paused (a governor pause outlasts off and on); dispatch refuses its turns meanwhile.
+            if not w.trigger_json.get('own_time') or w.status not in {'active','proposed'}: continue
+            session=s.get_session(w.session_key)
+            reason=self.own_time_refusal(session if session is not None else w,w.session_key)
+            if reason and s.cas_wake(w.id,w.status,expected_version=w.version,status='cancelled',status_reason=reason):
+                self.cancel_occurrences(w.id,reason,preserve_started=True)
+        floor=max(self.policy.min_interval_minutes,self.policy.agent_ungated_floor_minutes)*60
+        interval=max(hours*3600,floor)
+        maximum=max(2*hours*3600,floor)
+        for session in s.list_sessions():
+            if not deliverable_platform(session.platform) or self.own_time_refusal(session,session.session_key): continue
+            if session.last_human_at is None or not session.episode_id: continue
+            wid='owntime_'+hashlib.sha256(session.session_key.encode()).hexdigest()[:16]
+            w=s.get_wake(wid)
+            if w is None:
+                s.create_wake(Wake(session.session_key,
+                    'This is your own time. Look at your desk: work on what you own, follow up on something you noticed, '
+                    'think something through, tidy your notes or memory, or rest. Message the owner only if it\'s worth their attention.',
+                    'self',id=wid,platform=session.platform,chat_type=session.chat_type,chat_id=session.chat_id,
+                    armed_session_id=session.current_session_id,creator='user',title='Own time',reason='Own time.',
+                    trigger_json={'builtin':True,'own_time':True,'hours':hours,'floor':floor},base_interval_s=interval,eff_interval_s=interval,
+                    pacing_min_s=floor,pacing_max_s=maximum,next_due_at=now+interval))
+                continue
+            updates={}
+            # Every reason own time stops on its own comes back here, once this chat may have it again ('not_dm' is 0.4.1's).
+            reactivate=w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason in {'settings','non_gateway','not_dm','dm_only','chat_off','not_opted_in'}
+            if w.trigger_json.get('hours')!=hours or w.trigger_json.get('floor',floor)!=floor or reactivate:
+                updates.update(base_interval_s=interval,eff_interval_s=interval,pacing_min_s=floor,
+                               pacing_max_s=maximum,next_due_at=now+interval,
+                               trigger_json={**w.trigger_json,'hours':hours,'floor':floor})
+            if reactivate:
+                updates.update(status='active',status_reason='',armed_session_id=session.current_session_id,
+                               fires=0,max_fires=None,babysit=False)
+            if updates: s.cas_wake(w.id,w.status,expected_version=w.version,**updates)
+
+    def arm_report_back(self,session_key):
+        """One report-back turn per chat, shared by its held watcher results."""
+        s,now=self.store,self.clock.now()
+        with s.atomic():
+            session=s.get_session(session_key)
+            if session is None: return
+            wid='report_'+hashlib.sha256(session_key.encode()).hexdigest()[:16]
+            w=s.get_wake(wid)
+            if w and any(o.state in {'pending','claimed','started'} for o in s.list_occurrences(wid)): return
+            trigger={'at':datetime.fromtimestamp(now,timezone.utc).isoformat(),'builtin':True,'report_back':True}
+            if w is None:
+                s.create_wake(Wake(session_key,
+                    'Messages were held while you worked. Pass on what still matters from the list below in one short message, or end silently if nothing does.',
+                    'at',id=wid,platform=session.platform,chat_type=session.chat_type,chat_id=session.chat_id,
+                    armed_session_id=session.current_session_id,creator='agent',created_in='command',title='Report back',
+                    reason="An agent watcher's turn left a report while messages were held.",
+                    trigger_json=trigger,next_due_at=now))
+            elif w.status in {'active','done','failed','cancelled','expired'}:
+                # A skipped one-shot has status failed; a later watcher report can arm it again.
+                s.cas_wake(w.id,w.status,expected_version=w.version,status='active',status_reason='',
+                           next_due_at=now,armed_session_id=session.current_session_id,trigger_json=trigger)
+
+    def keep_warm(self):
+        """Queue one silent ping per cache touch, just before the chat's prompt cache would expire (#163)."""
+        for w in self.store.list_wakes(status='active'):
+            if is_keep_warm(w): self.evaluate(w,lambda w=w:self._keep_warm(w))
+
+    def _keep_warm(self,w):
+        from .cache import keep_warm_plan, keep_warm_key
+        s,now=self.store,self.clock.now()
+        session=s.get_session(w.session_key)
+        if session is None or session.platform not in MESSAGING_PLATFORMS: return
+        plan=keep_warm_plan(s,session,self.policy,now)
+        due=plan.get('due_at')
+        if due!=w.next_due_at:
+            if not s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due): return
+            w=s.get_wake(w.id)
+        if due is None or now<due: return
+        if any(o.state in {'pending','claimed','started'} for o in s.list_occurrences(w.id)): return
+        s.add_occurrence(w.id,keep_warm_key(plan['touch']))
 
     def silence(self):
         s,now=self.store,self.clock.now()
         if not self.policy.source_silence: return
         if self.policy.owner_silent_checkin:
+            self.cancel_non_gateway_builtins()
             for session in s.list_sessions():
+                if not deliverable_platform(session.platform) or session.platform in LOCAL_SURFACES: continue
                 if session.last_human_at is None or not session.episode_id: continue
                 identity=hashlib.sha1(session.session_key.encode()).hexdigest()[:16]
                 wid='checkin_'+identity
@@ -464,8 +712,8 @@ class Poller:
                         'owner_silent',id=wid,platform=session.platform,chat_type=session.chat_type,chat_id=session.chat_id,
                         armed_session_id=session.current_session_id,creator='user',reason='The owner has been quiet.',
                         trigger_json={'after':self.policy.checkin_after_hours*3600,'builtin':True}))
-                elif w.status in {'done','orphaned'}:
-                    # This system wake belongs to the chat, not one agent id.
+                elif w.status in {'done','orphaned'} or w.status=='cancelled' and w.status_reason=='non_gateway':
+                    # This system wake belongs to the chat, not one agent id; it comes back when the chat is deliverable again.
                     s.cas_wake(w.id,w.status,expected_version=w.version,status='active',status_reason='',armed_session_id=session.current_session_id)
         for w in s.list_wakes(status='active'):
             if w.kind!='owner_silent': continue
@@ -483,13 +731,38 @@ class Poller:
         if now-session.last_human_at>=after:
             s.add_occurrence(w.id,'s:'+session.episode_id)
 
+    def message_hold_reason(self,w,s):
+        """Agent recurring work and watchers may continue while their messages are held."""
+        if s is None or not holds_messages(w):
+            return ''
+        from .commands import quiet_until
+        if quiet_until(self,s.session_key,urgent=w.urgent) is not None:
+            return 'quiet_hours'
+        if self.policy.unanswered_gate(w,s.unanswered_count):
+            return 'unanswered'
+        if self.daily(s.session_key)['delivered']>=self.policy.max_messages_per_day:
+            return 'daily_message_cap'
+        return ''
+
     def gate(self,w,o,s):
         now=self.clock.now()
         if o.state=='pending' and o.held_since is not None and o.error.startswith('held_'):
             self.store.set_meta('not_before:'+o.id,'')
         if w.kind=='owner_silent' and o.dedupe_key.startswith('s:') and (s is None or o.dedupe_key!='s:'+(s.episode_id or '')):
             return 'episode_ended',False,None
-        if w.trigger_json.get('builtin'):
+        if w.trigger_json.get('own_time'):
+            if not self.policy.own_time_hours: return 'setting_off',False,None
+            refusal=self.own_time_refusal(s if s is not None else w,w.session_key)
+            if refusal in {'chat_off','not_opted_in'}: return refusal,False,None
+        elif is_keep_warm(w):
+            from .cache import keep_warm_plan, keep_warm_key
+            plan=keep_warm_plan(self.store,s,self.policy,now)
+            # A real turn since this ping was queued already warmed the cache, or the cache went cold, or the chat rests.
+            if 'due_at' not in plan or o.dedupe_key!=keep_warm_key(plan['touch']): return 'keep_warm_not_needed',False,None
+        elif w.trigger_json.get('report_back'):
+            if not self.store.held_reports(w.session_key): return 'nothing_to_report',False,None
+        elif w.trigger_json.get('builtin'):
+            if s and s.platform in LOCAL_SURFACES: return 'setting_off',False,None
             if not self.policy.owner_silent_checkin: return 'setting_off',True,None
             after=self.policy.checkin_after_hours*3600*(2 if w.ignored_streak else 1)
             if s and s.last_human_at is not None and now-s.last_human_at<after: return 'checkin_not_due',True,None
@@ -503,7 +776,15 @@ class Poller:
         if not s.enabled: return 'session_off',False,None
         if s.paused_until is not None and s.paused_until>now: return 'session_paused',True,None
         if self.policy.dm_only and (s.chat_type!='dm' or w.chat_type!='dm'): return 'dm_only',False,None
-        if s.platform not in MESSAGING_PLATFORMS: return 'non_gateway',False,None
+        if not deliverable_platform(s.platform): return 'non_gateway',False,None
+        # The owner has been away sleep_after_days: the agent's own work runs no turn until they write (#62). This comes
+        # before the message holds, which still run a turn silently. A report-back passes only for agreed results.
+        if sleeps(w) and self.policy.asleep(s,now):
+            if w.trigger_json.get('report_back'):
+                from .desk import agreed_reports
+                if not agreed_reports(self.store,s.session_key): return 'asleep',False,None
+            elif is_watcher(w): return 'held_asleep',True,None
+            else: return 'asleep',False,None
         health=json.loads(self.store.get_meta('provider_health') or '{}')
         if health.get('trial'):
             wid,key=health['trial'].split('/',1)
@@ -512,22 +793,37 @@ class Poller:
                 health.pop('trial'); self.store.set_meta('provider_health',json.dumps(health))
         if health and (health['until']>now or health.get('trial')):
             return 'provider_unavailable',True,health['until'] if health['until']>now else None
-        # Windows hold pending work before mute/caps can drop it. Re-evaluate
-        # every gate once the window ends; owner reminders only bypass mute.
+        if w.role and self.store.dispatches_today(w.id,self.policy.resolved_timezone())>=self.policy.role_budget(w):
+            return 'role_budget',False,None
+        if (not owner_class(w) and not is_keep_warm(w) and self.policy.daily_cost_limit_usd>0
+                and self.store.agent_cost_today(w.session_key,self.policy.resolved_timezone())['cost_microusd']/1e6
+                    >=self.policy.daily_cost_limit_usd):
+            return 'daily_cost_cap',False,None
+        # Message gates silence agent recurring work and watchers; spend and dispatch gates
+        # still apply. Other wakes retain the existing hold/drop ordering.
+        message_held=self.message_hold_reason(w,s)
         from .commands import quiet_until
         quiet=quiet_until(self,s.session_key,urgent=w.urgent)
-        if quiet is not None: return 'quiet_hours',w.kind not in RECURRING_KINDS,quiet
+        if quiet is not None and not message_held: return 'quiet_hours',w.kind not in RECURRING_KINDS,quiet
         mute=self.policy.unanswered_gate(w,s.unanswered_count)
-        if mute: return mute,mute=='held_unanswered',None
+        if mute and w.trigger_json.get('report_back'):
+            # A watcher the owner asked for may have been held by quiet hours or a cap; the mute doesn't hold its
+            # result, so the report-back passes it on (and only it) (#108).
+            from .desk import agreed_reports
+            if agreed_reports(self.store,s.session_key): mute=None
+        if mute and not message_held: return mute,mute=='held_unanswered',None
         totals=self.daily(s.session_key)
         cap='daily_model_cap' if totals['model_turns']>=self.policy.max_model_wakes_per_day else 'daily_message_cap' if totals['delivered']>=self.policy.max_messages_per_day else ''
-        if cap and not (owner_class(w) and one_shot(w)):
-            if is_watcher(w):
+        # Keep-warm pings are silent cache reads the owner turned on: they neither use nor count against wake turns.
+        if cap and not is_keep_warm(w) and not (cap=='daily_message_cap' and message_held) and not (owner_class(w) and one_shot(w)):
+            # A report-back turn waits for the next local day like a watcher, so what was held still arrives (#137).
+            if is_watcher(w) or w.trigger_json.get('report_back'):
                 return 'held_daily_cap',True,None
             return cap,False,None
         flood=json.loads(self.store.get_meta('injections') or '[]')
         if sum(now-t<60 for t in flood)>=5: return 'global_flood',True,None
-        if now<float(self.store.get_meta('not_before:'+o.id) or 0): return 'not_before',True,None
+        if now<float(self.store.get_meta('not_before:'+o.id) or 0):
+            return ('app_closed' if o.error=='app_closed' else 'not_before'),True,None
         if s.busy_since is not None: return 'busy',True,None
         if s.last_wake_turn_at is not None and now-s.last_wake_turn_at<self.policy.wake_spacing_minutes*60: return 'wake_spacing',True,None
         if self.store.list_occurrences(session_key=s.session_key,state='claimed') or self.store.list_occurrences(session_key=s.session_key,state='started'): return 'in_flight',True,None
@@ -539,6 +835,9 @@ class Poller:
         # The served set can shrink mid-tick; an unserved home's wake stays untouched for its own gateway.
         if not self.eligible(): return
         s=self.store
+        # The tick lists occurrences before this transaction; act on the stored row, never a stale copy (#149).
+        o=s.get_occurrence(o.wake_id,o.dedupe_key)
+        if o is None or o.state!='pending': return
         w=s.get_wake(o.wake_id)
         session=s.get_session(w.session_key)
         reason,defer,until=self.gate(w,o,session)
@@ -554,6 +853,11 @@ class Poller:
                 held={'held_since':o.held_since if o.held_since is not None else self.clock.now(),
                       'held_reason':reason,'held_matches':o.held_matches or max(1,len(o.payload_json)),
                       'payload_json':o.payload_json[-1:]} if reason.startswith('held_') else {}
+                if held and o.force_silent and o.held_reason.startswith('message_held:'):
+                    # A held_ reason replaces a message hold; drop its silence with it, or it could never be cleared
+                    # (dispatch only clears a message_held: silence) and the owner's result would end as [SILENT].
+                    # Dispatch checks the message holds again before the turn.
+                    held['force_silent']=False
                 s.update_occurrence(w.id,o.dedupe_key,'pending',error=reason,**held)
                 if reason=='provider_unavailable':
                     if first: self.ledger(w,provider_deferrals=1)
@@ -580,48 +884,140 @@ class Poller:
         if cache_line is None:
             cache_line='' if s.connection.in_transaction else self.cache_line(w)
         held_by=o.error  # Claim clears the stored deferral; retain it for this prompt.
-        if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
+        message_held=self.message_hold_reason(w,session)
+        if is_keep_warm(w):
+            # A keep-warm ping never speaks, whatever holds apply.
+            if not o.force_silent and not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=True): return
+        elif message_held and (not o.force_silent or o.held_reason.startswith('message_held:')):
+            if not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=True,
+                                       held_reason='message_held:'+message_held): return
+        elif not message_held and o.force_silent and o.held_reason.startswith('message_held:'):
+            if not s.update_occurrence(w.id,o.dedupe_key,'pending',force_silent=False,held_reason=''): return
+        with s.atomic():
+            if not s.claim(w.id,o.dedupe_key,epoch=self.epoch,pid=os.getpid()): return
+            s.set_meta('spend:'+o.id, 'owner' if owner_class(w) or is_keep_warm(w) else 'agent')
         o=s.get_occurrence(w.id,o.dedupe_key)
         health=json.loads(s.get_meta('provider_health') or '{}')
         if health:
             health['trial']=o.id
             s.set_meta('provider_health',json.dumps(health))
-        from .wake_text import render_wake
+        from .desk import held_report_lines, _plain, _clip, _oneline
+        reports=''
+        if (w.role or w.trigger_json.get('own_time') or w.trigger_json.get('report_back')) and not message_held and not o.force_silent:
+            report_lines,shown=held_report_lines(s,w.session_key,payload_ok=bool(w.trigger_json.get('report_back')),
+                agreed_only=bool(w.trigger_json.get('report_back') and (self.policy.unanswered_gate(w,session.unanswered_count)
+                                                                        or self.policy.asleep(session,self.clock.now()))))
+            if report_lines:
+                reports='\n'.join(['Held for the owner (their limits held these earlier). If you message them this turn, include what still matters:', *report_lines])
+                s.set_meta('report_shown:'+o.id,json.dumps(shown))
+        handoffs=''
+        # Message holds silence the reply, not this work input. Other forced-silent turns keep it for later.
+        if w.role and (not o.force_silent or o.held_reason.startswith('message_held:')):
+            with s.atomic():
+                items=json.loads(s.get_meta('handoff_in:'+w.id) or '[]')
+                if items:
+                    lines=['Handed off to you by another role in this chat (its latest result; continue from it):']
+                    for item in items[:3]:
+                        title=_plain(_clip(_oneline(item['title']),60))
+                        summary=_plain(_clip(_oneline(item['summary']),240))
+                        lines.append(f'- {title} ({item["from"]}): {summary}')
+                    if len(items)>3:
+                        lines.append(f'- … {len(items)-3} more after these (they come next time)')
+                    handoffs='\n'.join(lines)
+                    s.set_meta('handoff_shown:'+o.id,json.dumps([item['occ'] for item in items[:3]]))
+        with s.atomic():
+            shown=s.get_meta('stop_hint_shown')
+            if shown is None:
+                # Migrate old notices once; later own-time deliveries aren't hint deliveries.
+                shown='1' if any(chat.first_notice_sent for chat in s.list_sessions()) else '0'
+                s.set_meta('stop_hint_shown',shown)
+            chat_shown=s.get_meta('stop_hint_chat:'+session.session_key)
+            if chat_shown is None:
+                chat_shown='1' if session.first_notice_sent else '0'
+                s.set_meta('stop_hint_chat:'+session.session_key,chat_shown)
+        text=self.render_occurrence(w,o,session,held_by=held_by,message_held=message_held,
+                                    cache_line=cache_line,handoffs=handoffs,held_reports=reports)
+        from .wake_text import offers_stop_hint
+        offered=not is_keep_warm(w) and offers_stop_hint(w,session,stop_hint=self.policy.stop_hint,
+            stop_hint_shown=shown=='1',stop_hint_chat_shown=chat_shown=='1',message_held=message_held)
+        s.set_meta('stop_hint_offered:'+o.id,'1' if offered else '')
+        if not self.eligible():
+            # Lost the home after claiming: give the claim back unsent, as it was.
+            if health:
+                health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
+            self.refund_claimed(o,held_by)
+            return
+        inject_raised=False
+        try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
+        except Exception as exc:
+            inject_raised=True
+            accepted=False
+            self.log.warning('heartbeat2 injection failed: %s',type(exc).__name__)
+        if accepted:
+            if session.platform in LOCAL_SURFACES:
+                from .notifier import end_episode
+                end_episode(self,session.session_key)
+            s.set_meta('held_since:'+o.id,'')
+            s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))
+            flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]
+            s.set_meta('injections',json.dumps(flood+[self.clock.now()]))
+            # A silent ping isn't a wake turn: it must not push the chat's real wakes back by wake spacing.
+            if not is_keep_warm(w):
+                s.cas_session(session.session_key,{'last_wake_turn_at':session.last_wake_turn_at},last_wake_turn_at=self.clock.now())
+        else:
+            if health:
+                health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
+            if session.platform in LOCAL_SURFACES and accepted is False and not inject_raised:
+                # A retired window rejects synchronously: no turn ran and no delivery failed. Keep its original
+                # waiting time separately from watcher/message holds, so those holds and silence still work unchanged.
+                with s.atomic():
+                    if self.refund_claimed(o,'app_closed'):
+                        from .notifier import episode_over, end_episode
+                        if episode_over(self,w.session_key): end_episode(self,w.session_key)
+                        if not s.get_meta('held_since:'+o.id): s.set_meta('held_since:'+o.id,str(self.clock.now()))
+                        s.set_meta('not_before:'+o.id,str(self.clock.now()+60))
+                        if not is_keep_warm(w):
+                            from .notifier import episode, EPISODE_PREFIX
+                            if not s.get_meta(EPISODE_PREFIX+w.session_key):
+                                s.set_meta(EPISODE_PREFIX+w.session_key,json.dumps(episode(self,w.session_key)))
+                return
+            count=int(s.get_meta('inject_failures:'+o.id) or 0)+1
+            s.set_meta('inject_failures:'+o.id,str(count))
+            s.set_meta('not_before:'+o.id,str(self.clock.now()+RETRY_DELAYS[min(count-1,4)]))
+            if count>=5:
+                if self.supersede_claimed(o): return
+                s.cas_occurrence(w.id,o.dedupe_key,'claimed','dead',attempt=o.attempt,error='inject_failed')
+                self.terminal_one_shot(s.get_wake(w.id))
+                governor.error(self,s.get_wake(w.id))
+            else: self.refund_claimed(o,'inject_failed')
+
+    def render_occurrence(self,w,o,session,*,held_by='',message_held='',cache_line='',handoffs='',held_reports=''):
+        s=self.store
+        from .wake_text import render_wake, render_keep_warm, escape_text
+        from .desk import render_desk
         from .intake import marker_tag
+        shown=s.get_meta('stop_hint_shown')
+        if shown is None:
+            shown='1' if any(chat.first_notice_sent for chat in s.list_sessions()) else '0'
+        chat_shown=s.get_meta('stop_hint_chat:'+session.session_key)
+        if chat_shown is None:
+            chat_shown='1' if session.first_notice_sent else '0'
         tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
+        if is_keep_warm(w): return render_keep_warm(w,o,marker_tag=tag)
         recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
         late=None
         if o.dedupe_key.startswith('t:'):
             try: late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
             except ValueError: pass
-        text=render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
-             recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-1,
+        return render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
+             stop_hint=self.policy.stop_hint,stop_hint_shown=shown=='1',stop_hint_chat_shown=chat_shown=='1',
+             recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-int(not o.force_silent and o.state in {'claimed','started'}),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
-             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,cache_line=cache_line,marker_tag=tag)
-        if not self.eligible():
-            # Lost the home after claiming: give the claim back unsent, as it was.
-            if health:
-                health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
-            s.refund(w.id,o.dedupe_key,attempt=o.attempt,error=held_by)
-            return
-        try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
-        except Exception: accepted=False
-        if accepted:
-            s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))
-            flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]
-            s.set_meta('injections',json.dumps(flood+[self.clock.now()]))
-            s.cas_session(session.session_key,{'last_wake_turn_at':session.last_wake_turn_at},last_wake_turn_at=self.clock.now())
-        else:
-            if health:
-                health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
-            count=int(s.get_meta('inject_failures:'+o.id) or 0)+1
-            s.set_meta('inject_failures:'+o.id,str(count))
-            s.set_meta('not_before:'+o.id,str(self.clock.now()+RETRY_DELAYS[min(count-1,4)]))
-            if count>=5:
-                s.cas_occurrence(w.id,o.dedupe_key,'claimed','dead',attempt=o.attempt,error='inject_failed')
-                self.terminal_one_shot(s.get_wake(w.id))
-                governor.error(self,s.get_wake(w.id))
-            else: s.refund(w.id,o.dedupe_key,attempt=o.attempt,error='inject_failed')
+             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
+             cache_line=cache_line,marker_tag=tag,handoffs=handoffs,held_reports=held_reports,
+             desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
+                              measure=lambda text: len(escape_text(text)),turn=o)
+                  if w.role or w.trigger_json.get('own_time') else '')
 
     def terminal_one_shot(self,w):
         if not one_shot(w) or w.status!='active' or w.next_due_at is not None: return

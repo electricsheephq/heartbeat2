@@ -2,6 +2,7 @@
 from dataclasses import replace
 from test_engine import admit, engine,arm,session,start,end,KEY
 from heartbeat2.model import Session
+from heartbeat2.schedule import local_day
 
 
 def test_stale_marker_cannot_supersede_new_attempt(engine):
@@ -56,13 +57,15 @@ def test_invalid_respond_does_not_stage_scratch(engine):
     assert e.store.get_wake(w.id).scratch==''
 
 
-def test_successful_silent_progress_is_zero_value_even_without_transform(engine):
+def test_successful_silent_progress_counts_even_without_transform(engine):
     e=engine
     w=arm(e,'every')
     e.tick();start(e)
     e.tool.handle({'action':'respond','notify':False,'outcome':'progress','summary':'internal'},session_id='sid')
     e.intake.on_session_end(session_id='sid',completed=True)
-    assert e.store.get_wake(w.id).noop_streak==1
+    assert e.store.get_wake(w.id).noop_streak==0
+    assert e.store.list_occurrences(w.id)[0].state=='done'
+    assert e.store.get_ledger(local_day(e.clock.now(),e.policy.resolved_timezone()),w.id)['valuable']==1
 
 
 def test_unknown_parent_event_never_uses_foreign_ambient_session(engine):

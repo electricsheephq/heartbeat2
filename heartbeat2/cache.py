@@ -19,6 +19,23 @@ def _base(part):
     return part if '://' in part else 'https://'+part
 
 
+# A Claude prompt cache lives at least 5 minutes on every provider, so on a Claude model a miss after a shorter gap means
+# the prompt changed (compression, a model or tool switch), not that the cache expired, and says nothing about the
+# lifetime (#203). Other routes may evict early (local LRU caches), so every miss counts there.
+COLD_GAP_FLOOR = 300
+
+
+def _floor(route):
+    model = (route or '||').split('|', 2)[1]
+    return COLD_GAP_FLOOR if 'claude' in model.lower() else 0
+
+
+def _gaps(row, route):
+    """A route row's longest warm gap and shortest cold gap, without colds that can't be expiry on that route."""
+    cold = row.get('min_cold_gap')
+    return row.get('max_warm_gap'), (cold if cold is not None and cold >= _floor(route) else None)
+
+
 def cache_ttl_for(route, *, store=None, platform='', api_mode=''):
     provider, model, part = (route or '||').split('|', 2)
     base = _base(part) if part else ''
@@ -43,7 +60,7 @@ def cache_ttl_for(route, *, store=None, platform='', api_mode=''):
             return 1800, 'openai'
     rows = json.loads(store.get_meta('cache_routes') or '{}') if store else {}
     learned = rows.get(route, rows.get(f'{provider}|{model}|{host}', {}))
-    warm, cold = learned.get('max_warm_gap'), learned.get('min_cold_gap')
+    warm, cold = _gaps(learned, route)
     return (warm, 'learned') if warm is not None and cold is not None and warm < cold else (None, 'unknown')
 
 
@@ -59,7 +76,9 @@ def touch(store, session, *, started_at, route, prompt, read, api_mode=''):
             routes = json.loads(store.get_meta('cache_routes') or '{}')
             row = routes.pop(route, {})
             if ratio >= .5: row['max_warm_gap'] = max(row.get('max_warm_gap',0), gap)
-            elif ratio < .1: row['min_cold_gap'] = min(row.get('min_cold_gap',float('inf')), gap)
+            elif ratio < .1 and gap >= _floor(route):
+                # A stored cold below the floor (recorded before #203) must not hide this real one.
+                row['min_cold_gap'] = min(_gaps(row, route)[1] or float('inf'), gap)
             routes[route] = row
             store.set_meta('cache_routes',json.dumps(dict(list(routes.items())[-32:])))
 
@@ -112,7 +131,7 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
             host = urlsplit(_base(part)).hostname or ''
             rows = json.loads(store.get_meta('cache_routes') or '{}')
             row = rows.get(session.last_route, rows.get(f'{route_provider}|{model}|{host}', {}))
-            bracket = ', '.join(f'{label}{minutes(row[key])}' for key,label in (('max_warm_gap','warm seen ≤'),('min_cold_gap','cold ≥')) if key in row)
+            bracket = ', '.join(f'{label}{minutes(gap)}' for gap,label in zip(_gaps(row,session.last_route),('warm seen ≤','cold ≥')) if gap is not None)
             return f'Cache: {provider} TTL {source}'+(f' ({bracket})' if bracket else '')
         label = f'Cache: {provider} {"1h" if ttl==3600 else minutes(ttl)} · last touch {age:.0f}m ago'
         if watcher: return label
@@ -122,7 +141,7 @@ def line(store, session, now, *, seconds=None, floor=0, watcher=False, pricing=T
         gap = age*60 if seconds is None else seconds
         if first_wake and seconds is not None: gap += age*60
         state = 'warm' if gap < ttl else 'cold'
-        price = f' (~${(warm if state=="warm" else cold):.2f}) · cold ~${cold:.2f}' if warm is not None and cold is not None else ''
+        price = (f' (~${cold:.2f})' if state=='cold' else f' (~${warm:.2f}) · cold ~${cold:.2f}') if warm is not None and cold is not None else ''
         edge = ttl-max(30,.05*ttl)
         next_hint = 'floor ≥ TTL: wakes cold' if floor>edge else f'next warm ≤{minutes(edge)}'
         text = f'{label} · {"this wake" if seconds is None else minutes(seconds)} {state}{price} · {next_hint}'
@@ -135,3 +154,64 @@ def display(counts):
     if counts.get('warm_wakes',0)+counts.get('cold_wakes',0) and not counts.get('unpriced_calls',0):
         return f'warm {counts.get("warm_wakes",0)} / cold {counts.get("cold_wakes",0)} · ~${counts.get("cost_microusd",0)/1e6:.2f}'
     return 'in / cached / written / out: '+ ' / '.join(str(counts.get(k,0)) for k in ('tokens_in','cache_read_tokens','cache_write_tokens','tokens_out'))
+
+
+# Keep-warm (#163): a ping pays one cache read of the chat's prefix to spare the next turn a cold rewrite.
+KEEP_WARM_MIN_TTL = 1800  # On shorter caches the pings cost more than the cold starts they prevent.
+KEEP_WARM_COLD_MARGIN = 60  # Never start a ping this close to the cache's end: a late ping is a cold write.
+
+
+def warm_lifetime(store, session):
+    """The cache lifetime a keep-warm ping can rely on: the route's known TTL, else the longest gap this route stayed warm."""
+    ttl, source = ttl_for_session(store, session)
+    if ttl or source == 'off': return ttl, source  # Caching turned off: old warm gaps say nothing now.
+    if not session or not session.last_route: return None, 'unknown'
+    provider, model, part = session.last_route.split('|', 2)
+    host = (urlsplit(_base(part)).hostname or '') if part else ''
+    rows = json.loads(store.get_meta('cache_routes') or '{}')
+    row = rows.get(session.last_route, rows.get(f'{provider}|{model}|{host}', {}))
+    warm, cold = _gaps(row, session.last_route)
+    # A warm gap is a lower bound on the lifetime, unless a shorter gap was already seen cold.
+    if warm and (cold is None or warm < cold): return warm, 'warm_seen'
+    return None, 'unknown'
+
+
+def _unknown_reason(store, session):
+    """Why keep-warm can't tell this route's cache lifetime, from its learned gaps (#203)."""
+    try:
+        provider, model, part = session.last_route.split('|', 2)
+        host = (urlsplit(_base(part)).hostname or '') if part else ''
+        rows = json.loads(store.get_meta('cache_routes') or '{}')
+        warm, cold = _gaps(rows.get(session.last_route, rows.get(f'{provider}|{model}|{host}', {})), session.last_route)
+    except Exception:
+        warm = cold = None
+    if warm and cold:
+        return f"this route's cache lifetime isn't known: it stayed warm across {minutes(warm)} but went cold after {minutes(cold)}"
+    return "this route's cache lifetime isn't known yet: no call has reused the cache after a gap"
+
+
+def keep_warm_plan(store, session, policy, now):
+    """When this chat's next keep-warm ping is due, or why there is none. Pure: reads the session and route rows only."""
+    if session is None or session.last_cache_touch_at is None or not session.last_route:
+        return {'reason': 'waiting for the first model call in this chat'}
+    touch = session.last_cache_touch_at
+    ttl, source = warm_lifetime(store, session)
+    if source == 'off':
+        return {'reason': 'prompt caching is off for this route', 'touch': touch}
+    if not ttl:
+        return {'reason': _unknown_reason(store, session), 'touch': touch}
+    if ttl < KEEP_WARM_MIN_TTL:
+        return {'reason': f'the cache lasts {minutes(ttl)}; keep-warm needs 30m or more', 'touch': touch, 'ttl': ttl}
+    if (session.last_prompt_tokens or 0) < policy.keep_warm_min_tokens:
+        return {'reason': f'the context is small ({session.last_prompt_tokens or 0} tokens), so a cold start is cheap', 'touch': touch, 'ttl': ttl}
+    if session.last_human_at is None or now - session.last_human_at >= policy.keep_warm_idle_hours * 3600:
+        return {'reason': f'resting: no message from you in {policy.keep_warm_idle_hours}h; it resumes when you write', 'touch': touch, 'ttl': ttl}
+    cold_at = touch + ttl - KEEP_WARM_COLD_MARGIN
+    if now >= cold_at:
+        return {'reason': 'the cache has gone cold; it resumes after the next model call', 'touch': touch, 'ttl': ttl}
+    return {'due_at': touch + ttl - max(120, .08 * ttl), 'cold_at': cold_at, 'touch': touch, 'ttl': ttl, 'source': source}
+
+
+def keep_warm_key(touch):
+    """One ping per cache touch: a real turn moves the touch, and the ping it would have needed is never made."""
+    return f'k:{touch:.17g}'

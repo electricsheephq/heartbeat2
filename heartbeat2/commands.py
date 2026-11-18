@@ -1,20 +1,31 @@
 """Compact /pulse controls; gateway-bound session is the only authority."""
+from dataclasses import replace
 from datetime import datetime, timedelta
 import json
 import re
 
-from .model import Wake, Session
+from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES, RUN_KEY_PREFIX, RUN_PAYLOAD
 from . import governor
 from . import cache
-from .policy import INJECTION_CONFIG, MESSAGING_PLATFORMS, owner_requested
+from .policy import INJECTION_CONFIG, LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, platform_refusal, session_platform, owner_requested, agreed_watcher, cap_counts, is_keep_warm, is_watcher, sleeps
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
-from .tool import session_env, Infeasible
+from .tool import session_env, Infeasible, filter_text
 
 DURATIONS = _DURATION.pattern+r'(?:\s*(?:,\s*)?(?:and\s*)?'+_DURATION.pattern+r')*'  # one way to split whitespace: linear
-HELP = ('/pulse status | list | ledger [7d] | why <id> | add in 2h <note> | '
+LIST_RECENT_FINISHED = 10
+FINISHED_STATUSES = FINISHED_WAKE_STATUSES
+HELP = ('/pulse status | desk | list [all] | ledger [7d] | why <id> | add in 2h <note> | '
         'add every 1d at 09:00 <note> | add when silent 24h <note> | '
-        'pause|resume|cancel <id|all> [for 3d] | off|on | '
+        'role every 1d [at 09:00] <charter> | role self <charter> | budget <id> <n>/day | '
+        'run <id> (queue now, usual checks) | test <id> (preview, nothing sent) | '
+        'pause|resume|cancel <id|all> [for 3d] | off|on | warm on|off (keep this chat\'s cache warm) | owntime on|off | '
         'quiet <22:00-07:30|off|default|for 3h> | ok|keep|slow|stop|watch <id>')
+
+
+def messages_count(delivered, in_flight, cap):
+    """Messages sent today against the cap. A running wake turn holds a slot until it ends; show it as in progress, not sent."""
+    sent = max(0, delivered - in_flight)
+    return f'{sent}/{cap}' + (f' (+{in_flight} in progress)' if in_flight else '')
 
 
 def quiet_until(engine, session_key, *, urgent=False, now=None):
@@ -29,13 +40,25 @@ def quiet_until(engine, session_key, *, urgent=False, now=None):
     return engine.policy.quiet_until(urgent=urgent, now=now)
 
 
+def quiet_window(store, policy, key, now):
+    """The quiet-hours range that applies in this chat and where it comes from, as quiet_until applies it (#173).
+
+    A chat range or off override wins over the profile's range; a `quiet for` override holds messages until its end
+    and leaves the range as it is. Returns (range, source, until): range '' means quiet hours are off."""
+    override = json.loads(store.get_meta('quiet:'+key) or '{}')
+    until = override['until'] if override.get('until', 0) > now else None
+    if 'range' in override: return override['range'], 'chat override', until
+    source = policy.quiet_hours_source() if hasattr(policy, 'quiet_hours_source') else 'settings'
+    return policy.quiet_hours, source, until
+
+
 def _activation(engine, session, wake):
     if not session.enabled: raise ValueError('this chat is off; use /pulse on')
+    active_count, global_active_count = cap_counts(engine.store, session.session_key, exclude_id=wake.id)
     gate = engine.policy.creation_gate(session_key=session.session_key, platform=session.platform,
         chat_type=session.chat_type, allow_gateway_injection=engine.injection_allowed(),
         creator='user', kind=wake.kind,
-        active_count=sum(w.status in {'active','proposed'} and w.id != wake.id for w in engine.store.list_wakes(session.session_key)),
-        global_active_count=sum(w.status in {'active','proposed'} and w.id != wake.id for w in engine.store.list_wakes()))
+        active_count=active_count, global_active_count=global_active_count)
     if not gate.allowed: raise ValueError(gate.reason + ('\n'+gate.detail if gate.detail else ''))
 
 
@@ -44,10 +67,10 @@ def _reschedule(engine,wake):
 
 
 def resume_timed(engine):
-    """Only command-paused items with an explicit timer may auto-resume."""
+    """Only command or agent_timed pauses with an explicit timer may auto-resume."""
     for wake in engine.store.list_wakes(status='paused'):
         until = float(engine.store.get_meta('resume_after:'+wake.id) or 0)
-        if not until or until > engine.clock.now() or wake.status_reason != 'command': continue
+        if not until or until > engine.clock.now() or wake.status_reason not in {'command','agent_timed'}: continue
         session = engine.store.get_session(wake.session_key)
         if session is None: continue
         try:
@@ -67,21 +90,99 @@ def resume_timed(engine):
             engine.store.set_meta('resume_after:'+wake.id, '')
 
 
-def _time(engine, epoch):
-    return datetime.fromtimestamp(epoch, engine.policy.resolved_timezone()).strftime('%Y-%m-%d %H:%M %Z') if epoch is not None else 'none'
+def _oneline(text):
+    return ' '.join(text.split())
 
 
-def _item(engine, wake):
-    due='paused · resumes on keep/resume' if wake.status=='paused' else 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
-    return f'{wake.id} {wake.status} · {wake.title or wake.note[:60]} · {wake.kind} · {due}' + (' · you asked' if owner_requested(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '')
+def _clip(text, limit):
+    """Shorten text at the last word break (any whitespace) within limit and mark the cut with "…".
+    A single word longer than the limit is cut inside the word."""
+    if len(text) <= limit: return text
+    head = text[:limit-1]
+    brk = re.search(r'\s\S*$', head)
+    cut = head[:brk.start()] if brk and brk.start() > 0 else head
+    return cut.rstrip(' \t\r\n.,;:·') + '…'
+
+
+def _time(engine, epoch, *, compact=False):
+    if epoch is None: return 'none'
+    tz = engine.policy.resolved_timezone()
+    fmt = ('%H:%M' if local_day(epoch,tz)==local_day(engine.clock.now(),tz) else '%a %H:%M') if compact else '%Y-%m-%d %H:%M %Z'
+    return datetime.fromtimestamp(epoch,tz).strftime(fmt)
+
+
+def _paused(engine, wake, *, compact=False):
+    # Only a governor pause takes keep; explicit command/agent timers may auto-resume.
+    if wake.status_reason.startswith('governor:'): return 'paused · resumes on keep/resume'
+    until = float(engine.store.get_meta('resume_after:'+wake.id) or 0) if wake.status_reason in {'command','agent_timed'} else 0
+    return f'paused · resumes {_time(engine, until, compact=compact)} or on resume' if until else 'paused · resumes on resume'
+
+
+def _role_today(engine, wake):
+    """(turns today, daily budget) for a role; the poller rests a role once today reaches its budget."""
+    return engine.store.dispatches_today(wake.id, engine.policy.resolved_timezone()), engine.policy.role_budget(wake)
+
+
+def _resting(engine, wake, today_budget=None):
+    """True for an active role that has used today's budget: it takes no turn until tomorrow, whatever next_due_at says.
+    Pass the (today, budget) pair already read for this render so the header and the row agree across midnight."""
+    if not wake.role or wake.status != 'active': return False
+    today, budget = today_budget or _role_today(engine, wake)
+    return today >= budget
+
+
+def _sleeping(engine, wake):
+    """True for an active wake the gate holds because the chat is asleep (#62): it takes no turn until the owner writes.
+    A report-back still runs for results of watchers the owner asked for, as the gate allows."""
+    if wake.status != 'active' or not sleeps(wake): return False
+    if not engine.policy.asleep(engine.store.get_session(wake.session_key), engine.clock.now()): return False
+    from .desk import agreed_reports
+    return not (wake.trigger_json.get('report_back') and agreed_reports(engine.store, wake.session_key))
+
+
+def _item(engine, wake, today_budget=None):
+    today_budget = (today_budget or _role_today(engine, wake)) if wake.role else None
+    if wake.status in FINISHED_STATUSES: due = ''
+    elif wake.status == 'paused': due = _paused(engine, wake)
+    elif today_budget and wake.status == 'active' and today_budget[0] >= today_budget[1]: due = 'resting until tomorrow'
+    else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
+    role = f' · today {today_budget[0]}/{today_budget[1]}' if today_budget else ''
+    if is_keep_warm(wake) and wake.status == 'active' and wake.next_due_at is None: due = 'no ping due now'
+    kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
+    held = app_closed_hold(engine, wake)
+    if not held and _sleeping(engine, wake): held = 'asleep until you write'
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) or agreed_watcher(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '') + (' · '+held if held else '')
+
+
+def app_closed_hold(engine, wake):
+    if wake.platform not in LOCAL_SURFACES or wake.status != 'active' or is_keep_warm(wake): return ''
+    since = [float(stamp) for o in engine.store.list_occurrences(wake.id, state='pending')
+             if o.error == 'app_closed' and (stamp := engine.store.get_meta('held_since:'+o.id))]
+    return 'held: app window is closed · since '+_time(engine,min(since)) if since else ''
 
 
 def _occurrences(engine, wake):
     reasons={'held_unanswered':'held: waiting for your reply', 'held_daily_cap':'held: waiting for daily capacity', 'held_paused':'held: wake paused',
+        'app_closed':'held: app window is closed', 'held_asleep':'held: chat asleep until you write',
+        'asleep':'dropped: chat asleep (no message from you for '+str(engine.policy.sleep_after_days)+'+ days)',
         'unanswered':'dropped: unanswered mute', 'daily_model_cap':f'dropped: daily model cap ({engine.policy.max_model_wakes_per_day})',
         'daily_message_cap':f'dropped: daily message cap ({engine.policy.max_messages_per_day})', 'expired_held':'expired while held'}
+    def held_clause(o):
+        held = o.held_reason
+        if not held or held == o.error: return ''
+        if held in {'held_unanswered','held_daily_cap','held_paused','held_asleep'}:
+            return ' · was '+reasons[held]
+        if held.startswith(('message_held:', 'reported:')):
+            code = held.split(':', 1)[1]
+            label = {'quiet_hours':'quiet hours', 'daily_message_cap':'daily message cap',
+                     'unanswered':'unanswered mute'}.get(code, code.replace('_', ' '))
+            return ' · message held: '+label
+        return ' · was held: '+held.replace('_', ' ')
+    def held_since(o):
+        stamp = engine.store.get_meta('held_since:'+o.id)
+        return float(stamp) if stamp else o.held_since
     return '\n'.join(f'{o.dedupe_key} · {o.state} · {reasons.get(o.error,o.error.replace("_"," ") or o.outcome or "none")} · '
-        f'matched/created {_time(engine,o.matched_at) if o.matched_at is not None else _time(engine,o.created_at) if o.created_at else "before v0.1.2"} · held-since {_time(engine,o.held_since)} · delivered {"yes" if o.delivered else "no"}'
+        f'matched/created {_time(engine,o.matched_at) if o.matched_at is not None else _time(engine,o.created_at) if o.created_at else "before v0.1.2"} · held-since {_time(engine,held_since(o))} · delivered {"yes" if o.delivered else "no"}'+held_clause(o)
         for o in engine.store.list_occurrences(wake.id)[-10:])
 
 
@@ -96,17 +197,19 @@ def _ledger(engine, key, days):
                 if isinstance(value, int): counts[name] = counts.get(name, 0)+value
         fires, skips = counts.get('fires',0), counts.get('gated_skips',0)
         valuable, turns = counts.get('valuable',0), counts.get('model_turns',0)
-        verdict = 'useful' if valuable else 'no value yet' if turns else 'waiting'
-        lines.append(f'{wake.id} {wake.title or wake.note[:40]}: {fires} · {counts.get("checks",0)} · {turns} · '
+        verdict = 'keep-warm pings' if is_keep_warm(wake) else 'useful' if valuable else 'no value yet' if turns else 'waiting'
+        lines.append(f'{wake.id} {_oneline(wake.title) or _clip(_oneline(wake.note),40)}: {fires} · {counts.get("checks",0)} · {turns} · '
                      f'{counts.get("delivered",0)} · {counts.get("engaged",0)} · '
                      f'{cache.display(counts)} · {counts.get("provider_deferrals",0)} · {counts.get("no_verdict",0)} · {verdict}')
     return '\n'.join(lines)
 
 
-def _add(engine, session, text):
+def _add(engine, session, text, *, role=False):
     clock = re.fullmatch(r'(\d{1,2}):(\d{2})(?:\s*([ap])\.?m\b\.?)?\s+(.+)', text, re.I|re.DOTALL)
     match = re.fullmatch(r'in (?P<duration>'+DURATIONS+r')\s+(?P<note>.+)', text, re.I|re.DOTALL)
-    if clock:
+    if role and text.startswith('self '):
+        trigger, note = {'kind':'self'}, text[5:].strip()
+    elif clock:
         hour = int(clock[1])
         if not clock[3] and re.match(r'[ap]\.?m\b', clock[4], re.I): raise ValueError('add a note after the time')
         if clock[3]:
@@ -134,12 +237,16 @@ def _add(engine, session, text):
             if not match: raise ValueError('use add in 2h <note>, add 16:30 <note>, every 1d at 09:00 <note>, or when silent 24h <note>')
             parse_duration(match['duration'])
             trigger, note = {'kind':'owner_silent','after':match['duration']}, match['note']
-    wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command',
-        platform=session.platform, chat_type=session.chat_type, chat_id=session.chat_id,
-        armed_session_id=session.current_session_id, title=note[:80])
-    _activation(engine,session,wake)
-    result = engine.tool.prepare(wake, {'trigger':trigger})
-    created = engine.store.create_wake(result.wake)
+    if role and trigger['kind'] not in {'every','self'}:
+        raise ValueError('role_needs_recurring')
+    with engine.store.atomic():
+        session=engine.store.get_session(session.session_key)
+        wake = Wake(session.session_key, note, trigger['kind'], creator='user', created_in='command', role=role,
+            platform=session.platform, chat_type=session.chat_type, chat_id=session.chat_id,
+            armed_session_id=session.current_session_id, title=_clip(note,80))
+        _activation(engine,session,wake)
+        result = engine.tool.prepare(wake, {'trigger':trigger})
+        created = engine.store.create_wake(result.wake)
     return _item(engine, created)+_clamps(result.clamped)+'\n'+engine.tool.cache_result(created)+'\n'+engine.tool.receipt(created,session)
 
 
@@ -147,48 +254,219 @@ def _clamps(clamped):
     return ''.join(f'\nClamped {key}: {value}' for key,value in clamped.items())
 
 
+class _DryRun(Exception):
+    pass
+
+
+def _test(engine,w,session,cache_line,wake_cache=''):
+    # Preview what dispatch would send next: a waiting occurrence (its payload and any retry backoff), else a plain
+    # scheduled fire. Dispatch claims first, so the turn carries the next attempt and the dispatch cache line.
+    waiting=[x for x in engine.store.list_occurrences(w.id) if x.state=='pending']
+    key=('s:'+session.episode_id if w.kind=='owner_silent' and session is not None and session.episode_id else
+         f't:{engine.clock.now():.17g}')
+    candidates=[replace(x,attempt=(x.attempt or 0)+1) for x in waiting] or [Occurrence(w.id,key,attempt=1)]
+    try:
+        with engine.store.atomic():
+            # When HeartBeat is off or paused for the whole profile, tick() refuses before gate() and the claim barrier after it: nothing is sent.
+            off=(('plugin_off',True,None) if not engine.policy.enabled else ('paused_all',True,None) if engine.paused() else None)
+            # Dispatch walks waiting occurrences in order and sends the first that passes; if none passes, the first one's reason applies.
+            # One accepted three times without an acknowledgement passes the gate but is dropped at the claim, and the walk goes on.
+            unacknowledged=lambda c:int(engine.store.get_meta('accepted:'+c.id) or 0)>=3
+            dies=lambda c:bool(waiting) and unacknowledged(c)
+            # Each drop counts as an error, and enough in a row pause the wake before its next turn is sent; the
+            # report-back is never paused (governor.error).
+            pauses=lambda x,drops:bool(drops) and x.error_streak+drops>=engine.policy.error_pause_after and not x.trigger_json.get('report_back')
+            verdicts=[off or engine.gate(w,c,session) for c in candidates]
+            passing=[n for n,v in enumerate(verdicts) if not v[0]]
+            pick=next((n for n in passing if not dies(candidates[n])),passing[0] if passing else 0)
+            o,(reason,defer,until)=candidates[pick],verdicts[pick]
+            # Once paused, a watcher's waiting match, or a turn already held, is held; any other one is skipped (Poller.gate).
+            dropped=sum(dies(candidates[n]) for n in passing if n<pick)
+            if not reason and dies(o):
+                reason,defer,until='ack_timeout',False,None
+            elif not reason and pauses(w,dropped):
+                reason,defer,until='drop_pauses',is_watcher(w) or o.held_since is not None,None
+            ahead=''
+            # After an evaluation error a tick leaves the wake alone until its retry time (Poller.evaluate).
+            backoff_until=lambda x:float(engine.store.get_meta('eval_not_before:'+x.id) or 0)
+            if not off and engine.clock.now()<backoff_until(w):  # Before any gate: a tick doesn't reach this wake at all.
+                reason,defer,until='eval_backoff',True,backoff_until(w)
+            if not reason:
+                # The tick walks every waiting occurrence in order: an earlier one in this chat that passes takes the turn first.
+                # One accepted three times without an acknowledgement is dropped instead, and once another wake's drops pause
+                # it, its later turns are held or skipped: neither takes the turn (#167).
+                def passes(other,x):
+                    try: return engine.clock.now()>=backoff_until(other) and not engine.gate(other,x,session)[0]
+                    except Exception: return False  # A tick isolates a broken wake (Poller.evaluate); so does the preview.
+                drops={}
+                for x in engine.store.list_occurrences(state='pending'):
+                    if x.wake_id==w.id and (not waiting or x.dedupe_key==o.dedupe_key): break
+                    other=engine.store.get_wake(x.wake_id)
+                    if x.wake_id==w.id or other is None or other.session_key!=w.session_key: continue
+                    if pauses(other,drops.get(other.id,0)) or not passes(other,x): continue
+                    if unacknowledged(x):
+                        drops[other.id]=drops.get(other.id,0)+1
+                        continue
+                    reason,defer,until,ahead='in_flight',True,None,x.wake_id
+                    break
+            retry=None
+            if reason in {'not_before','app_closed'}:
+                # The stored time is either a failed delivery's retry or an earlier hold's end (for example quiet hours).
+                until=float(engine.store.get_meta('not_before:'+o.id) or 0) or None
+                retry=o.error=='inject_failed' or int(engine.store.get_meta('inject_failures:'+o.id) or 0)>0
+            message_held=engine.message_hold_reason(w,session)
+            text=engine.render_occurrence(w,replace(o,force_silent=bool(message_held)),session,
+                                         held_by=reason if reason and defer and not off else (o.error if waiting else ''),
+                                         message_held=message_held,cache_line=wake_cache,held_reports='')
+            raise _DryRun
+    except _DryRun: pass
+    reasons={'quiet_hours':'quiet hours','busy':'chat is busy','daily_model_cap':'daily model cap',
+        'daily_message_cap':'daily message cap','role_budget':'daily role budget','daily_cost_cap':'daily cost cap',
+        'session_off':'this chat is off','session_paused':'this chat is paused','injection_disabled':'gateway injection is disabled',
+        'wake_inactive':'wake is not active','held_paused':'wake is paused','wake_spacing':'wake spacing',
+        'in_flight':'another wake is running','provider_unavailable':'provider unavailable','dm_only':'DMs only',
+        'plugin_off':'HeartBeat 2.0 is off in settings','paused_all':'HeartBeat 2.0 is paused',
+        'not_before':'waiting to retry a failed delivery' if retry else 'waiting out an earlier hold',
+        'app_closed':'the app window is closed',
+        'checkin_not_due':'the owner has not been quiet long enough','ack_timeout':'not acknowledged after three attempts',
+        'eval_backoff':'retrying after an error','drop_pauses':'an earlier unacknowledged turn pauses the wake first'}
+    if ahead: reasons['in_flight']=f'another wake ({ahead}) takes the turn first'
+
+    # A watcher with nothing waiting runs only when what it watches changes; its probe isn't run here.
+    label='Would run on a match now: ' if w.kind in PROBE_KINDS|EVENT_KINDS and not waiting else 'Would run now: '
+    if w.kind == 'owner_silent' and not w.trigger_json.get('builtin') and not waiting:
+        label = 'Would run once the owner has been quiet long enough: '
+    verdict=label+('no — '+reasons.get(reason,reason)+
+        (' until '+_time(engine,until) if until is not None else '')+
+        (' (held; it would wait)' if defer else ' (it would be dropped)' if reason=='ack_timeout' else ' (it would be skipped)') if reason else 'yes')
+    next_fire=(_time(engine,w.next_due_at) if w.kind in TIME_KINDS else f'on {w.kind} events' if w.kind in EVENT_KINDS else
+               'every '+cache.minutes(float(w.trigger_json["check_every"])) if w.kind in PROBE_KINDS else 'on owner silence')
+    return '\n'.join([f'Test {w.id} (dry run: nothing sent, no model call)',verdict,'Next: '+next_fire,
+                      *([cache_line] if cache_line else []),'Wake text:',_clip(text,1500)])
+
+
 def handle(raw_args, runtime):
     key = session_env('HERMES_SESSION_KEY')
     if not key or key == 'default': return 'Error: /pulse needs the invoking gateway session.'
     try:
         engine = runtime.get_engine()
-        engine.refresh()
+        engine.refresh()  # Never inside a transaction: refresh takes the policy lock before the store lock.
         action, _, rest = (raw_args or 'status').strip().partition(' ')
         rest = rest.strip()
+        preview=engine.store.get_wake(rest) if action=='test' else None
+        cache_line=engine.tool.cache_result(preview) if preview and preview.session_key==key else ''
+        wake_cache=engine.cache_line(preview) if preview and preview.session_key==key else ''
         with engine.store.atomic():
             session = engine.store.get_session(key)
             bound={name:session_env('HERMES_SESSION_'+name.upper()) for name in ('platform','chat_type','chat_id')}
-            if bound['platform'] in MESSAGING_PLATFORMS:
+            bound['platform']=session_platform(bound['platform'],engine.ctx)
+            # Hermes commands bind platform=local outside the model turn's surface scope. Only a known
+            # app surface in this same chat is a valid fallback; local itself never establishes delivery.
+            if bound['platform']=='local':
+                if session and session.platform in LOCAL_SURFACES:
+                    bound['platform']=session.platform
+                elif session is None:
+                    return 'Send a message in this chat first, then try /pulse again.'
+                elif action not in {'run','test'} and platform_refusal(session.platform):
+                    return platform_refusal(session.platform)  # a CLI chat gets the CLI's own refusal
+            app_off=action=='off' and session is not None and session.platform in LOCAL_SURFACES
+            if action not in {'run','test'} and not app_off and bound['platform'] and not deliverable_platform(bound['platform']):
+                return platform_refusal(bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
+            if action not in {'run','test'} and deliverable_platform(bound['platform']):
                 engine.store.upsert_session(Session(key,**bound,current_session_id=session_env('HERMES_SESSION_ID')))
                 session=engine.store.get_session(key)
                 engine.store.cas_session(key,{'platform':session.platform,'chat_type':session.chat_type,'chat_id':session.chat_id},**bound)
                 session=engine.store.get_session(key)
-            if session is None or session.platform not in MESSAGING_PLATFORMS:
-                return 'Error: /pulse needs a known messaging-gateway session.'
+            if session is None or not (app_off or deliverable_platform(session.platform)):
+                return platform_refusal(session.platform if session else bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
             if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
+        if action in {'add','role'}: return _add(engine,session,rest,role=action=='role')
+        if action == 'warm' and rest in {'','on','off'}: return _warm(engine,key,rest)
+        if action == 'owntime' and rest in {'','on','off'}: return _owntime(engine,key,rest)
+        with engine.store.atomic():
+            session=engine.store.get_session(key)
+            if action in {'run','test'}:
+                if not re.fullmatch(r'\S+',rest) or rest=='all': raise ValueError(action+' expects one item id')
+                wake=engine.store.get_wake(rest)
+                if wake is None or wake.session_key!=key: return 'Error: unknown item in this chat.'
+                if wake.status in FINISHED_STATUSES: raise ValueError('it has finished')
+                if action=='test': return _test(engine,wake,session,cache_line,wake_cache)
+                if wake.status=='proposed': raise ValueError(f'approve it first with /pulse ok {wake.id}')
+                if wake.status=='paused': raise ValueError(f'resume it first with /pulse resume {wake.id}')
+                if wake.kind=='at': raise ValueError(f'a one-time reminder fires once at its time; preview it with /pulse test {wake.id}')
+                if wake.kind in PROBE_KINDS|EVENT_KINDS:
+                    raise ValueError(f'a watcher fires when what it watches changes; preview it with /pulse test {wake.id}')
+                if wake.kind=='owner_silent' or wake.trigger_json.get('builtin'):
+                    raise ValueError(f'this one fires on its own when its time comes; preview it with /pulse test {wake.id}')
+                occurrences=engine.store.list_occurrences(wake.id)
+                if any(o.state in {'claimed','started'} for o in occurrences): return f'{wake.id} is running now.'
+                if any(o.state=='pending' for o in occurrences): return f'Already queued: {wake.id} runs on the next check.'
+                now=engine.clock.now()
+                engine.store.add_occurrence(wake.id,f'{RUN_KEY_PREFIX}{now:.17g}',payload=[dict(RUN_PAYLOAD)])
+                engine.signal()
+                return f'Queued {wake.id}: it runs on the next check, under the usual checks (busy chat, quiet hours, daily caps).'
+            if action == 'desk' and not rest:
+                from .desk import render_desk
+                return render_desk(engine,session,clock=engine.clock,timezone=engine.policy.resolved_timezone(),policy=engine.policy)
             if action == 'status' and not rest:
                 status = engine.status()
                 q = quiet_until(engine,key)
-                override=json.loads(engine.store.get_meta('quiet:'+key) or '{}')
-                quiet_label='until '+_time(engine,q) if q else 'off now'
-                if 'range' in override:
-                    quiet_label=(override['range']+' (chat override)' if override['range'] else 'off for this chat (override)')
-                elif override.get('until',0)>engine.clock.now(): quiet_label+=' (chat override)'
+                state='on until '+_time(engine,q) if q else 'off now'
+                # The range and where it comes from are always shown, so the default is known before it first holds a wake (#173).
+                window,source,until=quiet_window(engine.store,engine.policy,key,engine.clock.now())
+                if source=='chat override':
+                    quiet_label=(window+' (chat override), '+state if window else 'off for this chat (override)')
+                else:
+                    quiet_label=(f'{window} ({source}), ' if window else 'off in settings, ')+state
+                    if until is not None: quiet_label+=' (chat override)'
+                zone_name,zone_source=engine.policy.timezone_source()
+                used,profile_used=cap_counts(engine.store,key)
                 daily = engine.daily(key)
                 counts={}
+                warm={}
                 for wake in engine.store.list_wakes(key):
                     row=engine.store.get_ledger(local_day(engine.clock.now(),engine.policy.resolved_timezone()),wake.id) or {}
                     for name,value in row.items():
-                        if isinstance(value,int): counts[name]=counts.get(name,0)+value
+                        # Keep-warm spend is shown on its own line, never mixed into wake turns (#163).
+                        if isinstance(value,int):
+                            target=warm if is_keep_warm(wake) else counts
+                            target[name]=target.get(name,0)+value
                 active = [w for w in engine.store.list_wakes(key) if w.status in {'active','proposed','paused'}]
-                next_due = min((x for w in active if w.status=='active' for x in (w.next_due_at,w.deadline_at) if x is not None),default=None)
+                role_today = {w.id: _role_today(engine,w) for w in active if w.role}  # read once: header and rows agree
+                next_due = min((x for w in active if w.status=='active' and not is_keep_warm(w) and not _resting(engine,w,role_today.get(w.id)) and not _sleeping(engine,w)
+                                for x in (w.next_due_at,w.deadline_at) if x is not None),default=None)
                 lines = [f'HeartBeat 2.0: {"on" if session.enabled and engine.policy.enabled else "off"} · poller {status["state"]}'
                          + (f' ({status["reason"]})' if status.get('reason') else ''),
                          f'allow_gateway_injection: {str(engine.injection_allowed()).lower()}',
-                         f'Local time: {_time(engine,engine.clock.now())} · quiet: {quiet_label}',
-                         f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {daily["delivered"]}/{engine.policy.max_messages_per_day} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
-                         f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}']
-                held=sum(o.held_since is not None for o in engine.store.list_occurrences(session_key=key,state='pending'))
+                         f'Local time: {_time(engine,engine.clock.now())} · zone {zone_name} ({zone_source}) · quiet: {quiet_label}',
+                         f'Today: fires {counts.get("fires",0)} · checks {counts.get("checks",0)} · model wakes {daily["model_turns"]}/{engine.policy.max_model_wakes_per_day} · messages {messages_count(daily["delivered"],engine.store.messages_in_flight(key),engine.policy.max_messages_per_day)} · engaged {counts.get("engaged",0)} · {cache.display(counts)}',
+                         f'Active items: {sum(w.status=="active" for w in active)} · next due: {_time(engine,next_due)}',
+                         # What the create limits count: active and proposed items, not the check-in, own time or keep-warm (#171).
+                         f'Limits: {used} of {engine.policy.max_active} items in this chat, {profile_used} of {engine.policy.max_active_profile} in this profile '
+                         "(check-in, own time and keep-warm don't count; the owner can raise max_active / max_active_profile in settings)"]
+                if engine.policy.asleep(session,engine.clock.now()):
+                    lines.append(f'Asleep: no message from you for {engine.policy.sleep_after_days}+ days, so your agent\'s own wakes, roles '
+                                 'and own time are not running and its watchers hold their results; all resume when you write '
+                                 '(any message, not a /pulse command).')
+                if engine.policy.timezone_pin_notice(): lines.append(engine.policy.timezone_pin_notice())
+                from .registration import version_skew
+                if skew := version_skew(): lines.append(skew)
+                bridge_id=getattr(runtime,'voice_bridge_id',engine.policy.voice_bridge)
+                if bridge_id:
+                    from .voice_bridge import voice_bridge_for
+                    lines.append(f'voice bridge: {bridge_id} ({"connected" if voice_bridge_for(engine) else "not connected"})')
+                from .notifier import notifier_line
+                notice=notifier_line(engine,key)
+                if notice: lines.append(notice)
+                held=sum(o.held_since is not None or bool(engine.store.get_meta('held_since:'+o.id))
+                         for o in engine.store.list_occurrences(session_key=key,state='pending'))
+                kw=engine.store.get_wake(keep_warm_id(key))
+                if kw is not None and kw.status in {'active','paused'}: lines.append(_keep_warm_line(engine,session,kw,warm))
+                from .desk import cost_line
+                cost=cost_line(engine.store,key,engine.policy.resolved_timezone(),engine.policy)
+                if cost: lines.append(cost)
+                if engine.policy.own_time_hours or engine.store.get_meta('own_time_off:'+key)=='1' or engine.store.get_meta('own_time_on:'+key)=='1':
+                    lines.append('Own time: '+own_time_label(engine,key))
                 if held: lines.append(f'Held items: {held}')
                 if engine.settings_notice(): lines.append(engine.settings_notice())
                 if cache.ttl_for_session(engine.store,session)==(300,'hermes'):
@@ -198,17 +476,36 @@ def handle(raw_args, runtime):
                     lines.append(f'Provider gate: provider_unavailable ({health["class"]}) · next recovery attempt: {_time(engine,health["until"])}; any successful model call clears it.')
                 if status.get('state')=='stalled': lines.append('Stalled since '+_time(engine,status.get('since')))
                 if not engine.injection_allowed(): lines.append(INJECTION_CONFIG)
-                lines.extend(_item(engine,w) for w in active)
-                lines.extend(f'{w.id}: keep / slow / stop / watch' for w in active if w.status_reason.startswith('governor:'))
+                lines.extend(_item(engine,w,role_today.get(w.id)) for w in active)
+                lines.extend(f'{w.id}: keep / slow / stop / watch' for w in active if w.status_reason.startswith('governor:') and not is_keep_warm(w))
                 return '\n'.join(lines)
-            if action == 'list' and not rest:
-                return '\n'.join(_item(engine,w) for w in engine.store.list_wakes(key)) or 'No wakes or watchers in this chat.'
+            if action == 'list' and rest in {'','all'}:
+                wakes = engine.store.list_wakes(key)
+                # list_wakes is ordered by created_at, so the default keeps the newest finished items; creation time never changes.
+                recent = {w.id for w in [w for w in wakes if w.status in FINISHED_STATUSES][-LIST_RECENT_FINISHED:]}
+                visible = wakes if rest=='all' else [w for w in wakes if w.status not in FINISHED_STATUSES or w.id in recent]
+                lines = [_item(engine,w) for w in visible]
+                hidden = len(wakes)-len(visible)
+                if hidden: lines.append(f'{hidden} older finished item{"s" if hidden!=1 else ""} hidden; /pulse list all')
+                return '\n'.join(lines) or 'No wakes or watchers in this chat.'
             if action == 'ledger':
                 if not re.fullmatch(r'\d+d',rest or '7d'): raise ValueError('ledger expects 7d')
                 days = int((rest or '7d')[:-1])
                 if not 1 <= days <= engine.policy.ledger_days: raise ValueError('ledger range exceeds retained days')
                 return _ledger(engine,key,days)
-            if action == 'add': return _add(engine,session,rest)
+            if action == 'budget':
+                match = re.fullmatch(r'(\S+)\s+(\d+)/day',rest)
+                if not match: raise ValueError('budget expects <id> <n>/day')
+                wake = engine.store.get_wake(match[1])
+                if wake is None or wake.session_key != key: raise ValueError('unknown item in this chat')
+                if not wake.role: raise ValueError('budget applies to roles')
+                budget = max(1,min(int(match[2]),engine.policy.role_turns_per_day_max))
+                with engine.store.atomic():
+                    if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,budget_turns_per_day=budget):
+                        raise ValueError('concurrent item change')
+                    # Record the owner's own number: a temporarily lower profile maximum must not shrink their ceiling.
+                    engine.store.set_owner_budget(wake.id,max(1,int(match[2])))
+                return _item(engine,engine.store.get_wake(wake.id))
             if action in {'off','on'} and not rest:
                 if not engine.store.cas_session(key, {'enabled':session.enabled}, enabled=action=='on'):
                     raise ValueError('concurrent session change')
@@ -240,7 +537,7 @@ def handle(raw_args, runtime):
             if duration and action != 'pause': raise ValueError('for is supported only with pause')
             seconds = parse_duration(duration) if duration else None
             if wid == 'all' and action in {'pause','resume','cancel'}:
-                wakes = engine.store.list_wakes(key)
+                wakes = [w for w in engine.store.list_wakes(key) if w.status not in FINISHED_STATUSES]
             else:
                 wake = engine.store.get_wake(wid)
                 if wake is None or wake.session_key != key: return 'Error: unknown item in this chat.'
@@ -248,8 +545,9 @@ def handle(raw_args, runtime):
             lines = []
             for wake in wakes:
                 if action == 'why':
-                    reason=wake.reason or ('you asked (via /pulse add)' if wake.creator=='user' else 'you asked in chat' if owner_requested(wake) else 'the named task')
-                    return f'{_item(engine,wake)}\nWhy: {reason}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\nFires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}\n'+_occurrences(engine,wake)
+                    reason=wake.reason or ('you asked (via /pulse add)' if wake.creator=='user' else 'you asked in chat' if owner_requested(wake) or agreed_watcher(wake) else 'the named task')
+                    filters=filter_text(wake)
+                    return f'{_item(engine,wake)}\nWhy: {reason}\nNote: {wake.note}\nStatus reason: {wake.status_reason or "none"}\n'+(f'Filters: {filters.strip()}\n' if filters else '')+f'Fires {wake.fires}, no-ops {wake.noop_streak}, ignored {wake.ignored_streak}, errors {wake.error_streak}\n'+_occurrences(engine,wake)
                 try:
                     with engine.store.atomic():
                         lines.append(_transition(engine,session,wake,action,seconds))
@@ -265,8 +563,10 @@ def handle(raw_args, runtime):
 
 
 def _transition(engine,session,wake,action,seconds):
-    if wake.status in {'done','cancelled','expired','failed','orphaned'}:
+    if wake.status in FINISHED_STATUSES:
         raise ValueError('item is terminal')
+    if is_keep_warm(wake) and action not in {'pause','cancel','stop'}:
+        raise ValueError('keep-warm is turned on with /pulse warm on and off with /pulse warm off')
     if action in {'keep','slow'}:
         if wake.status!='paused' or not wake.status_reason.startswith('governor:'):
             raise ValueError('keep/slow answer a governor card; use /pulse resume')
@@ -276,8 +576,11 @@ def _transition(engine,session,wake,action,seconds):
         return _item(engine,engine.store.get_wake(wake.id)) + (f'\nNew cadence: {result["cadence_s"]:g} seconds.\n{result.get("cache","")}' if action=='slow' else '')
     if wake.status=='proposed' and action not in {'ok','cancel','stop'}:
         raise ValueError('proposed item: approve with /pulse ok or cancel')
-    if action=='pause' and wake.status!='active': raise ValueError('pause needs an active item')
+    if action=='pause' and wake.status!='active' and not (wake.status=='paused' and wake.status_reason=='agent_timed'):
+        raise ValueError('pause needs an active item')
     if action=='watch' and wake.status not in {'active','paused'}: raise ValueError('watch needs an active or paused item')
+    if action=='watch' and (wake.role or wake.trigger_json.get('own_time')):
+        raise ValueError('roles and own time stay recurring; use /pulse slow, /pulse budget or /pulse cancel')
     if action=='resume' and wake.status!='paused': raise ValueError('resume needs a paused item')
     if action=='ok' and wake.status!='proposed': raise ValueError('ok needs a proposed item')
     clamps={}
@@ -298,3 +601,113 @@ def _transition(engine,session,wake,action,seconds):
     if action in {'ok','resume'}: output+='\n'+engine.tool.receipt(engine.store.get_wake(wake.id),session)
     if action=='watch': output+='\nPaused. Ask your agent to turn it into a watcher (pulse update with a file, process, url or command trigger).'
     return output
+
+
+def keep_warm_id(session_key):
+    import hashlib
+    return 'warm_'+hashlib.sha256(session_key.encode()).hexdigest()[:16]
+
+
+def _keep_warm_line(engine, session, wake, counts):
+    pings = counts.get('model_turns', 0)
+    spend = (f' · ~${counts.get("cost_microusd",0)/1e6:.2f}' if pings and not counts.get('unpriced_calls',0) else '')
+    head = f'Keep-warm: {"on" if wake.status=="active" else "paused"} · pings today {pings}{spend}'
+    if wake.status != 'active': return head + ' · /pulse warm on turns it back on'
+    plan = cache.keep_warm_plan(engine.store, session, engine.policy, engine.clock.now())
+    if 'due_at' in plan:
+        return head + f' · next ping {_time(engine,plan["due_at"])} (cache {cache.minutes(plan["ttl"])}) · it pauses after {engine.policy.keep_warm_idle_hours}h without a message from you'
+    return head + ' · no ping now: ' + plan['reason']
+
+
+def own_time_label(engine, key):
+    """Whether own time runs in this chat, for /pulse owntime and status (#175, #177)."""
+    hours = engine.policy.own_time_hours
+    if not hours: return 'off for this profile (own_time_hours is 0 in settings)'
+    session = engine.store.get_session(key)
+    if session is None: return 'off: this chat has no session yet'
+    refusal = engine.own_time_refusal(session, key)
+    if refusal == 'chat_off': return 'off in this chat (/pulse owntime on turns it back on)'
+    if refusal == 'not_opted_in': return 'off in this group or topic until you turn it on (/pulse owntime on runs it here)'
+    if refusal == 'dm_only': return 'off here: dm_only is on, so own time runs only in direct chats'
+    return f'on in this chat, about every {hours:g}h (/pulse owntime off turns it off here)'
+
+
+def _owntime(engine, key, rest):
+    """/pulse owntime on|off: own time in this one chat or topic (#175). Each topic of a group is its own chat.
+
+    Direct chats have own time unless the owner turns it off; a group or topic only once the owner turns it on (#177)."""
+    import hashlib
+    with engine.store.atomic():
+        if rest:
+            engine.store.set_meta('own_time_off:'+key, '1' if rest == 'off' else '')
+            engine.store.set_meta('own_time_on:'+key, '1' if rest == 'on' else '')
+        if rest == 'off':
+            # Off takes effect now, not at the next check: a turn queued or handed to the gateway but not yet started never
+            # starts (its turn arrives stale and stays silent). A turn already running finishes. A paused wake stays paused,
+            # so a governor pause survives off and on; its queued turns end here too.
+            wid = 'owntime_'+hashlib.sha256(key.encode()).hexdigest()[:16]
+            wake = engine.store.get_wake(wid)
+            if wake is not None and wake.status in {'active','proposed'}:
+                if not engine.store.cas_wake(wid,wake.status,expected_version=wake.version,status='cancelled',status_reason='chat_off'):
+                    raise ValueError('concurrent item change')
+            if wake is not None and wake.status in {'active','proposed','paused'}:
+                engine.cancel_occurrences(wid,'chat_off',preserve_started=True)
+        label = own_time_label(engine, key)
+    if rest: engine.signal()  # The next check re-arms this chat's own time after on.
+    return 'Own time: ' + label
+
+
+def _warm(engine, key, rest):
+    """/pulse warm on|off: the owner's per-chat cache keep-warm (#163). Silent pings; the owner pays for them, so only they turn it on."""
+    wid = keep_warm_id(key)
+    with engine.store.atomic():
+        session, now = engine.store.get_session(key), engine.clock.now()
+        wake = engine.store.get_wake(wid)
+        if rest == '':
+            if wake is None or wake.status not in {'active','paused'}: return 'Keep-warm is off for this chat. /pulse warm on turns it on.'
+            return _keep_warm_line(engine, session, wake, engine.store.get_ledger(local_day(now,engine.policy.resolved_timezone()),wid) or {})
+        if rest == 'off':
+            if wake is None or wake.status not in {'active','paused'}: return 'Keep-warm is already off for this chat.'
+            if not engine.store.cas_wake(wid,wake.status,expected_version=wake.version,status='cancelled',status_reason='command'):
+                raise ValueError('concurrent item change')
+            engine.cancel_occurrences(wid,'cancelled')
+            engine.store.set_meta('card:'+wid,'')
+            engine.signal()
+            return 'Keep-warm is off for this chat.'
+        if session.platform not in MESSAGING_PLATFORMS:
+            raise ValueError('Keep-warm needs a messaging chat: a closed app window makes it pointless.')
+        if not session.enabled: raise ValueError('this chat is off; use /pulse on')
+        gate = engine.policy.creation_gate(session_key=key, platform=session.platform, chat_type=session.chat_type,
+            allow_gateway_injection=engine.injection_allowed(), creator='user', kind='self')
+        # Keep-warm takes no active-wake slot: only the consent and destination checks apply.
+        if not gate.allowed and gate.reason not in {'max_active','global_max_active'}:
+            raise ValueError(gate.reason + ('\n'+gate.detail if gate.detail else ''))
+        if wake is None:
+            engine.store.create_wake(Wake(key, 'Keep the prompt cache warm.', 'self', id=wid, platform=session.platform,
+                chat_type=session.chat_type, chat_id=session.chat_id, armed_session_id=session.current_session_id,
+                creator='user', created_in='command', title='Keep-warm', reason='You turned on keep-warm (/pulse warm on).',
+                trigger_json={'builtin':True,'keep_warm':True}))
+        elif wake.status != 'active':
+            if not engine.store.cas_wake(wid,wake.status,expected_version=wake.version,status='active',status_reason='',
+                                         armed_session_id=session.current_session_id,error_streak=0,next_due_at=None):
+                raise ValueError('concurrent item change')
+            engine.store.set_meta('card:'+wid,'')
+        plan = cache.keep_warm_plan(engine.store, session, engine.policy, now)
+    engine.signal()
+    lines = [f'Keep-warm is on for this chat ({wid}). While you\'re writing here, a tiny silent ping just before the prompt cache '
+             f'expires keeps it warm, so your next message reads the cache instead of rewriting it. It pauses after '
+             f'{engine.policy.keep_warm_idle_hours}h without a message from you and resumes when you write. /pulse warm off stops it.']
+    prefix = session.last_prompt_tokens or 0
+    if 'due_at' in plan:
+        # Pricing may fetch metadata: outside the store transaction.
+        read = cold = None
+        try:
+            read = cache.cost(session.last_route, prompt=prefix, read=prefix, ttl=plan['ttl'])
+            cold = cache.cost(session.last_route, prompt=prefix, written=prefix, ttl=plan['ttl'])
+        except Exception:
+            pass
+        price = f' · a ping ~${read:.2f} vs a cold start ~${cold:.2f}' if read is not None and cold is not None else ''
+        lines.append(f'Cache {cache.minutes(plan["ttl"])} · context {prefix} tokens{price} · next ping {_time(engine,plan["due_at"])}')
+    else:
+        lines.append('No ping now: '+plan['reason']+'.')
+    return '\n'.join(lines)

@@ -270,7 +270,7 @@ def test_I10_daily_caps_and_flood(engine):
     assert any(o.error == 'global_flood' for o in e.store.list_occurrences())
 
 
-def test_I11_depth_and_one_child_per_turn(engine):
+def test_I11_depth_and_two_children_per_turn(engine):
     e = engine
     w = arm(e, depth=2)
     e.tick(); start(e)
@@ -278,6 +278,8 @@ def test_I11_depth_and_one_child_per_turn(engine):
     result = e.tool.handle(args, session_id='sid')
     assert result['error'] == 'rearm_depth'
     e.store.cas_wake(w.id, 'active', depth=0)
+    # A ping-back after an earlier child in the same turn (#200).
+    assert e.tool.handle(args, session_id='sid')['ok']
     assert e.tool.handle(args, session_id='sid')['ok']
     assert e.tool.handle(args, session_id='sid')['error'] == 'rearm_child'
 
@@ -321,7 +323,8 @@ def test_I13_structured_silence_and_bare_unreported(engine):
     assert e.intake.transform_llm_output(response_text='hello', session_id='sid') is None
 
 
-def test_I14_non_gateway_arming_refused(engine):
+def test_I14_non_gateway_arming_refused(engine, monkeypatch):
+    monkeypatch.setattr('heartbeat2.policy.local_injection_supported', lambda: False)
     e = engine
     for platform in ('cli', 'tui', 'desktop', 'api_server'):
         session(e, platform=platform)
@@ -358,7 +361,7 @@ def test_I16_dispatch_gate_matrix(engine):
               ('session_paused', {}, {'paused_until':e.clock.now()+60}, {}),
               ('dm_only', {}, {'chat_type':'group'}, {}),
               ('unanswered', {}, {'unanswered_count':2}, {}),
-              ('quiet_hours', {'kind':'every','eff_interval_s':3600}, {}, {'quiet_hours':'00:00-23:59'}),
+              ('quiet_hours', {'kind':'every','creator':'user','eff_interval_s':3600}, {}, {'quiet_hours':'00:00-23:59'}),
               ('daily_message_cap', {}, {}, {'max_messages_per_day':0}),
               ('daily_model_cap', {}, {}, {'max_model_wakes_per_day':0}),
               ('busy', {}, {'busy_since':e.clock.now()}, {}),

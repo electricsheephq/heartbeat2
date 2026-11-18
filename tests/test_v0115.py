@@ -33,10 +33,10 @@ def test_update_rejects_event_without_changing_wake(engine):
     assert engine.store.get_wake(w.id) == w
 
 
-def test_trigger_schema_drops_event_without_adding_filters():
+def test_trigger_schema_drops_event_and_adds_kanban_filters():
     fields = PARAMETERS['properties']['trigger']['properties']
     assert 'event' not in fields
-    assert 'task_id' not in fields and 'board' not in fields
+    assert fields['task_id']['type'] == fields['board']['type'] == 'string'
 
 
 @pytest.mark.parametrize('status', ['active','paused','proposed'])
@@ -138,7 +138,8 @@ def test_spacing_precedes_quiet_adjustment_and_receipt(engine, kind):
     assert result.get('error') == 'invalid_request', result
     result = create(engine, trigger)
     assert result.get('ok'), result
-    assert f'Quiet hours hold it until {local(engine,now+11*3600)}.' in receipt(result)
+    subject = 'its messages' if kind == 'kanban_completed' else 'it'
+    assert f'Quiet hours hold {subject} until {local(engine,now+11*3600)}.' in receipt(result)
 
 
 @pytest.mark.parametrize('kind', ['at','owner_silent','kanban_completed'])
@@ -222,7 +223,7 @@ def test_deadline_free_event_watcher_receipt_reports_holds(engine, hold):
         expected = f'Wake spacing holds it until {local(engine, engine.clock.now()+5*60)}.'
     else:
         now = night(engine, 23)
-        expected = f'Quiet hours hold it until {local(engine, now+9*3600)}.'
+        expected = f'Quiet hours hold its messages until {local(engine, now+9*3600)}.'
     result = create(engine, {'kind':'kanban_completed'})
     assert result.get('ok'), result
     assert expected in receipt(result)

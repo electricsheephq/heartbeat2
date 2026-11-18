@@ -161,11 +161,11 @@ def test_quiet_implicit_extension_and_recurring_skip(engine):
     assert updated.get('error') == 'invalid_request', updated
     assert updated['detail'].endswith('; set until.expires to extend it')
     assert engine.store.get_wake(w.id).expires_at == w.next_due_at+3600
-    # Recurring ticks in quiet hours are skipped, not held until the release.
+    # The agent's recurring work runs in quiet hours (since 0.3.0); only its messages are held.
     recurring = create(engine, {'kind':'every','every':'1d at 23:00'},
                        until={'expires':'tomorrow 07:00'})
     assert recurring.get('ok'), recurring
-    assert 'Quiet hours skip its ticks until' in receipt(recurring) and 'hold it' not in receipt(recurring)
+    assert 'Quiet hours hold its messages until' in receipt(recurring) and 'skip its ticks' not in receipt(recurring)
 
 
 @pytest.mark.parametrize('kind', ['command', 'subagent_done'])
@@ -269,7 +269,7 @@ def test_muted_receipts_and_cancel(engine, kind):
     assert result.get('ok'), result
     text = receipt(result)
     assert ('Muted: it is dropped unless you reply first.' if kind == 'at' else
-            'Muted: it waits for your reply.') in text
+            'Muted: messages are held; work still runs.') in text
     assert 'Cancels if you reply.' in text and 'Expires ' in text
     assert 'Wakes are at least 10 min apart, so it can land a few minutes late.' in text
     if kind == 'command': assert 'Checks now, then every 1m' in text
@@ -541,8 +541,9 @@ def test_long_muted_event_deadline_receipt_is_bounded(engine):
                     until={'owner_replies':True})
     assert result.get('ok'), result
     text = receipt(result)
-    assert text.startswith('Waits for kanban_worker_exited events; if nothing happens by ')
-    assert 'Quiet hours hold it until' in text and 'Muted' in text
+    assert text.startswith('Waits for kanban_worker_exited events; if no match by ')
+    assert 'Quiet hours hold its messages until' in text
+    assert 'Muted: messages are held; work still runs.' in text
     # The spacing sentence goes first, so expiry and reply-cancel survive.
     assert len(text) <= 240 and 'Wakes at' not in text and text.endswith('Cancels if you reply.')
 
@@ -570,11 +571,12 @@ def test_timed_quiet_chains_default_for_feasibility_and_receipt(engine, command)
     assert f'Quiet hours hold it until {local(engine,now+11*3600)}.' in receipt(result)
 
 
-@pytest.mark.parametrize('kind', ['at','every','kanban_worker_exited'])
-def test_timed_quiet_chain_preserves_live_gate_decisions(engine, command, monkeypatch, kind):
+@pytest.mark.parametrize('kind,creator', [('at','agent'), ('every','agent'),
+                                        ('kanban_worker_exited','agent'), ('kanban_worker_exited','user')])
+def test_timed_quiet_chain_preserves_live_gate_decisions(engine, command, monkeypatch, kind, creator):
     now = night(engine)
     command('quiet for 3h')
-    w = arm(engine,kind)
+    w = arm(engine,kind,creator=creator,agent_edited=False)
     engine.store.add_occurrence(w.id,'t:quiet')
     o = engine.store.get_occurrence(w.id,'t:quiet')
     s = engine.store.get_session(KEY)
@@ -591,7 +593,10 @@ def test_timed_quiet_chain_preserves_live_gate_decisions(engine, command, monkey
         monkeypatch.setattr(commands,'quiet_until',chained)
         new = engine.gate(w,o,s)
         assert new[:2] == old[:2]
-        assert new == (('quiet_hours',kind!='every',now+11*3600) if hours<11 else ('',False,None))
+        message_only = creator == 'agent' and kind in {'every', 'kanban_worker_exited'}
+        assert new == (('quiet_hours',True,now+11*3600) if hours<11 and not message_only else ('',False,None))
+        if message_only:
+            assert engine.message_hold_reason(w,s) == ('quiet_hours' if hours<11 else '')
     engine.clock.wall = now
     engine.policy = replace(engine.policy, quiet_hours_urgent=True)
     assert commands.quiet_until(engine,KEY,urgent=True) is None
@@ -631,7 +636,8 @@ def test_overdue_dispatch_uses_current_quiet_hours(engine, kind):
     result = create(engine, trigger)
     assert result.get('ok'), result
     release = now+(9*60+58)*60
-    assert f'Quiet hours hold it until {local(engine,release)}.' in receipt(result)
+    subject = 'its messages' if kind == 'command' else 'it'
+    assert f'Quiet hours hold {subject} until {local(engine,release)}.' in receipt(result)
 
 
 @pytest.mark.parametrize('kind', ['file','process','url','command'])

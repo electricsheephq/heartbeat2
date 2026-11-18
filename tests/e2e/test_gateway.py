@@ -13,6 +13,11 @@ class Finding(AssertionError):
 
 # One Hermes tool-progress bubble for the pulse tool, nothing else.
 PROGRESS_BUBBLE = re.compile(r"⚙️ pulse(?:\.\.\.|: [^\n]*)?")
+# Hermes 0.23.x's own notice for an automated delivery a restart interrupted (gateway/delivery_ledger.py
+# RECOVERED_MARKER + agent/turn_failure_copy.py); exact text, so any other recovered text still fails.
+HERMES_INTERRUPTED_NOTICE = ("♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
+                             "An automated delivery was interrupted and was not run again. Some actions may already "
+                             "have run; verify their effects.")
 
 
 def record_latency(rig, due_at, wall_offset):
@@ -39,9 +44,16 @@ def busy_case(make_rig, *, mode="queue", command=False, photo=False):
     wid = rig.arm()
     row = rig.settled(wid)
     rig.assert_tools_ok()
-    rig.human_once(before_events, before_human)
+    rig.human_once(before_events, before_human, unanswered=0)
     assert len(rig.director.wake_starts) == 1
-    assert len(rig.wake_openers()) == 1
+    if mode == "interrupt" and rig.opener_retried():
+        # The owner's interrupt can drop the wake turn's first model request mid-stream, and Hermes retries the same
+        # request. HeartBeat still claimed and injected the wake once, and the owner sees one answer.
+        assert row["attempt"] == 1, row
+        assert rig.injections() == 1  # HeartBeat's own count, from the gateway log, whatever Hermes sends.
+        assert sum("WAKE-OWNER-ANSWER" in t for t in rig.texts()) == 1, rig.texts()
+    else:
+        assert len(rig.wake_openers()) == 1
     if not photo:
         assert any("WAKE-OWNER-ANSWER" in t for t in rig.texts()), rig.texts()
     return rig, row
@@ -257,9 +269,18 @@ def test_restart_with_pending_wake(make_rig):
     assert row["attempt"] == 1 and len(rig.director.wake_starts) == 2
     # Hermes may replay at the model (NousResearch/hermes-agent#137358).
     # heartbeat2 must silence the turn without adopting/delivering the occurrence.
-    assert not rig.new_visible(visible_before), "crash-resumed turn emitted visible text"
+    # Hermes 0.23.x's delivery ledger posts its own notice for an automated delivery that a
+    # restart interrupted (gateway/delivery_ledger.py RECOVERED_MARKER). That copy is Hermes core's,
+    # not the plugin's; anything else visible is a plugin leak.
+    shown = rig.new_visible(visible_before)
+    if rig.session_authority():
+        shown = [t for t in shown if t != HERMES_INTERRUPTED_NOTICE]
+    assert not shown, "crash-resumed turn emitted visible text"
     assert rig.occurrence(second)["delivered"] == 0
-    assert next(w for w in rig.rows("wakes") if w["id"] == second)["status_reason"] == "resumed_after_restart"
+    # Older Hermes replays the interrupted turn and the plugin silences it (resumed_after_restart);
+    # Hermes 0.23.x does not run it again and posts its recovered-reply notice instead (interrupted:restart).
+    reason = next(w for w in rig.rows("wakes") if w["id"] == second)["status_reason"]
+    assert reason == ("interrupted:restart" if rig.session_authority() else "resumed_after_restart"), reason
     assert sum("WAKE-DELIVERED" in t for t in rig.texts()) == 1
 
 
@@ -389,11 +410,10 @@ def test_invalid_setting_does_not_halt_wakes(make_rig):
     rig.assert_tools_ok()
 
 
-def test_mute_holds_watcher_until_reply(make_rig):
+def test_mute_lets_agent_watcher_work_silently(make_rig):
     from tests.fakes.fake_llm_provider import Text, ToolCall
 
     rig = make_rig()
-    wall_offset = time.time()-time.monotonic()
     watched = rig.gateway.home / "watched.log"
     watched.write_text("baseline\n")
     # One owner turn arms both nudges and the watcher, without clearing the
@@ -420,45 +440,41 @@ def test_mute_holds_watcher_until_reply(make_rig):
     before = rig.visible_ids()
     starts, openers = len(rig.director.wake_starts), len(rig.wake_openers())
 
-    # Observe each change on a real probe tick so two observed matches (rather
-    # than two writes seen as one) must coalesce while the mute is still set.
+    # Under the mute an agent watcher still looks right away; its turn is silent and its report is held (#137).
     with watched.open("a") as stream:
         stream.write("MATCH-FIRST\n")
-    first = rig.wait(lambda: (o if (o := rig.occurrence(watcher)) and o["error"] else None),
-                     "first file match gated", 20)
-    assert first["state"] == "pending" and first["held_reason"] == "held_unanswered", first
-    assert first["held_since"] is not None and first["held_matches"] == 1, first
-    assert json.loads(first["payload_json"]) == [{"message": "MATCH-FIRST"}], first
-    with watched.open("a") as stream:
-        stream.write("MATCH-LATEST\n")
-    rig.wait(lambda: json.loads(next(w for w in rig.rows("wakes")
-                                    if w["id"] == watcher)["probe_state_json"])["generation"] == 2,
-             "second file match observed", 20)
+    done = rig.wait(lambda: (o if (o := rig.occurrence(watcher)) and o["state"] == "done" else None),
+                    "silent watcher turn done", 60)
+    assert done["delivered"] == 0 and done["force_silent"] == 1 and done["notify"] == 1, done
+    assert done["held_reason"] == "message_held:unanswered" and done["summary"] == "E2E verdict", done
+    assert json.loads(done["payload_json"]) == [{"message": "MATCH-FIRST"}], done
+    assert len(rig.director.wake_starts) == starts + 1
+    opened = rig.wake_openers()[openers:]
+    assert len(opened) == 1, opened
+    text = rig.director._text(opened[0]["messages"][-1])
+    assert f"watcher {watcher}" in text and "MATCH-FIRST" in text, text
+    assert "Messages are held right now" in text, text
+    # The report-back the turn set up is skipped under the mute; the report waits for the owner.
+    back = rig.wait(lambda: next((w for w in rig.rows("wakes") if w["id"].startswith("report_")), None),
+                    "report-back armed", 20)
+    skipped = rig.wait(lambda: (o if (o := rig.occurrence(back["id"])) and o["state"] == "skipped" else None),
+                       "report-back skipped", 30)
+    assert skipped["error"] == "unanswered", skipped
     rig.tick_barrier()
-    held = rig.rows("occurrences", "WHERE wake_id=?", (watcher,))
-    assert len(held) == 1, held
-    row = held[0]
-    assert row["state"] == "pending" and row["held_reason"] == "held_unanswered", row
-    assert row["held_since"] == first["held_since"] and row["held_matches"] == 2, row
-    assert row["dedupe_key"] == first["dedupe_key"], row
-    assert json.loads(row["payload_json"]) == [{"message": "MATCH-LATEST"}], row
-    assert len(rig.director.wake_starts) == starts == 2
-    assert len(rig.wake_openers()) == openers == 2
+    assert len(rig.director.wake_starts) == starts + 1
     assert rig.new_visible(before) == [], rig.new_visible(before)
 
+    # The owner's next turn is handed the held report and answers for it; nothing else is sent.
     rig.owner("I am back [in:watcher-returned]", "reply to watcher-returned")
-    done = rig.settled(watcher)
+    turn = next(r for r in rig.llm.main_requests() if "watcher-returned" in json.dumps(r["messages"][-1]))
+    handed = json.dumps(turn)
+    assert "while the owner's limits held your messages" in handed and "E2E verdict" in handed, handed[-2000:]
     rig.tick_barrier()
-    assert done["state"] == "done" and done["delivered"] == 1 and done["attempt"] == 1, done
+    row = rig.occurrence(watcher)
+    assert row["held_reason"] == "reported:unanswered" and row["delivered"] == 0, row
     assert len(rig.rows("occurrences", "WHERE wake_id=?", (watcher,))) == 1
     assert len(rig.director.wake_starts) == starts + 1
-    released = rig.wake_openers()[openers:]
-    assert len(released) == 1, released
-    text = rig.director._text(released[0]["messages"][-1])
-    assert f"watcher {watcher}" in text and "you hadn't replied" in text, text
-    assert "MATCH-LATEST" in text and "MATCH-FIRST" not in text, text
-    assert sum("WAKE-DELIVERED" in t for t in rig.new_visible(before)) == 1
-    record_latency(rig, first['matched_at'], wall_offset)
+    assert sum("WAKE-DELIVERED" in t for t in rig.new_visible(before)) == 0
     rig.assert_tools_ok()
 
 
@@ -491,3 +507,104 @@ def test_wake_text_carries_cache_line(make_rig):
     assert len(lines) == 1 and len(lines[0]) <= 220, text
     assert lines[0].startswith(f"Cache: {provider} TTL unknown"), lines
     rig.assert_tools_ok()
+
+
+def _tool_names(body):
+    return {(t.get("function") or {}).get("name") for t in body.get("tools", [])}
+
+
+def test_role_takes_its_own_turn(make_rig):
+    # The film's core feature: the owner hands the agent a role, and the role takes its own
+    # turn in this chat, with its desk in the wake text. `/pulse run` queues that turn now.
+    rig = make_rig()
+    before = {w["id"] for w in rig.rows("wakes")}
+    rig.owner("/pulse role every 1d at 09:00 Keep the release notes current", "w_")
+    new = [w for w in rig.rows("wakes") if w["id"] not in before]
+    assert len(new) == 1 and new[0]["role"] and new[0]["creator"] == "user", new
+    wid = new[0]["id"]
+    rig.owner(f"/pulse run {wid}", "Queued")
+    row = rig.settled(wid)
+    rig.assert_tools_ok()
+    assert row["state"] == "done" and row["delivered"] == 1, row
+    assert len(rig.director.wake_starts) == 1
+    opener = rig.director._text(rig.wake_openers()[0]["messages"][-1])
+    assert f"[HeartBeat 2.0 · role {wid} · " in opener and "Your desk:" in opener, opener
+    assert sum("WAKE-DELIVERED" in t for t in rig.texts()) == 1
+
+
+def test_role_hands_off_to_another_role(make_rig):
+    # #138: a role names a follow-on role in this chat. Its silent progress summary is queued for
+    # that role, which is brought forward and shows the summary in its own wake text.
+    from tests.fakes.fake_llm_provider import Text, ToolCall
+
+    rig = make_rig()
+    roles = []
+    # The source runs on its own minute: a /pulse run turn carries a payload, so it can't hand off.
+    for rhythm, note in (("every 1d at 09:00", "Draft the release notes"), ("every 1m", "Research the changes")):
+        before = {w["id"] for w in rig.rows("wakes")}
+        rig.owner(f"/pulse role {rhythm} {note}", "w_")
+        new = [w for w in rig.rows("wakes") if w["id"] not in before]
+        assert len(new) == 1 and new[0]["role"], new
+        roles.append(new[0]["id"])
+    target, source = roles
+    rig.director.script("handoff", ToolCall("pulse", {"action": "update", "id": source, "handoff_to": target}),
+                        Text("SET-handoff"))
+    rig.owner("hand research off to drafting [in:handoff]", "SET-handoff")
+    rig.assert_tools_ok()
+    assert rig.rows("meta", "WHERE key=?", ("handoff_to:" + source,))[0]["value"] == target
+    target_due = rig.rows("wakes", "WHERE id=?", (target,))[0]["next_due_at"]
+
+    rig.director.respond = lambda: ToolCall("pulse", {"action": "respond", "outcome": "progress", "notify": False,
+                                                      "summary": "E2E research result"})
+    shown_before = rig.visible_ids()
+    row = rig.settled(source)
+    rig.assert_tools_ok()
+    assert row["state"] == "done" and row["outcome"] == "progress" and row["delivered"] == 0, row
+    rig.owner(f"/pulse pause {source}", source)
+    handed = rig.settled(target)
+    rig.assert_tools_ok()
+    assert handed["state"] == "done" and handed["delivered"] == 0, handed
+    assert float(handed["dedupe_key"][2:]) < target_due, (handed, target_due)
+    openers = [rig.director._text(r["messages"][-1]) for r in rig.wake_openers()]
+    mine = [t for t in openers if f"· role {target} · " in t]
+    assert len(mine) == 1, openers
+    assert "Handed off to you by another role in this chat" in mine[0], mine[0]
+    assert f"({source}): E2E research result" in mine[0], mine[0]
+    assert rig.rows("meta", "WHERE key=?", ("handoff_in:" + target,))[0]["value"] == "[]"
+    shown = [t for t in rig.new_visible(shown_before) if "HeartBeat 2.0:" not in t and source not in t]
+    assert shown == [], shown
+
+
+def test_pulse_through_tool_search_bridge(make_rig):
+    # Hermes's default `tools.tool_search.enabled: auto` defers plugin tools behind the
+    # tool_search / tool_describe / tool_call bridge. Arming and the silent verdict must work
+    # when the model reaches `pulse` only through `tool_call`.
+    from tests.fakes.fake_llm_provider import Text, ToolCall
+
+    rig = make_rig(config={"tools": {"tool_search": {"enabled": "on"}}})
+
+    def bridged(arguments):
+        return ToolCall("tool_call", {"calls": [{"name": "pulse", "arguments": arguments}]})
+
+    before = {w["id"] for w in rig.rows("wakes")}
+    rig.director.script("bridge", bridged({"action": "create", "note": "bridge-wake",
+                                           "trigger": {"kind": "at", "at": "in 10s"}}),
+                        Text("ARMED-bridge"))
+    rig.owner("arm the requested item [in:bridge]", "ARMED-bridge")
+    new = [w for w in rig.rows("wakes") if w["id"] not in before]
+    assert len(new) == 1 and new[0]["creator"] == "agent", new
+    rig.assert_tools_ok()
+    names = _tool_names(rig.director.requests["bridge"][0])
+    if "pulse" in names or "tool_call" not in names:
+        pytest.skip(f"tool search did not defer pulse on this Hermes pin: {sorted(n for n in names if n)}")
+
+    rig.director.respond = lambda: bridged({"action": "respond", "outcome": "no_change", "notify": False,
+                                            "summary": "E2E bridge verdict"})
+    shown_before = rig.visible_ids()
+    row = rig.settled(new[0]["id"])
+    rig.assert_tools_ok()
+    assert row["state"] == "done" and row["outcome"] == "no_change", row
+    assert row["notify"] == 0 and row["delivered"] == 0, row
+    assert "tool_call" in _tool_names(rig.wake_openers()[0])
+    shown = [t for t in rig.new_visible(shown_before) if "HeartBeat 2.0:" not in t]
+    assert shown == [], shown

@@ -1,0 +1,178 @@
+"""A bounded, read-only view of this chat's responsibilities and budgets."""
+import json
+from types import SimpleNamespace
+
+from .commands import _clip, _oneline, _paused, _time, app_closed_hold, messages_count, quiet_until, quiet_window
+from .model import reads_outside_text
+from .policy import is_watcher, is_keep_warm, agreed_watcher
+from .schedule import quiet_end, zone
+from .wake_text import _age
+
+
+def cost_line(store, key, timezone, policy):
+    counts = store.agent_cost_today(key, timezone)
+    text = ''
+    if policy.daily_cost_limit_usd or counts['cost_microusd']:
+        text = f'agent spend today ${counts["cost_microusd"]/1e6:.2f}'
+        if policy.daily_cost_limit_usd: text += f' of ${policy.daily_cost_limit_usd:.2f}'
+    if counts['unpriced_calls']:
+        text += (' · ' if text else '') + f'{counts["unpriced_calls"]} unpriced calls not counted'
+    return text
+
+
+def _plain(text: str) -> str:
+    """Free text for a desk row, with backticks made apostrophes so it can't open or close a code span."""
+    return text.replace('`', "'")
+
+
+def agreed_reports(store, session_key):
+    """Held results of watchers the owner asked for: the unanswered mute doesn't hold them (#108).
+
+    A watcher cancelled since loses this, so its result waits for the owner like any other; one that finished keeps it."""
+    return [o for o in store.held_reports(session_key)
+            if (w := store.get_wake(o.wake_id)) is not None and w.status != 'cancelled' and agreed_watcher(w)]
+
+
+def held_report_lines(store, session_key, *, limit=5, payload_ok=True, agreed_only=False) -> tuple[list[str], list[tuple[str, str]]]:
+    # Results of turns that read outside text go only to the owner and the fenced report-back turn (#137).
+    # Under the unanswered mute a report-back passes on only the results of watchers the owner asked for (#108).
+    pending = [o for o in (agreed_reports(store, session_key) if agreed_only else store.held_reports(session_key))
+               if payload_ok or not reads_outside_text(o)]
+    shown = pending[:limit]
+    lines = []
+    for o in shown:
+        w = store.get_wake(o.wake_id)
+        title = _plain(_clip(_oneline(w.title or w.note), 60))
+        summary = _plain(_clip(_oneline(o.summary), 160))
+        lines.append(f'- {title} ({o.wake_id}): {summary}')
+    if len(pending) > limit:
+        lines.append(f'- … {len(pending) - limit} more after these (they come back next time)')
+    return lines, [(o.wake_id, o.dedupe_key) for o in shown]
+
+
+def _rhythm(wake) -> str:
+    """The role's rhythm as the owner set it: every 2m, every 1d at 09:00, cron …, or self-paced."""
+    trigger = wake.trigger_json if isinstance(wake.trigger_json, dict) else {}
+    if wake.kind == 'every' and trigger.get('every') is not None:
+        anchor = f" at {_plain(_clip(_oneline(str(trigger['at'])), 8))}" if trigger.get('at') else ''
+        return f"every {_plain(_clip(_oneline(str(trigger['every'])), 16))}{anchor}"
+    if wake.kind == 'cron' and trigger.get('cron'):
+        # Inline code: chat markdown (Telegram) would otherwise eat a cron expression's `* *` as bold markers.
+        return 'cron `' + _clip(_oneline(str(trigger['cron'])).replace('`', ''), 40) + '`'
+    if wake.kind == 'self':
+        return 'self-paced'
+    return wake.kind
+
+
+def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=len, turn=None) -> str:
+    store = getattr(engine_or_store, 'store', engine_or_store)
+    now, key = clock.now(), session.session_key
+    # The existing command formatters/override resolver need only these read seams.
+    view = SimpleNamespace(store=store, clock=clock, policy=SimpleNamespace(
+        resolved_timezone=lambda: zone(timezone), quiet_hours_urgent=policy.quiet_hours_urgent,
+        quiet_until=lambda **kw: quiet_end(kw.get('now', now), policy.quiet_hours, timezone)))
+    wakes = [w for w in store.list_wakes(key) if w.status in {'active', 'paused'}]
+    roles = sorted((w for w in wakes if w.role), key=lambda w: (w.updated_at, w.created_at), reverse=True)
+    rows = []
+    def handoff_suffix(w):
+        suffix=''
+        target=store.get_wake(store.get_meta('handoff_to:'+w.id) or '')
+        # Only a target that can still take a handoff, and only a queue a turn can still consume.
+        if target is not None and target.role and target.status in {'active','paused'}:
+            suffix+=f' · hands off to {target.id}'
+        if w.status!='done' and json.loads(store.get_meta('handoff_in:'+w.id) or '[]'):
+            suffix+=' · handoff waiting'
+        return suffix
+
+    for w in roles:
+        history = [o for o in store.list_occurrences(w.id) if o.started_at is not None and o.ended_at is not None]
+        last = max(history, key=lambda o: o.ended_at) if history else None
+        # Free text loses its backticks: Hermes pairs inline-code backticks across lines, so a stray one anywhere
+        # before a cron rhythm (this row's title, or an earlier row's summary or reason) would swallow its code span.
+        summary = _plain(_clip(_oneline(last.summary or last.outcome or last.state), 80)) if last else 'none'
+        today, budget = store.dispatches_today(w.id, zone(timezone)), policy.role_budget(w)
+        due = ('paused · ' + _plain(_oneline(w.status_reason or 'paused')) if w.status == 'paused'
+               else 'resting until tomorrow' if today >= budget
+               else 'next ' + _time(view, w.next_due_at, compact=True))
+        if w.status == 'paused' and w.status_reason in {'command','agent_timed'} and store.get_meta('resume_after:'+w.id):
+            due = _paused(view, w, compact=True)
+        title = _plain(_clip(_oneline(w.title or w.note), 80))
+        rows.append(f'- role {w.id} {title} · {_rhythm(w)} · last: {summary} · '
+                    f'{due} · today {today}/{budget}'+handoff_suffix(w))
+    for w in store.list_wakes(key, status='done'):
+        if not w.role: continue
+        history = [o for o in store.list_occurrences(w.id, state='done') if o.ended_at is not None]
+        last = max(history, key=lambda o: o.ended_at) if history else None
+        if last is None or now - last.ended_at > 86400: continue
+        if session.last_human_at is not None and last.ended_at <= session.last_human_at: continue
+        title = _plain(_clip(_oneline(w.title or w.note), 80))
+        summary = _plain(_clip(_oneline(last.summary or last.outcome or last.state), 80))
+        rows.append(f'- done role {w.id} {title} · finished {_time(view, last.ended_at, compact=True)} · last: {summary}'+handoff_suffix(w))
+    other = [w for w in wakes if not w.role and w.status == 'active' and not is_keep_warm(w)]
+    due = [(t, w) for w in other for t in (w.next_due_at, w.deadline_at) if t is not None]
+    next_due = min(due, key=lambda pair: pair[0]) if due else None
+    watchers = sum(is_watcher(w) for w in other)
+    wake_count = len(other) - watchers
+    tail = [f'- Other: {wake_count} wake' + ('s' if wake_count != 1 else '') +
+            f', {watchers} watcher' + ('s' if watchers != 1 else '') + ' · next due ' +
+            (f'{_time(view,next_due[0],compact=True)} ({_clip(_oneline(next_due[1].title or next_due[1].note),40)})'
+             if next_due else 'none')]
+    held_rows = []
+    for w in wakes:
+        held = app_closed_hold(view, w)
+        if held: held_rows.append(f'- {w.id}: '+held)
+    if held_rows and policy.notify_via:
+        from .notifier import notifier_line, notice_state
+        notice_view=SimpleNamespace(store=store,clock=clock,policy=policy,
+            notifier=getattr(engine_or_store,'notifier',None),
+            notify_via_invalid=getattr(engine_or_store,'notify_via_invalid',False),
+            paused=getattr(engine_or_store,'paused',lambda:False),
+            eligible=getattr(engine_or_store,'eligible',lambda:False),
+            injection_allowed=getattr(engine_or_store,'injection_allowed',lambda:False),
+            daily=lambda k:store.daily_counts(k,policy.resolved_timezone()))
+        if notice_state(notice_view,key): tail.append('- '+notifier_line(notice_view,key))
+    tail.extend(held_rows[:3])
+    if len(held_rows)>3:
+        tail.append(f'- {len(held_rows)-3} more held while their app window is closed')
+    counts = store.daily_counts(key, zone(timezone))
+    in_flight = store.messages_in_flight(key)
+    # Inside a wake's own text, its own reserved slot is not a held message: its cap check ran before it was claimed.
+    own = int(turn is not None and turn.state in {'claimed', 'started'} and not turn.force_silent)
+    age = _age(now-session.last_human_at) + ' ago' if session.last_human_at is not None else 'unknown'
+    cost = cost_line(store,key,zone(timezone),policy)
+    tail.append(f'- Owner last wrote {age} · unanswered {session.unanswered_count} · '
+                f'messages today {messages_count(counts["delivered"], in_flight, policy.max_messages_per_day)} · '
+                f'turns today {counts["model_turns"]}/{policy.max_model_wakes_per_day}' + (' · '+cost if cost else ''))
+    if hasattr(policy, 'max_active'):
+        from .policy import cap_counts
+        used, profile_used = cap_counts(store, key)
+        # The window this chat actually has: a chat override wins, as it does when messages are held.
+        window, source, until = quiet_window(store, policy, key, now)
+        zone_name = policy.timezone_source()[0] if hasattr(policy, 'timezone_source') else str(zone(timezone))
+        quiet = f'quiet hours {window} ({source}, {zone_name})' if window else f'quiet hours off ({source}, {zone_name})'
+        if until is not None:
+            quiet += f', quiet until {_time(view, quiet_until(view, key) or until, compact=True)} (chat override)'
+        # Headroom and the quiet window, so neither is learned only from a refusal or a hold (#171, #173).
+        tail.append(f'- Items {used}/{policy.max_active} in this chat, {profile_used}/{policy.max_active_profile} in the profile · ' + quiet)
+    reports = store.held_reports(key)
+    if reports:
+        newest = store.get_wake(reports[-1].wake_id)
+        title = _plain(_clip(_oneline(newest.title or newest.note), 40))
+        tail.append(f'- Held for you: {len(reports)} result' + ('s' if len(reports) != 1 else '') +
+                    f' your wake turns wanted to send (newest: {title})')
+    held = ('quiet hours' if quiet_until(view,key) is not None else
+            "the owner hasn't replied yet" if session.unanswered_count >= policy.max_unanswered else
+            "today's message limit" if counts['delivered'] - own >= policy.max_messages_per_day else '')
+    if held and held == "the owner hasn't replied yet" and any(agreed_watcher(w) for w in store.list_wakes(key, status='active')):
+        held += ' (watchers the owner asked for still send their alerts)'
+    if held: tail.append('- Messages held now: '+held)
+    omitted = 0
+    while True:
+        text = '\n'.join(['Your desk:', *rows, *tail, *([f'… {omitted} more'] if omitted else [])])
+        if measure(text) <= 1800: return text
+        if rows:
+            rows.pop()  # Keep the most recently touched roles, and preserve the budget lines.
+            omitted += 1
+        else:
+            while measure(text) > 1800: text = text[:-1]
+            return text

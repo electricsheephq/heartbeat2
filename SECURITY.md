@@ -25,7 +25,8 @@ must be trusted and read-only. Model wake turns retain the conversation's tools
 and permissions. GET requests include the configured URL, including its query;
 URL userinfo, cookies, Authorization headers and ambient proxies are refused or
 unused by the probe. Command probes use Hermes' sanitizer on an allowlisted
-environment, without provider, bot or GitHub tokens; gh uses its own hosts.yml
+environment, without provider, bot or GitHub tokens unless the owner names
+one for an allowed command in probe_command_env; gh uses its own hosts.yml
 or keyring. URL probes always block cloud metadata and block private/local
 addresses unless url_allow_private is enabled, checking each hop at connect
 time. File probes honor Hermes read blocks at arm/update and every check,
@@ -77,16 +78,40 @@ These same disclosure and exception paragraphs appear in README and the manifest
   Capture is bounded while reading to 256 KB plus one overflow-detection byte.
   Timeout or overflow kills the entire process group, including descendants that
   remain in it. Deliberately detached processes remain outside that guarantee.
+- `probe_command_env` is the owner's only route for a secret into a command
+  watcher: rules `<allowed command> = NAME, NAME`, separated by `;`. A rule applies
+  to the longest `probe_commands` entry that admits the watcher's argv, and only
+  the named variables are copied from Hermes' environment into the child. Names
+  that change how a program runs (PATH, HOME, USER, LOGNAME, SHELL, LANG, TMPDIR,
+  IFS, ENV, BASH_ENV, LD_*, DYLD_*, PYTHON*, HERMES_*, LC_*) and malformed rules
+  are refused when settings load, as is a rule whose program (or `{python}`
+  script) is a relative path, since that resolves in the watcher's cwd, which
+  the agent chooses. Other variables that change how a program runs (such as
+  GIT_SSH_COMMAND or NODE_OPTIONS) are not refused: name only what the command
+  needs. A setting refused when it first loads stays blank, so nothing is granted.
+  The agent cannot set it. Values are never logged
+  or shown, but the command's output still reaches the agent, and the agent still
+  chooses the arguments after the allowed command and the watcher's working
+  directory. Grant a secret only to a command that does not print it, cannot be
+  pointed at another host, and does not read configuration or code from its
+  working directory (git and npm do: a repository's config can run its own
+  helpers). A bare program name is looked up on Hermes' PATH, which should hold
+  no relative entries.
+- A `{python}` program token matches allowlist entries literally and resolves to
+  the Python running Hermes only when the command runs. The next word in such an
+  entry must be the script: with nothing or an option (such as `-I` or `-X`) after
+  `{python}`, the entry allows nothing.
 - Command environments start with only PATH, HOME, USER, LOGNAME, LANG, LC_*,
   TMPDIR, SSH_AUTH_SOCK, XDG_CONFIG_HOME, GH_CONFIG_DIR and GH_HOST. Hermes'
   `tools.environments.local.hermes_subprocess_env(inherit_credentials=False,
   base_env=allowlisted)` sanitizes that base; import/call failures use the same
-  allowlisted base. Pager and no-prompt variables are applied last. GH_TOKEN and
-  GITHUB_TOKEN are never passed; gh authenticates through its own hosts.yml or
-  keyring. No token passthrough setting is offered, so a gh that was authenticated
-  only through those variables needs `gh auth login`. Proxy, custom-CA and D-Bus
+  allowlisted base. Pager and no-prompt variables are applied last. No credential is passed
+  unless the owner names it for that command in `probe_command_env` (above):
+  by default GH_TOKEN and GITHUB_TOKEN are not passed, and gh authenticates
+  through its own hosts.yml or keyring. Proxy, custom-CA and D-Bus
   variables are not part of the allowlisted base. The command watcher's
-  allowlisted environment does not pass proxy or custom-CA variables yet.
+  allowlisted environment does not pass proxy or custom-CA variables yet, unless
+  the owner grants them in `probe_command_env`.
 - Pool probes enter the wake's pinned Hermes home scope; the URL worker copies
   that context. Child HOME handling, adapter secrets, URL configuration and file
   blocks therefore use the wake's profile rather than the launch profile.
@@ -116,8 +141,24 @@ confusion, but cannot guarantee that a full model turn follows every instruction
 A structured `pulse respond` with notify=false yields exactly `[SILENT]`; missing
 respond also defaults to silence. Hermes response trailers can break the final
 exact-marker match after transformation. Never treat fake-injector acceptance
-as proof of delivery. Enabled/settings/source gates, quiet hours, caps, busy
-checks, estop, unanswered mute and the no-op governor bound the engine's work.
+as proof of delivery. Enabled/settings/source gates, the daily wake-turn cap, the
+optional daily priced-spend limit (checked before each of the agent's own turns, not
+a hard ceiling on a turn already running; unpriced calls don't count toward it, even
+when the provider bills them), per-role turn budgets, busy checks, estop
+and the idle governor bound the engine's work and spend. Quiet hours, the daily message cap and
+the unanswered mute bound what reaches the owner: during them the agent's own
+recurring work and roles still run, silently, and their messages are not delivered.
+A watcher the agent arms because the owner asked for it in their own message is not
+held by the unanswered mute; quiet hours and the daily message cap still hold it.
+The optional `sleep_after_days` (off by default) goes further: once the owner has
+written nothing in a chat for that many days, the agent's own work there, roles and
+own time included, runs no turn until the owner writes again. The owner's own wakes
+(unless the agent has edited them), one-time reminders and watchers the owner asked
+for still run, and so does a report-back of those watchers' held results. Recurring
+reminders the agent arms for the owner and the built-in check-in sleep too.
+Roles and own-time turns are full model turns with the conversation's normal tools;
+turn them on only in conversations whose tools you are happy to have run on their
+own.
 A deadline reports that nothing happened; it does not assert success.
 Hermes may auto-resume a wake turn interrupted by a crash; heartbeat2 keeps the
 replay silent, never counts it as a fire or delivery, and counts it as a model

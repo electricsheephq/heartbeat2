@@ -19,6 +19,8 @@ jobs:
             sha: 818c13be1dc4fd28987e1e881a9408224afd4535
           - pin: v0.21.7
             sha: 71d34bad1045610252eda02ee79549436896e784
+          - pin: v0.23.1
+            sha: 3b421578588243f920886e6fe79a6faa87ea026e
           - pin: main
             sha: 04eb00cef7d9ac2730ed5fd9039a6f3287eb49ca
     env:

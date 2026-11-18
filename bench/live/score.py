@@ -9,6 +9,8 @@ import json
 import re
 from pathlib import Path
 
+from .upstream import first_count, usage_of
+
 NARRATION = re.compile(r'\b(?:I checked|Let me (?:check|look|see|run|call|try|verify|search|fetch|pull)|I will now|no changes detected|'
                        r'calling (?:the )?(?:tool|pulse|lookup)|tool call|running (?:the )?'
                        r'(?:probe|lookup)|checking (?:the )?(?:status|logs)|model fallback)\b', re.I)
@@ -88,10 +90,12 @@ def aggregate(score):
             split = dict.fromkeys(('input', 'cache_read', 'cache_write', 'output'), 0)
             for c in cells:
                 for row in c.get('upstream_rows', []):
-                    usage = row.get('usage') or {}
-                    read = usage.get('cache_read_input_tokens', usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))
-                    written = usage.get('cache_creation_input_tokens', 0)
-                    values = (usage.get('input_tokens', max(0, usage.get('prompt_tokens', 0) - read - written)), read, written, usage.get('output_tokens', usage.get('completion_tokens', 0)))
+                    usage = usage_of(row.get('usage'))
+                    read = first_count(usage.get('cache_read_input_tokens'),
+                                       usage_of(usage.get('prompt_tokens_details')).get('cached_tokens'))
+                    written = first_count(usage.get('cache_creation_input_tokens'))
+                    values = (first_count(usage.get('input_tokens'), max(0, first_count(usage.get('prompt_tokens')) - read - written)),
+                              read, written, first_count(usage.get('output_tokens'), usage.get('completion_tokens')))
                     for key, value in zip(split, values):
                         split[key] += value
             group['bars']['B2-5'].update(cache_split=split, cache_split_per_useful_message={k: v / useful if useful else None for k, v in split.items()})

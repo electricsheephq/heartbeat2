@@ -136,7 +136,7 @@ def test_receipt_excludes_ignored_refused_user_proposed_and_paused(engine, comma
     assert not ignored['wake']['owner_requested'] and EXEMPTION not in receipt(ignored)
     owner_turn(engine)
     recurring = create(engine, {'kind':'every', 'every':'1h'}, owner_asked=True)
-    assert recurring.get('ok') and recurring['owner_asked_ignored'] == 'not_one_shot'
+    assert recurring.get('ok') and recurring['owner_asked_ignored'] == 'not_one_shot_or_watcher'
     assert not recurring['wake']['owner_requested'] and EXEMPTION not in receipt(recurring)
     refused = create(engine, {'kind':'at', 'at':'in 366d'}, owner_asked=True)
     assert refused.get('error') == 'invalid_request' and 'receipt' not in refused
@@ -173,8 +173,12 @@ def test_worst_case_receipt_keeps_exemption(engine):
 
 def test_release_metadata():
     root = Path(__file__).resolve().parents[1]
-    assert 'version: "0.2.2"' in (root/'plugin.yaml').read_text()
+    assert 'version: "0.4.28"' in (root/'plugin.yaml').read_text()
     changelog = (root/'CHANGELOG.md').read_text()
+    assert '## 0.4.28 — 2026-11-17' in changelog and '## 0.4.27 — 2026-11-17' in changelog and '## 0.4.26 — 2026-11-17' in changelog and '## 0.4.25 — 2026-11-17' in changelog and '## 0.4.24 — 2026-11-17' in changelog and '## 0.4.23 — 2026-11-17' in changelog and '## 0.4.22 — 2026-11-17' in changelog and '## 0.4.21 — 2026-11-17' in changelog and '## 0.4.20 — 2026-11-17' in changelog and '## 0.4.19 — 2026-11-17' in changelog and '## 0.4.18 — 2026-11-17' in changelog and '## 0.4.17 — 2026-11-17' in changelog and '## 0.4.16 — 2026-11-16' in changelog and '## 0.4.15 — 2026-11-15' in changelog and '## 0.4.14 — 2026-11-15' in changelog and '## 0.4.13 — 2026-11-15' in changelog and '## 0.4.12 — 2026-11-15' in changelog and '## 0.4.11 — 2026-11-15' in changelog and '## 0.4.10 — 2026-11-15' in changelog and '## 0.4.9 — 2026-11-15' in changelog and '## 0.4.8 — 2026-11-14' in changelog and '## 0.4.7 — 2026-11-14' in changelog and '## 0.4.6 — 2026-11-14' in changelog and '## 0.4.5 — 2026-11-14' in changelog and '## 0.4.4 — 2026-11-14' in changelog and '## 0.4.3 — 2026-11-14' in changelog and '## 0.4.2 — 2026-11-14' in changelog and '## 0.4.1 — 2026-11-14' in changelog and '## 0.4.0 — 2026-11-13' in changelog and '## 0.3.15 — 2026-11-13' in changelog and '## 0.3.14 — 2026-11-11' in changelog
+    assert '## 0.3.7 — 2026-11-10' in changelog
+    assert '## 0.2.4 — 2026-11-08' in changelog and '## 0.3.0 — 2026-11-08' in changelog and '## 0.3.1 — 2026-11-08' in changelog and '## 0.3.2 — 2026-11-09' in changelog and '## 0.3.3 — 2026-11-09' in changelog and '## 0.3.4 — 2026-11-09' in changelog and '## 0.3.5 — 2026-11-09' in changelog and '## 0.3.6 — 2026-11-09' in changelog
+    assert '## 0.2.3 — 2026-11-08' in changelog
     assert '## 0.2.2 — 2026-11-03' in changelog
     assert '## 0.2.1 — 2026-10-20' in changelog
     assert '## 0.2.0 — 2026-10-18' in changelog

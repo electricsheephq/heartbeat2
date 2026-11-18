@@ -14,7 +14,7 @@ from pathlib import Path
 
 import yaml
 
-from .upstream import QuotaError, Upstream
+from .upstream import QuotaError, Upstream, first_count, usage_of
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -309,10 +309,10 @@ def cell(args, scenario, rep):
             director._text(m))} for m in history if m['role'] in ('user', 'assistant') and
             director._text(m) and '⟦pulse o:' not in director._text(m)][-6:]
         result.update(model_calls=calls, upstream_rows=upstream.rows, evidence=str(rig.root))
-        result['tokens'] = {k: sum(r['usage'].get(k, 0) for r in upstream.rows)
+        result['tokens'] = {k: sum(first_count(usage_of(r.get('usage')).get(k)) for r in upstream.rows)
                             for k in ('prompt_tokens', 'completion_tokens', 'total_tokens')}
-        result['tokens']['cached_tokens'] = sum(r['usage'].get('prompt_tokens_details', {}).get(
-                                               'cached_tokens', 0) for r in upstream.rows)
+        result['tokens']['cached_tokens'] = sum(first_count(usage_of(usage_of(r.get('usage')).get(
+                                               'prompt_tokens_details')).get('cached_tokens')) for r in upstream.rows)
         (dest / f'{scenario["id"]}-{rep}.json').write_text(json.dumps(result, indent=2))
         print(f'{scenario["id"]}-{rep}: {result["status"]}', flush=True)
     return code

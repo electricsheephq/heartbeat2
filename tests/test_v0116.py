@@ -205,9 +205,9 @@ def test_other_malformed_inputs_do_not_leak_python_errors(engine, args):
 @pytest.mark.parametrize('kind', ['every', 'cron', 'self'])
 @pytest.mark.parametrize('hold,spacing,lines', [
     ('neither', 10, []), ('spacing', 180, ['spacing']), ('quiet', 10, ['quiet']),
-    # Poller.gate drops a recurring tick in quiet hours before spacing is checked, and the
-    # next real tick after the skip is not known here, so no spacing hold is claimed for it.
-    ('quiet', 180, ['quiet']), ('quiet', 720, ['quiet'])])
+    # Since 0.3.0 the agent's recurring work runs in quiet hours with its messages held, so wake
+    # spacing really holds the turn; a spacing hold past the quiet end leaves no quiet line.
+    ('quiet', 180, ['quiet', 'spacing']), ('quiet', 720, ['spacing'])])
 def test_recurring_receipt_names_holds(engine, kind, hold, spacing, lines):
     now = night(engine, 21 if hold == 'quiet' else 8)
     engine.policy = replace(engine.policy, wake_spacing_minutes=spacing)
@@ -216,15 +216,15 @@ def test_recurring_receipt_names_holds(engine, kind, hold, spacing, lines):
                     if kind == 'cron' else {'every':'1h'})})
     assert result.get('ok'), result
     text = receipt(result)
-    found = [x for x, key in (('spacing', 'Wake spacing holds'), ('quiet', 'Quiet hours skip its ticks'))
+    found = [x for x, key in (('spacing', 'Wake spacing holds'), ('quiet', 'Quiet hours hold its messages'))
              if key in text]
     assert sorted(found) == sorted(lines), text
-    assert 'Quiet hours hold' not in text  # recurring ticks in quiet hours are skipped, not held
+    assert 'skip its ticks' not in text  # since 0.3.0 the agent's recurring work runs in quiet hours; only its messages are held
     if 'spacing' in lines:
         assert f'Wake spacing holds it until {local(engine, now+spacing*60)}.' in text
     if 'quiet' in lines:
-        assert f'Quiet hours skip its ticks until {local(engine, now+11*3600)}.' in text
-    if len(lines) == 2: assert text.index('Quiet hours skip') < text.index('Wake spacing holds')
+        assert f'Quiet hours hold its messages until {local(engine, now+11*3600)}.' in text
+    if len(lines) == 2: assert text.index('Wake spacing holds') < text.index('Quiet hours hold')
 
 
 @pytest.mark.parametrize('now,expected', [

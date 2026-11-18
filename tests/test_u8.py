@@ -214,7 +214,7 @@ def test_R8_F7_spaced_meridiem_not_note(runtime,anchor,expected,note):
 
 @pytest.mark.parametrize('skip_quiet',[True,False])
 def test_R8_F9_restart_scope_is_occurrence(engine,skip_quiet):
-    e=engine; w=arm(e,'every',next_due_at=e.clock.now()+3600)
+    e=engine; w=arm(e,'every',creator='user',next_due_at=e.clock.now()+3600)
     e.tick(); e.clock.advance(3900); e.close()
     e2=Poller(e.ctx,e.store,e.policy,e.clock,session_key_fn=lambda:KEY,paused=lambda:False,jitter=lambda:0,compression_tip=lambda sid:sid)
     try:

@@ -39,9 +39,11 @@ class LiveDirector(WakeDirector):
                 body = body | {'messages': [m | {'content': re.sub(r' \[in:[^]]+\]', '', m['content'])}
                     if isinstance(m.get('content'), str) else m for m in messages]}
             response, status = self.upstream.forward(body)
-            # Errors must retain the active wake for retries/fallback continuations.
-            if status < 400 and not any(c.get('message', {}).get('tool_calls')
-                                        for c in response.get('choices', [])):
+            # Errors must retain the active wake for retries/fallback continuations. A malformed
+            # body (null, a list, bad choices) counts as a reply without tool calls.
+            choices = response.get('choices') if isinstance(response, dict) else None
+            if status < 400 and not any(isinstance(c, dict) and isinstance(c.get('message'), dict) and c['message'].get('tool_calls')
+                                        for c in (choices if isinstance(choices, list) else [])):
                 self._active = None
             return Raw(json.dumps(response), status, 'application/json')
         return super().__call__(record)

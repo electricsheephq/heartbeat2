@@ -10,6 +10,7 @@ from dataclasses import fields, replace, asdict
 from datetime import datetime, timedelta
 import hashlib
 import json
+import logging
 from pathlib import Path
 import secrets
 import sqlite3
@@ -23,12 +24,15 @@ from .model import (Wake, Occurrence, Session, KINDS, WAKE_STATUSES,
 from .schedule import local_day
 
 SCHEMA_VERSION = 1
+HELD_REPORT_OUTCOMES = frozenset({'progress', 'done', 'needs_attention', 'blocked'})
+# The characters str.strip() removes, so SQL trim() agrees with Python on what a blank summary is.
+_WHITESPACE = ''.join(chr(c) for c in range(0x3001) if chr(c).isspace())
 CACHE_FIELDS = {'cache_read_tokens','cache_write_tokens','warm_wakes','cold_wakes','cost_microusd','unpriced_calls'}
 LEDGER_FIELDS = frozenset({"fires", "gated_skips", "governor_skips", "model_turns",
     "noops", "valuable", "delivered", "engaged", "ignored", "tokens_in", "tokens_out", "errors", "provider_deferrals", "checks", "no_verdict"} | CACHE_FIELDS)
 _JSON_FIELDS = {"trigger_json", "probe_state_json", "payload_json"}
 _BOOL_FIELDS = {"babysit", "urgent", "cancel_on_reply", "notify", "force_silent",
-                "enabled", "first_notice_sent", "agent_edited", "owner_requested"}
+                "enabled", "first_notice_sent", "agent_edited", "owner_requested", "role"}
 _TRANSITIONS = {
     "pending": { "skipped", "missed", "dead", "orphaned", "superseded"},
     "claimed": {"pending", "started", "dead", "interrupted", "orphaned", "superseded"},
@@ -137,11 +141,23 @@ def _validate_wake(wake: Wake):
     _json(wake.probe_state_json, 16384)
 
 
+# Meta keys of the form '<prefix><occurrence id>' that gc removes with their occurrence (#54). Each is read only while its row
+# exists, except spend:, which a replayed turn's usage falls back from to the wake's class (gc already removed it before #54).
+# Keys that guard owner input against replay (human:, nonhuman:), and keys per wake, session or day, are never pruned here.
+# Nor is children:<occurrence id>:<attempt>: a recovered turn can stay bound to an old occurrence after gc removes its row,
+# and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
+OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'held_since:', 'ignored:', 'inject_failures:',
+                            'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
+                            'stop_hint_offered:', 'supersede_on_refund:')
+
+
 class Store:
     def __init__(self, path: str | Path, clock: Clock):
         self.path, self.clock = Path(path), clock
         self._lock = threading.RLock()
         self._savepoint = 0
+        self.notify_reservation = None
+        self._after_commit = []
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(str(self.path), timeout=5, isolation_level=None,
                                           check_same_thread=False)
@@ -175,7 +191,8 @@ class Store:
                 if "provider_deferrals" not in columns:
                     self.connection.execute("ALTER TABLE ledger ADD COLUMN provider_deferrals INTEGER NOT NULL DEFAULT 0")
                 additions = {'wakes': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0',
-                                      'agent_edited':'INTEGER NOT NULL DEFAULT 0', 'owner_requested':'INTEGER NOT NULL DEFAULT 0'},
+                                      'agent_edited':'INTEGER NOT NULL DEFAULT 0', 'owner_requested':'INTEGER NOT NULL DEFAULT 0',
+                                      'role':'INTEGER NOT NULL DEFAULT 0', 'budget_turns_per_day':'INTEGER'},
                     'ledger': {'checks':'INTEGER NOT NULL DEFAULT 0', 'no_verdict':'INTEGER NOT NULL DEFAULT 0'},
                     'occurrences': {'created_at':'REAL NOT NULL DEFAULT 0', 'matched_at':'REAL', 'held_since':'REAL',
                         'held_reason':"TEXT NOT NULL DEFAULT ''", 'held_matches':'INTEGER NOT NULL DEFAULT 0', 'api_calls':'INTEGER NOT NULL DEFAULT 0'}}
@@ -190,6 +207,12 @@ class Store:
                             self.connection.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
                             if table=='occurrences' and name=='api_calls':
                                 self.connection.execute('UPDATE occurrences SET api_calls=1 WHERE tokens_in>0 OR tokens_out>0')
+                if self.get_meta('held_reports_from') is None:
+                    # Results held before 0.3.7 were never promised back: the report-back starts at the upgrade,
+                    # so an old backlog can't flood the owner's next replies.
+                    self.connection.execute("UPDATE occurrences SET held_reason = 'reported:' || substr(held_reason, 14) "
+                                            "WHERE state='done' AND held_reason LIKE 'message_held:%'")
+                    self.set_meta('held_reports_from', '0.3.7')
                 self.set_meta("schema_version", str(SCHEMA_VERSION))
         except BaseException:
             self.connection.close()
@@ -205,17 +228,25 @@ class Store:
         with self._lock:
             self.connection.close()
 
+    @property
+    def thread_lock(self):
+        """The in-process lock atomic() holds, for in-memory state that must never wait on SQLite."""
+        return self._lock
+
     @contextmanager
     def atomic(self):
         """Compose table writes atomically; nested calls use rollback savepoints."""
+        callbacks = []
         with self._lock:
             nested = self.connection.in_transaction
+            checkpoint = len(self._after_commit)
             self._savepoint += 1
             name = f"pulse_{self._savepoint}"
             self.connection.execute(f"SAVEPOINT {name}" if nested else "BEGIN IMMEDIATE")
             try:
                 yield self
             except BaseException:
+                del self._after_commit[checkpoint:]
                 if nested:
                     self.connection.execute(f"ROLLBACK TO {name}")
                     self.connection.execute(f"RELEASE {name}")
@@ -226,7 +257,24 @@ class Store:
                 if nested:
                     self.connection.execute(f"RELEASE {name}")
                 else:
-                    self.connection.commit()
+                    try:
+                        self.connection.commit()
+                    except BaseException:
+                        # A failed commit leaves nothing committed: its after-commit work must never run later.
+                        del self._after_commit[checkpoint:]
+                        raise
+                    callbacks, self._after_commit = self._after_commit, []
+        for callback in callbacks:
+            try: callback()
+            except Exception:  # Display-only work after a commit must never fail the committed caller.
+                logging.getLogger('heartbeat2').warning('heartbeat2 after-commit callback failed', exc_info=True)
+
+    def after_commit(self, callback):
+        with self._lock:
+            if self.connection.in_transaction:
+                self._after_commit.append(callback)
+                return
+        callback()
 
     def _insert_record(self, table, record):
         data = asdict(record)
@@ -244,6 +292,31 @@ class Store:
         with self.atomic():
             self.connection.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                     (key, str(value)))
+
+    def mark_reported(self, items: list[tuple[str, str]]):
+        with self.atomic():
+            for wake_id, dedupe_key in items:
+                self.connection.execute(
+                    "UPDATE occurrences SET held_reason = 'reported:' || substr(held_reason, 14) "
+                    "WHERE wake_id=? AND dedupe_key=? AND state='done' AND held_reason LIKE 'message_held:%'",
+                    (wake_id, dedupe_key))
+
+    def held_reports(self, session_key: str) -> list[Occurrence]:
+        return sorted((o for o in self.list_occurrences(session_key=session_key, state='done')
+                       if o.held_reason.startswith('message_held:') and o.notify and not o.delivered
+                       and o.summary.strip() and o.outcome in HELD_REPORT_OUTCOMES
+                       and o.ended_at is not None), key=lambda o: o.ended_at)
+
+    def owner_budget(self, wake_id: str) -> int | None:
+        """The role budget the owner set with /pulse budget: the agent may go under it, never over it unasked."""
+        value = self.get_meta('owner_budget:' + wake_id)
+        try:
+            return int(value) if value else None
+        except ValueError:
+            return None
+
+    def set_owner_budget(self, wake_id: str, budget: int):
+        self.set_meta('owner_budget:' + wake_id, str(int(budget)))
 
     def marker_secret(self) -> str:
         secret = self.get_meta('marker_secret')
@@ -332,6 +405,60 @@ class Store:
             return [_record(Occurrence, row) for row in self.connection.execute(
                 "SELECT o.* FROM occurrences o JOIN wakes w ON w.id=o.wake_id" +
                 (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY o.rowid", values)]
+
+    def dispatches_today(self, wake_id, timezone):
+        """Count claimed/dispatched occurrences; refunded unsent claims don't spend."""
+        day = datetime.fromisoformat(local_day(self.clock.now(), timezone)).replace(tzinfo=timezone)
+        with self._lock:
+            return self.connection.execute(
+                'SELECT count(*) FROM occurrences WHERE wake_id=? AND claimed_at>=? AND claimed_at<?',
+                (wake_id, day.timestamp(), (day + timedelta(days=1)).timestamp())).fetchone()[0]
+
+    def messages_in_flight(self, key):
+        """Wake turns still running that hold a message slot: daily_counts counts them as delivered until they finish."""
+        return sum(1 for o in self.list_occurrences(session_key=key)
+                   if o.state in {'claimed', 'started'} and not o.force_silent)
+
+    def daily_counts(self, key, timezone):
+        totals = {'model_turns': 0, 'delivered': 0}
+        day = local_day(self.clock.now(), timezone)
+        # Keep-warm pings are silent cache reads, not wake turns or messages (#163).
+        from .policy import is_keep_warm
+        pings = set()
+        for w in self.list_wakes(key):
+            if is_keep_warm(w):
+                pings.add(w.id)
+                continue
+            row = self.get_ledger(day, w.id) or {}
+            for k in totals: totals[k] += row.get(k, 0)
+        for o in self.list_occurrences(session_key=key):
+            if o.wake_id in pings: continue
+            if o.state in {'claimed', 'started'}:
+                if o.state == 'claimed': totals['model_turns'] += 1
+                if not o.force_silent: totals['delivered'] += 1
+        # A send that crosses midnight is charged on completion, so reserve its slot on the current day too.
+        # The notifier sets and clears this under the store lock, but this read may run outside it: read it once.
+        reservation = self.notify_reservation
+        if reservation is not None and reservation[0] == key:
+            totals['delivered'] += 1
+        return totals
+
+    def agent_cost_today(self, key, timezone):
+        """Read durable usage-arrival totals, independent of retained history."""
+        day = local_day(self.clock.now(), timezone)
+        return json.loads(self.get_meta(f'agent_spend:{key}:{day}') or
+                          '{"cost_microusd":0,"unpriced_calls":0}')
+
+    def add_agent_spend(self, wake, occurrence_id, timezone, cost_microusd, unpriced_calls):
+        """Called inside the usage transaction; retain the dispatch spend class."""
+        from .policy import owner_class
+        spend = self.get_meta('spend:' + occurrence_id)
+        if spend == 'owner' or spend is None and owner_class(wake): return
+        day = local_day(self.clock.now(), timezone)
+        totals = self.agent_cost_today(wake.session_key, timezone)
+        totals['cost_microusd'] += cost_microusd
+        totals['unpriced_calls'] += unpriced_calls
+        self.set_meta(f'agent_spend:{wake.session_key}:{day}', _json(totals))
 
     def cas_occurrence(self, wake_id: str, dedupe_key: str, expected_state: str,
                        new_state: str, *, attempt: int | None = None, **updates) -> bool:
@@ -498,17 +625,35 @@ class Store:
         ledger_cutoff = (datetime.fromisoformat(local_day(now, timezone)).date() - timedelta(days=ledger_days - 1)).isoformat()
         terminal = sorted(TERMINAL_OCCURRENCE_STATES)
         placeholders = ",".join("?" for _ in terminal)
+        # Keep exactly the rows held_reports can still return (#146).
+        held = sorted(HELD_REPORT_OUTCOMES)
+        held_outcomes = ",".join("?" for _ in held)
         with self.atomic():
-            # Live rows count toward the limit but are never discarded by GC.
+            # Live rows and recent dispatches survive history pruning.
             self.connection.execute(f"""WITH ranked AS (
-                SELECT rowid AS rid,state,
+                SELECT rowid AS rid,state,claimed_at,
                 ROW_NUMBER() OVER (PARTITION BY wake_id,state IN ({placeholders})
                     ORDER BY ended_at DESC,rowid DESC) AS rank,
                 SUM(CASE WHEN state IN ({placeholders}) THEN 0 ELSE 1 END)
                     OVER (PARTITION BY wake_id) AS live FROM occurrences)
                 DELETE FROM occurrences WHERE rowid IN (SELECT rid FROM ranked
-                    WHERE state IN ({placeholders}) AND rank>MAX(0,?-live))""",
-                terminal * 3 + [keep_occurrences])
+                    WHERE state IN ({placeholders}) AND rank>MAX(0,?-live)
+                      AND (claimed_at IS NULL OR claimed_at<?)
+                      AND rid NOT IN (SELECT rowid FROM occurrences WHERE state='done'
+                          AND held_reason LIKE 'message_held:%' AND notify=1 AND delivered=0
+                          AND ended_at IS NOT NULL AND outcome IN ({held_outcomes})
+                          AND trim(summary, ?) <> ''))""",
+                terminal * 3 + [keep_occurrences, now - 2 * 86400] + held + [_WHITESPACE])
             self.connection.execute("DELETE FROM events WHERE consumed_at IS NOT NULL AND consumed_at<?", (now - 7 * 86400,))
             self.connection.execute("DELETE FROM ledger WHERE day<?", (ledger_cutoff,))
+            self.connection.execute("DELETE FROM meta WHERE key LIKE 'agent_spend:%' AND substr(key,-10)<?", (ledger_cutoff,))
+            # Per-occurrence markers go with their occurrence (#54). Split '<prefix><wake_id>/<dedupe_key>' (wake ids never
+            # contain '/') so the lookup uses the primary key. Prefixes match exactly: '_' is a LIKE wildcard. A key with no
+            # '/' after its prefix isn't an occurrence marker and stays.
+            for prefix in OCCURRENCE_META_PREFIXES:
+                n = len(prefix)
+                self.connection.execute(f"""DELETE FROM meta WHERE substr(key,1,{n})=? AND instr(substr(key,{n+1}),'/')>0
+                    AND NOT EXISTS (SELECT 1 FROM occurrences o
+                     WHERE o.wake_id=substr(meta.key,{n+1},instr(substr(meta.key,{n+1}),'/')-1)
+                       AND o.dedupe_key=substr(meta.key,{n+1}+instr(substr(meta.key,{n+1}),'/')))""", (prefix,))
             self.set_meta("last_gc_at", str(now))

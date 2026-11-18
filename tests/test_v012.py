@@ -33,28 +33,36 @@ def hermes_helpers(monkeypatch):
     return helpers
 
 
-@pytest.mark.parametrize('creator', ['agent', 'user'])
-def test_mute_holds_watchers(engine, creator):
-    w = arm(engine, 'subagent_done', creator=creator, agent_edited=creator=='user')
+@pytest.mark.parametrize('creator,agent_edited', [('agent', False), ('user', True), ('user', False)])
+def test_mute_holds_agent_watcher_messages(engine, creator, agent_edited):
+    w = arm(engine, 'subagent_done', creator=creator, agent_edited=agent_edited)
     session(engine, unanswered_count=2)
     o = pending(engine, w, 'e:match')
-    assert engine.gate(w, o, engine.store.get_session(KEY))[:2] == ('held_unanswered', True)
+    assert engine.gate(w, o, engine.store.get_session(KEY)) == ('', False, None)
     engine.dispatch(o)
-    held = engine.store.get_occurrence(w.id, o.dedupe_key)
-    assert held.state == 'pending' and held.error == 'held_unanswered'
-    assert held.matched_at == held.held_since == engine.clock.now()
-    assert not engine.ctx.calls
+    current = engine.store.get_occurrence(w.id, o.dedupe_key)
+    assert current.state == 'claimed' and not current.error
+    assert current.matched_at == engine.clock.now() and current.held_since is None
+    assert len(engine.ctx.calls) == 1
+    if creator == 'user' and not agent_edited:
+        assert not current.force_silent and not current.held_reason
+    else:
+        assert current.force_silent and current.held_reason == 'message_held:unanswered'
 
 
 @pytest.mark.parametrize('kind,creator,trigger', [('every','agent',{}), ('owner_silent','user',{'builtin':True})])
-def test_mute_drops_nudges(engine, kind, creator, trigger):
+def test_mute_holds_recurring_messages_but_drops_builtin_checkin(engine, kind, creator, trigger):
     engine.policy = replace(engine.policy, owner_silent_checkin=True)
     session(engine, unanswered_count=2, last_human_at=engine.clock.now()-90000)
     w = arm(engine, kind, creator=creator, trigger_json=trigger)
     o = pending(engine, w)
     engine.dispatch(o)
-    assert engine.store.get_occurrence(w.id, o.dedupe_key).error == 'unanswered'
-    assert engine.store.get_occurrence(w.id, o.dedupe_key).state == 'skipped'
+    current = engine.store.get_occurrence(w.id, o.dedupe_key)
+    if kind == 'every':
+        assert current.state == 'claimed' and current.force_silent
+        assert current.held_reason == 'message_held:unanswered'
+    else:
+        assert current.error == 'unanswered' and current.state == 'skipped'
 
 
 @pytest.mark.parametrize('creator,expected', [('user','claimed'), ('agent','skipped')])
@@ -71,7 +79,8 @@ def test_caps_owner_at_bypasses_agent_at_drops(engine, creator, expected):
 def test_watcher_cap_holds_to_local_day_dst(engine, date, hours, cap):
     engine.clock.wall = datetime.fromisoformat(date).replace(tzinfo=ZoneInfo('America/New_York')).timestamp()
     engine.policy = replace(engine.policy, timezone='America/New_York', **{cap:1})
-    w = arm(engine, 'subagent_done')
+    w = arm(engine, 'subagent_done', creator='user' if cap == 'max_messages_per_day' else 'agent',
+            agent_edited=False)
     engine.ledger(w, **{'model_turns' if cap=='max_model_wakes_per_day' else 'delivered':1})
     o = pending(engine, w, 'e:match')
     reason, defer, until = engine.gate(w, o, engine.store.get_session(KEY))
@@ -87,8 +96,8 @@ def test_watcher_cap_holds_to_local_day_dst(engine, date, hours, cap):
     assert len(engine.ctx.calls) == 1
 
 
-def test_held_matches_coalesce_and_owner_reply_releases_once(engine):
-    session(engine, unanswered_count=2)
+def test_held_matches_coalesce_and_model_capacity_releases_once(engine):
+    engine.policy = replace(engine.policy, max_model_wakes_per_day=0)
     w = arm(engine, 'subagent_done', noop_streak=4)
     first = engine.clock.now()
     for n in range(3):
@@ -101,6 +110,7 @@ def test_held_matches_coalesce_and_owner_reply_releases_once(engine):
     assert engine.store.get_wake(w.id).noop_streak == 4
     assert not engine.ctx.calls
     admit(engine, text='thanks')
+    engine.policy = replace(engine.policy, max_model_wakes_per_day=24)
     engine.tick()
     engine.tick()
     assert len(engine.ctx.calls) == 1
@@ -109,7 +119,7 @@ def test_held_matches_coalesce_and_owner_reply_releases_once(engine):
 
 @pytest.mark.parametrize('ending', ['expires_at','max_fires'])
 def test_expired_held_preserves_match(engine, ending):
-    session(engine, unanswered_count=2)
+    engine.policy = replace(engine.policy, max_model_wakes_per_day=0)
     w = arm(engine, 'subagent_done', expires_at=engine.clock.now()+10)
     o = pending(engine, w, 'e:match')
     engine.dispatch(o)
@@ -157,14 +167,14 @@ def test_no_fire_probe_checks_are_not_gate_skips(engine):
 def test_hold_visibility_and_last_ten_occurrences(engine, monkeypatch):
     monkeypatch.setattr(commands,'session_env',lambda name: KEY if name=='HERMES_SESSION_KEY' else '')
     runtime = SimpleNamespace(get_engine=lambda:engine)
-    session(engine, unanswered_count=2)
+    engine.policy = replace(engine.policy, max_model_wakes_per_day=0)
     w = arm(engine, 'subagent_done')
     for n in range(11): engine.store.add_occurrence(w.id, f'old:{n}',state='skipped')
     o = pending(engine,w,'e:hold')
     engine.dispatch(o)
     output = commands.handle('why '+w.id, runtime)
     assert 'old:0' not in output and 'old:1 ' not in output
-    for text in ('e:hold','pending','held: waiting for your reply','matched','held-since','delivered no'):
+    for text in ('e:hold','pending','held: waiting for daily capacity','matched','held-since','delivered no'):
         assert text in output
     assert 'Held items: 1' in commands.handle('status',runtime)
     assert 'no_verdict' in commands.handle('ledger',runtime)
@@ -207,8 +217,8 @@ def test_hermes_import_missing_falls_through(engine, monkeypatch):
     from heartbeat2.cache import cache_ttl_for
     monkeypatch.setitem(sys.modules,'agent.agent_runtime_helpers',None)
     route='anthropic|claude-test|api.anthropic.com'
-    engine.store.set_meta('cache_routes',json.dumps({route:{'max_warm_gap':100,'min_cold_gap':200}}))
-    assert cache_ttl_for(route,store=engine.store)==(100,'learned')
+    engine.store.set_meta('cache_routes',json.dumps({route:{'max_warm_gap':1000,'min_cold_gap':2000}}))
+    assert cache_ttl_for(route,store=engine.store)==(1000,'learned')
 
 
 @pytest.mark.parametrize('seconds,expected', [(3419,3419),(3420,3420),(3600,3420),(4500,3420),(4501,4501)])
@@ -319,7 +329,7 @@ def test_store_additive_migration_from_v010(tmp_path, clock):
 
 
 def test_pending_burst_becomes_one_hold_and_keeps_latest(engine):
-    session(engine,unanswered_count=2)
+    engine.policy=replace(engine.policy,max_model_wakes_per_day=0)
     w=arm(engine,'subagent_done')
     for n in range(45): engine.store.add_event('subagent_done',f'burst{n}',{'summary':str(n)},session_key=KEY)
     engine.tick()
@@ -331,7 +341,7 @@ def test_pending_burst_becomes_one_hold_and_keeps_latest(engine):
 def test_daily_hold_releases_with_unchanged_cap_at_midnight(engine):
     engine.policy=replace(engine.policy,max_messages_per_day=1)
     engine.clock.wall=datetime.fromisoformat('2026-03-08T23:59:00+00:00').timestamp()
-    w=arm(engine,'subagent_done')
+    w=arm(engine,'subagent_done',creator='user',agent_edited=False)
     engine.ledger(w,delivered=1)
     o=pending(engine,w,'e:held')
     engine.dispatch(o)

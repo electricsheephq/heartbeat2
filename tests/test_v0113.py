@@ -76,7 +76,8 @@ def test_requested_reminder_bypasses_daily_caps(engine, cap):
     assert len(engine.ctx.calls) == 1 and flag(engine.store.get_wake(w.id)) is True
 
 
-@pytest.mark.parametrize('control', ['undeclared', 'internal', 'empty', 'every', 'watcher', 'stale'])
+# A watcher the owner asks for is no longer a negative control: tests/test_108_agreed_watchers.py (#108 item 1).
+@pytest.mark.parametrize('control', ['undeclared', 'internal', 'empty', 'every', 'stale'])
 def test_negative_controls(engine, control):
     if control == 'internal':
         engine.intake.pre_llm_call(session_id='sid', turn_id='internal',
@@ -90,21 +91,32 @@ def test_negative_controls(engine, control):
     w, result = create(engine, requested=control != 'undeclared', kind=kind)
     assert flag(w) is False
     if control != 'undeclared':
-        assert result.get('owner_asked_ignored') == ('not_one_shot' if kind != 'at' else 'not_owner_turn')
+        assert result.get('owner_asked_ignored') == ('not_one_shot_or_watcher' if kind != 'at' else 'not_owner_turn')
     else:
         assert 'owner_asked_ignored' not in result
     finish(engine)
     session(engine, unanswered_count=engine.policy.max_unanswered)
     o = pending(engine, w)
-    expected = 'held_unanswered' if kind == 'subagent_done' else 'unanswered'
+    expected = '' if kind in {'subagent_done', 'every'} else 'unanswered'
     assert engine.gate(w, o, engine.store.get_session(KEY))[0] == expected
     session(engine, unanswered_count=0)
     for setting, expected in [('max_model_wakes_per_day','daily_model_cap'),
                               ('max_messages_per_day','daily_message_cap')]:
         old = engine.policy
         engine.policy = replace(old, **{setting:0})
-        assert engine.gate(w, o, engine.store.get_session(KEY))[0] == ('held_daily_cap' if kind == 'subagent_done' else expected)
+        assert engine.gate(w, o, engine.store.get_session(KEY))[0] == (
+            'held_daily_cap' if kind == 'subagent_done' and setting == 'max_model_wakes_per_day'
+            else '' if kind in {'every', 'subagent_done'} and setting == 'max_messages_per_day' else expected)
+        if kind == 'subagent_done' and setting == 'max_messages_per_day':
+            assert engine.message_hold_reason(w, engine.store.get_session(KEY)) == 'daily_message_cap'
         engine.policy = old
+    if kind == 'subagent_done':
+        session(engine, unanswered_count=engine.policy.max_unanswered)
+        engine.dispatch(o)
+        current = engine.store.get_occurrence(w.id, o.dedupe_key)
+        assert current.state == 'claimed' and current.force_silent
+        assert current.held_reason == 'message_held:unanswered'
+        assert len(engine.ctx.calls) == 1
 
 
 def test_wake_turn_never_grants(engine):

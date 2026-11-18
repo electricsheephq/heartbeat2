@@ -131,7 +131,8 @@ def test_process_exit_and_pid_reuse_guard(monkeypatch):
 def test_command_modes_json_state_and_cwd(tmp_path, monkeypatch):
     output = [b'one', 0]
     calls = []
-    def run(argv, cwd):
+    def run(argv, cwd, secrets=()):
+        assert not secrets
         calls.append((argv, {'cwd':cwd}))
         return output[1],output[0]
     monkeypatch.setattr(probes, '_run_command', run)

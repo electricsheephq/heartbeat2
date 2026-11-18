@@ -3,7 +3,7 @@
 These opt-in tests run the shipping Hermes gateway and Telegram adapter against
 Hermes's loopback Bot API stand-in and scripted OpenAI-compatible model. No
 Telegram account, real token, model spend, or live profile is used. The default
-unit run skips all 19 cells (E2 has two display variants).
+unit run skips all 22 cells (E2 has two display variants).
 
 Use a separate read-only checkout for each exact Hermes commit:
 
@@ -11,6 +11,7 @@ Use a separate read-only checkout for each exact Hermes commit:
 | --- | --- |
 | v0.21.6 | `818c13be1dc4fd28987e1e881a9408224afd4535` |
 | v0.21.7 | `71d34bad1045610252eda02ee79549436896e784` |
+| v0.23.1 | `3b421578588243f920886e6fe79a6faa87ea026e` |
 | main | `04eb00cef7d9ac2730ed5fd9039a6f3287eb49ca` |
 
 From the plugin worktree, with `HERMES_PIN` pointing to that checkout:
@@ -102,18 +103,18 @@ not prove real Telegram server/client rendering, notification delivery, live
 model quality/cost, long-running reliability, or customer readiness.
 
 E15 arms two agent nudges and a file watcher in one owner turn. After two
-unanswered deliveries, two observed file matches coalesce into one held pending
-occurrence retaining the latest match. An owner reply releases it once, with
-the hold reason in the model's wake text and one visible delivery. E16 checks
+unanswered deliveries, a file match still runs the watcher's turn, silently, with
+the hold in its wake text; its report is held, the report-back turn is skipped
+under the mute, and the owner's next turn is handed the report. Nothing visible
+is sent before the owner writes. E16 checks
 real prompt-usage route/cache touches, the create tool's cache line, and exactly
 one bounded `Cache:` line in the injected wake text. The fake route has unknown
 TTL; neither test establishes real cache warmth or price.
 
-The owner-at and muted-watcher cells print `E2E_LATENCY` JSON with raw
-due/match-to-visible seconds from the stand-in's receiving timestamp. A sampled
-wall/monotonic offset relates its clock to the DB timestamp. Watcher timing starts
-at the first observed match; designed gate holds are included. No latency
-threshold gates these cells yet; retain stdout to collect the samples.
+The owner-at cell prints `E2E_LATENCY` JSON with raw due-to-visible seconds
+from the stand-in's receiving timestamp. A sampled wall/monotonic offset relates
+its clock to the DB timestamp. No latency
+threshold gates this cell yet; retain stdout to collect the samples.
 
 `test_upstream.py` separately reproduces automatic background review after a
 stock plugin injects a turn. It disables heartbeat2, enables memory/skill tools,

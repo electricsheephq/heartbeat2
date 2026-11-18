@@ -314,7 +314,7 @@ def test_R10_A6_off_stops_probes_and_preserves_due(runtime, route):
 
 def test_R10_A7_command_change_silent_baseline_then_change(engine, monkeypatch):
     e = engine; output = [b'pending', 0]
-    monkeypatch.setattr(probes, '_run_command', lambda argv,cwd:(output[1],output[0]))
+    monkeypatch.setattr(probes, '_run_command', lambda argv,cwd,secrets=():(output[1],output[0]))
     w = arm(e, 'command', trigger_json={'command':['git','status'],'fire_on':'change'})
     e.tick()
     assert not e.ctx.calls and e.store.get_wake(w.id).probe_state_json['fingerprint']
@@ -388,9 +388,9 @@ def test_R10_A10_large_event_payload_still_wakes(engine, kind):
 def test_R10_A11_silence_contract_is_final_reply_only(engine):
     w = arm(engine); engine.tick()
     text = engine.ctx.calls[-1][0]
-    contract = 'notify=false → your final reply is not posted. Write no text alongside tool calls on a wake turn; some platforms show tool progress.'
+    contract = 'notify=false → your final reply is not posted; the work still counts. Write no text alongside tool calls on a wake turn: Hermes can post that text even when you stay silent.'
     assert contract in text and 'nothing is posted' not in text
-    assert contract in SKILL.read_text()
+    assert 'Write no text alongside tool calls on a wake turn: Hermes can post that text even when you stay silent.' in SKILL.read_text()
 
 
 @pytest.mark.parametrize('timeout', ['0', '-1'])
@@ -448,9 +448,9 @@ def test_R10_B4_max_fires_ends_wake_and_stops_probing(engine, finish_route):
     assert not [x for x in e.store.list_wakes(KEY) if x.status=='active']
 
 
-def test_R10_B5_every_builtin_checkin_has_optout(engine):
+def test_R10_B5_every_builtin_checkin_has_optout_with_always(engine):
     e = engine; session(e, first_notice_sent=True)
-    e.policy = replace(e.policy, owner_silent_checkin=True)
+    e.policy = replace(e.policy, owner_silent_checkin=True, stop_hint='always')
     e.clock.advance(86401); e.tick()
     assert 'stop checking in' in e.ctx.calls[-1][0] and '/pulse off' in e.ctx.calls[-1][0]
 

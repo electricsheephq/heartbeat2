@@ -13,12 +13,44 @@ import threading
 from . import serving
 
 LOG=logging.getLogger('heartbeat2')
+PLUGIN_ROOT=Path(__file__).resolve().parents[1]
+# Every module of the plugin. A runtime imports them all up front, so plugin files replaced under a running process (an
+# upgrade without a reload) stay inert until the restart instead of mixing old and new modules (#207).
+MODULES=('cache','clock','commands','desk','governor','intake','model','notifier','policy','poller','probes','schedule',
+         'serving','store','tool','voice_bridge','wake_text')
+
+
+def installed_version():
+    # Read at import: an unreadable or undecodable manifest must never stop the plugin loading, whatever the host locale.
+    try:
+        import re
+        match=re.search(r'^version:\s*"?([^"\n]+)',(PLUGIN_ROOT/'plugin.yaml').read_text(encoding='utf-8'),re.M)
+        return match.group(1).strip() if match else None
+    except (OSError, ValueError):
+        return None
+
+
+LOADED_VERSION=installed_version()
+
+
+def load_all():
+    import importlib
+    for name in MODULES: importlib.import_module('.'+name,__package__)
+
+
+def version_skew():
+    """A status line when newer plugin files are installed than this process runs, else ''."""
+    installed=installed_version()
+    if not installed or not LOADED_VERSION or installed==LOADED_VERSION: return ''
+    return f'Upgrade pending: {installed} is installed but {LOADED_VERSION} is running; restart Hermes to finish the upgrade.'
+
+
 _RUNTIMES={}
 _GUARD=threading.RLock()
 HOOKS=('pre_gateway_dispatch','gateway_platform_event','pre_llm_call',
        'pre_api_request','post_api_request','transform_llm_output','on_session_end','agent_loop_stopped',
        'on_session_reset','kanban_task_completed','kanban_task_blocked',
-       'on_kanban_worker_exited','subagent_stop','api_request_error')
+       'on_kanban_worker_exited','subagent_start','subagent_stop','api_request_error')
 EVENTS={'kanban_task_completed':'kanban_completed','kanban_task_blocked':'kanban_blocked',
         'on_kanban_worker_exited':'kanban_worker_exited','subagent_stop':'subagent_done',
         'api_request_error':'api_error'}
@@ -63,18 +95,73 @@ class Runtime:
         self._last_bootstrap_error=''
         self._started_monotonic=self.clock.monotonic()
         self.closed=False
+        from .voice_bridge import VoiceBridgeRegistry
+        self._voice_bridge=VoiceBridgeRegistry()
+        self._voice_bridge_setting=''
+        self.voice_bridge_id=''
+        from .notifier import NotifierRegistry
+        self._notifier=NotifierRegistry()
+        self._notify_via_setting=''
+        self.notify_via_invalid=False
+
+    def register_voice_bridge(self):
+        from .policy import Policy
+        # Read only this startup setting; leave first-use policy fallback untouched.
+        get_config=getattr(self.ctx,'get_config',None)
+        if not callable(get_config): return
+        # get_config reads the active Hermes home's config, so scope the snapshot.
+        with home_scope(self.home): self._voice_bridge_setting=get_config('voice_bridge','')
+        try: self.voice_bridge_id=Policy.from_settings({'voice_bridge':self._voice_bridge_setting}).voice_bridge
+        except (ValueError,TypeError,OverflowError): self.voice_bridge_id=''
+        emit,subscribe=getattr(self.ctx,'emit',None),getattr(self.ctx,'subscribe',None)
+        if not self.voice_bridge_id or not callable(emit) or not callable(subscribe): return
+        try:
+            subscribe(self.voice_bridge_id+':heartbeat2_voice_bridge',self._voice_bridge.announce)
+            emit('voice_bridge_wanted',{'version':1})
+        except Exception:
+            LOG.warning('heartbeat2 voice bridge event bus unavailable',exc_info=True)
+
+    def register_notifier(self):
+        from .policy import Policy
+        get_config=getattr(self.ctx,'get_config',None)
+        if not callable(get_config): return
+        with home_scope(self.home): self._notify_via_setting=get_config('notify_via','')
+        try: setting=Policy.from_settings({'notify_via':self._notify_via_setting}).notify_via
+        except (ValueError,TypeError,OverflowError):
+            self.notify_via_invalid=True
+            LOG.warning('heartbeat2 notify_via ignored: expected <plugin>:<target> or blank')
+            return
+        emit,subscribe=getattr(self.ctx,'emit',None),getattr(self.ctx,'subscribe',None)
+        if not setting or not callable(emit) or not callable(subscribe): return
+        try:
+            subscribe(setting.split(':',1)[0]+':heartbeat2_notifier',self._notifier.announce)
+            emit('notifier_wanted',{'version':1})
+        except Exception:
+            LOG.warning('heartbeat2 notifier event bus unavailable',exc_info=True)
+
+    def notifier(self):
+        try: return self._notifier.get()
+        except Exception: return None
+
+    def voice_bridge(self):
+        try: return self._voice_bridge.get()
+        except Exception: return None
 
     def policy(self):
         from dataclasses import fields
         from .policy import Policy
         with self._policy_lock,home_scope(self.home):
-            settings={f.name:self.ctx.get_config(f.name,getattr(Policy(),f.name))
+            settings={f.name:(self._notify_via_setting if f.name=='notify_via' else
+                              self._voice_bridge_setting if f.name=='voice_bridge' else
+                              self.ctx.get_config(f.name,getattr(Policy(),f.name)))
                       for f in fields(Policy) if f.name not in {'clock','profile_timezone'}}
             profile=''
             try:
                 from hermes_time import get_timezone_name
                 profile=get_timezone_name()
-            except Exception: pass
+            except Exception:
+                # A failed lookup keeps the zone in use: a passing error would move every cron time away and back (#170).
+                if self._last_good is not None: profile=self._last_good.profile_timezone
             errors={}
             try:
                 policy=Policy.from_settings(settings,clock=self.clock,profile_timezone=profile)
@@ -83,7 +170,9 @@ class Runtime:
                     try: Policy.from_settings({key:value},clock=self.clock,profile_timezone=profile)
                     except (ValueError,TypeError,OverflowError) as exc:
                         errors[key]=str(exc)
-                        if self._last_good is not None: settings[key]=getattr(self._last_good,key)
+                        if key in {'voice_bridge','notify_via'}: settings[key]=''
+                        elif key=='stop_hint': settings.pop(key)
+                        elif self._last_good is not None: settings[key]=getattr(self._last_good,key)
                         else: settings.pop(key)
                 try: policy=Policy.from_settings(settings,clock=self.clock,profile_timezone=profile)
                 except (ValueError,TypeError,OverflowError):
@@ -115,6 +204,9 @@ class Runtime:
                 self._engine.signal=self._wake.set
                 self._engine.needs_restart=self.needs_restart
                 self._engine.runtime_status=self.status
+                self._engine.voice_bridge=self.voice_bridge
+                self._engine.notifier=self.notifier
+                self._engine.notify_via_invalid=self.notify_via_invalid
             return self._engine
 
     def inactive(self):
@@ -209,6 +301,11 @@ class Runtime:
                         from .poller import Poller
                         e=self.get_engine()
                         runner=Poller(self.ctx,e.store,e.policy,self.clock,boot_at=self.boot_at)
+                        runner.voice_bridge=self.voice_bridge
+                        runner.notifier=self.notifier
+                        runner.notifications=e.notifications
+                        runner._owns_notifications=False
+                        runner.notify_via_invalid=self.notify_via_invalid
                         runner.refresh_policy=self.policy
                         runner.process_start=not self._reconciled
                         self._runner=runner
@@ -239,16 +336,22 @@ class Runtime:
             self.closed=True
             self._stop.set()
             self._wake.set()
+            if self._engine: self._engine.notifications.stop()
+        self._voice_bridge.close()
+        self._notifier.close()
+        # No engine, store or global registration lock is held while joining.
+        if self._engine: self._engine.notifications.close()
         for thread in self._threads:
             if thread is not threading.current_thread(): thread.join(timeout=.5)
         if self._engine:
-            # This runtime's turns are abandoned even when a tick outlives the join below.
             from .poller import LOCAL_EPOCHS
             LOCAL_EPOCHS.discard(self._engine.epoch)
-        # Do not close a connection under a still-running old tick.
-        if self._engine and all(not t.is_alive() for t in self._threads):
-            self._engine.close()
-            self._engine.store.close()
+            worker=self._engine.notifications.thread
+            threads=self._threads+([worker] if worker is not None else [])
+            # A live tick or transport still owns this connection.
+            if all(not t.is_alive() for t in threads):
+                self._engine.close()
+                self._engine.store.close()
         with _GUARD:
             if _RUNTIMES.get(self.scope) is self: _RUNTIMES.pop(self.scope,None)
 
@@ -268,7 +371,7 @@ def _register_surfaces(ctx,runtime):
     skill=getattr(ctx,'register_skill',None)
     if skill:
         skill('heartbeat2-usage',Path(__file__).resolve().parents[1]/'skills/heartbeat2-usage/SKILL.md',
-              'Close named open loops with bounded wakes and deterministic watchers.')
+              'Your own time in this chat: roles you own, follow-ups, watchers and own-time turns, within the owner\'s budgets.')
         skill('heartbeat2-report-problem',Path(__file__).resolve().parents[1]/'skills/heartbeat2-report-problem/SKILL.md',
               'HeartBeat 2.0: report a bug or problem')
 
@@ -281,6 +384,7 @@ def register(ctx,**options):
         _register_surfaces(ctx,None)
         return None
     scope=manager.scope_key
+    load_all()
     with _GUARD:
         runtime=_RUNTIMES.get(scope)
         if runtime is not None and not runtime.closed: return runtime
@@ -290,6 +394,8 @@ def register(ctx,**options):
             _register_surfaces(ctx,runtime)
             cleanup=getattr(ctx,'on_unload',None)
             if cleanup: cleanup(runtime.close)
+            runtime.register_voice_bridge()
+            runtime.register_notifier()
             runtime.start()
             return runtime
         except BaseException:

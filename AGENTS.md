@@ -4,7 +4,7 @@ Guidance for AI coding agents, and for people, working in this repository.
 
 ## What this is
 
-HeartBeat 2.0 is a standalone Hermes Agent plugin for bounded wakes and deterministic watchers. It schedules a turn in the messaging-gateway conversation that armed it, using that conversation's model and tools. The current release delivers into gateway DMs (group chats only when `dm_only` is off); CLI, TUI, Desktop, API server and cron arming are refused.
+HeartBeat 2.0 is a standalone Hermes Agent plugin for bounded wakes and deterministic watchers. It schedules a turn in the conversation that armed it, using that conversation's model and tools. It delivers into gateway DMs (group chats only when `dm_only` is off) and Desktop/TUI local sessions on Hermes hosts with local plugin injection (0.23+). Retired app sessions HOLD wakes until reattached; CLI, API server and cron arming are refused.
 
 ## Layout
 
@@ -30,6 +30,16 @@ python -m pytest -q
 The integration and gateway E2E jobs install pinned Hermes and run `tests/integration` and the E2E harness. Leave those to CI unless
 your change touches them.
 
+A pull request merges only when these 12 required checks pass:
+
+- `Unit (ubuntu-latest, Python 3.11)`, `Unit (ubuntu-latest, Python 3.13)`, `Unit (ubuntu-latest, Python 3.14)`
+- `Unit (macos-latest, Python 3.11)`, `Unit (macos-latest, Python 3.13)`, `Unit (macos-latest, Python 3.14)`
+- `Real Hermes loader (v0.21.6)`, `Real Hermes loader (pinned-main)`
+- `Real Telegram gateway (v0.21.6)`, `Real Telegram gateway (v0.21.7)`, `Real Telegram gateway (v0.23.1)`, `Real Telegram gateway (main)`
+
+Renaming one of these jobs, or changing the Hermes versions they pin, changes the check names. Maintainers update the required
+checks in the same change.
+
 ## Rules
 
 - Keep each change small and focused: one change per PR.
@@ -40,6 +50,19 @@ your change touches them.
 - Diagnose installed deployments with status and logs only; do not fire a wake, send a DM or change consent to reproduce a bug.
 - Never commit secrets, tokens, real user data, or machine-specific paths.
 - Tests use a temporary `HERMES_HOME`, never a real one.
+
+## Release closeout (maintainers, after every release)
+
+After the release is published:
+
+1. Close every issue the release fully served, with a comment naming the version. Don't close an umbrella or parent issue
+   whose own acceptance isn't met: split what is left into its own issue, or narrow it.
+2. Tick the boxes it completed in VISION.md, the roadmap tracker (#139) and issue checklists. Close a milestone once all its
+   issues are closed, and move work that is parked or waits on Hermes to the Backlog or Research / blocked milestones.
+3. Update every line in the README, VISION.md, #139 and milestone descriptions that names the latest release or what ships
+   next.
+4. Add the release's row to #139, and post one closeout line as a comment on the release pull request: issues closed, boxes
+   ticked, docs updated (or "none").
 
 ## Filing issues
 
