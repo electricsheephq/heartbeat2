@@ -51,7 +51,8 @@ After the release is published:
    issues are closed, and move work that is parked or waits on Hermes to the Backlog or Research / blocked milestones.
 3. Update every line in the README, VISION.md, #139 and milestone descriptions that names the latest release or what ships
    next.
-4. Add the release's row to #139, naming the issues it closed.
+4. Add the release's row to #139, and post one closeout line as a comment on the release pull request: issues closed, boxes
+   ticked, docs updated (or "none").
 
 ## Filing issues
 
