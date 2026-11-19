@@ -71,6 +71,33 @@ def test_file_baseline_change_regex_appended_lines_rotation_truncation(tmp_path)
     assert probes.check(wake('file', state=baseline['state'], path=str(p)))['fire']
 
 
+def test_file_watcher_opens_without_o_nonblock_and_in_binary_mode(tmp_path, monkeypatch):
+    # Windows Python has no os.O_NONBLOCK and needs os.O_BINARY (#115): the watcher must still fire, once, with no error.
+    import os
+    binary = 1 << 30
+    real_open, flags_seen = os.open, []
+    def recording_open(path, flags, *args, **kwargs):
+        flags_seen.append((str(path), flags))
+        return real_open(path, flags & ~binary, *args, **kwargs)
+    p = tmp_path/'build.log'
+    p.write_text('ok\n')
+    w = wake('file', path=str(p), pattern='FAILED')
+    # Undo inside the test: tmp_path's own cleanup (shutil.rmtree) needs the real os.O_NONBLOCK.
+    with monkeypatch.context() as m:
+        m.delattr(os, 'O_NONBLOCK', raising=False)
+        m.setattr(os, 'O_BINARY', binary, raising=False)
+        m.setattr(os, 'open', recording_open)
+        baseline = probes.check(w)
+        with p.open('a') as log: log.write('FAILED step 3\n')
+        fired = probes.check(replace(w, probe_state_json=baseline['state']))
+        again = probes.check(replace(w, probe_state_json=fired['state']))
+    assert not baseline.get('error') and not baseline['fire']
+    assert not fired.get('error') and fired['fire'] and 'FAILED step 3' in fired['message']
+    assert not again.get('error') and not again['fire']
+    watched = [flags for path, flags in flags_seen if path == str(p)]
+    assert len(watched) == 3 and all(flags & binary for flags in watched)
+
+
 def test_file_and_url_errors_are_not_changes(tmp_path, monkeypatch):
     assert not probes.check(wake('file', path=str(tmp_path/'absent'))).get('error')
     monkeypatch.setattr(probes, '_get_url', lambda url, **kwargs: (_ for _ in ()).throw(OSError()), raising=False)

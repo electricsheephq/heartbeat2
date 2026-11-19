@@ -340,7 +340,8 @@ def _file(wake, home):
         before = os.stat(path)
         if not stat_module.S_ISREG(before.st_mode):
             raise ValueError('file probe requires a regular file')
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        # Windows Python has no O_NONBLOCK, and without O_BINARY it reads in text mode (offsets drift from st_size).
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
     except FileNotFoundError:
         return _result(wake, {'absent':True, 'fingerprint':_hash('absent'), 'offset':0, 'size':0}, False, '')
     with os.fdopen(fd, 'rb') as source:
