@@ -86,18 +86,18 @@ def test_raised_lifetime_uses_general_bound_for_all_wakes(engine):
     assert create(engine, {'kind':'at', 'at':'in 400d'}, owner_asked=True).get('error') == 'invalid_request'
 
 
-@pytest.mark.parametrize('late,fired', [(3*3600, True), (3*DAY, False)])
-def test_year_reminder_downtime(engine, command, late, fired):
+@pytest.mark.parametrize('late', [3*3600, 3*DAY])
+def test_year_reminder_downtime(engine, command, late):
     w = reminder(engine, command, 'agent')
     finish(engine)
     engine.clock.advance(365*DAY+late)
     engine.tick()
-    assert len(engine.ctx.calls) == int(fired)
+    # The owner asked for it, so it is never dropped as missed (#230); past the late window the turn reports the miss.
+    assert len(engine.ctx.calls) == 1
     occurrence, = engine.store.list_occurrences(w.id)
-    assert occurrence.state == ('claimed' if fired else 'missed')
+    assert occurrence.state == 'claimed'
     assert engine.store.get_wake(w.id).status != 'expired'
-    if not fired:
-        assert 'missed' in engine.store.get_meta('notice:'+KEY)
+    assert ('it was missed' in engine.ctx.calls[-1][0]) == (late > 24*3600)
 
 
 def test_default_expiry_and_explicit_hard_end_clamp(engine):
@@ -173,9 +173,9 @@ def test_worst_case_receipt_keeps_exemption(engine):
 
 def test_release_metadata():
     root = Path(__file__).resolve().parents[1]
-    assert 'version: "0.4.30"' in (root/'plugin.yaml').read_text()
+    assert 'version: "0.4.31"' in (root/'plugin.yaml').read_text()
     changelog = (root/'CHANGELOG.md').read_text()
-    assert '## 0.4.30 — 2026-11-20' in changelog and '## 0.4.29 — 2026-11-19' in changelog and '## 0.4.28 — 2026-11-17' in changelog and '## 0.4.27 — 2026-11-17' in changelog and '## 0.4.26 — 2026-11-17' in changelog and '## 0.4.25 — 2026-11-17' in changelog and '## 0.4.24 — 2026-11-17' in changelog and '## 0.4.23 — 2026-11-17' in changelog and '## 0.4.22 — 2026-11-17' in changelog and '## 0.4.21 — 2026-11-17' in changelog and '## 0.4.20 — 2026-11-17' in changelog and '## 0.4.19 — 2026-11-17' in changelog and '## 0.4.18 — 2026-11-17' in changelog and '## 0.4.17 — 2026-11-17' in changelog and '## 0.4.16 — 2026-11-16' in changelog and '## 0.4.15 — 2026-11-15' in changelog and '## 0.4.14 — 2026-11-15' in changelog and '## 0.4.13 — 2026-11-15' in changelog and '## 0.4.12 — 2026-11-15' in changelog and '## 0.4.11 — 2026-11-15' in changelog and '## 0.4.10 — 2026-11-15' in changelog and '## 0.4.9 — 2026-11-15' in changelog and '## 0.4.8 — 2026-11-14' in changelog and '## 0.4.7 — 2026-11-14' in changelog and '## 0.4.6 — 2026-11-14' in changelog and '## 0.4.5 — 2026-11-14' in changelog and '## 0.4.4 — 2026-11-14' in changelog and '## 0.4.3 — 2026-11-14' in changelog and '## 0.4.2 — 2026-11-14' in changelog and '## 0.4.1 — 2026-11-14' in changelog and '## 0.4.0 — 2026-11-13' in changelog and '## 0.3.15 — 2026-11-13' in changelog and '## 0.3.14 — 2026-11-11' in changelog
+    assert '## 0.4.31 — 2026-11-21' in changelog and '## 0.4.30 — 2026-11-20' in changelog and '## 0.4.29 — 2026-11-19' in changelog and '## 0.4.28 — 2026-11-17' in changelog and '## 0.4.27 — 2026-11-17' in changelog and '## 0.4.26 — 2026-11-17' in changelog and '## 0.4.25 — 2026-11-17' in changelog and '## 0.4.24 — 2026-11-17' in changelog and '## 0.4.23 — 2026-11-17' in changelog and '## 0.4.22 — 2026-11-17' in changelog and '## 0.4.21 — 2026-11-17' in changelog and '## 0.4.20 — 2026-11-17' in changelog and '## 0.4.19 — 2026-11-17' in changelog and '## 0.4.18 — 2026-11-17' in changelog and '## 0.4.17 — 2026-11-17' in changelog and '## 0.4.16 — 2026-11-16' in changelog and '## 0.4.15 — 2026-11-15' in changelog and '## 0.4.14 — 2026-11-15' in changelog and '## 0.4.13 — 2026-11-15' in changelog and '## 0.4.12 — 2026-11-15' in changelog and '## 0.4.11 — 2026-11-15' in changelog and '## 0.4.10 — 2026-11-15' in changelog and '## 0.4.9 — 2026-11-15' in changelog and '## 0.4.8 — 2026-11-14' in changelog and '## 0.4.7 — 2026-11-14' in changelog and '## 0.4.6 — 2026-11-14' in changelog and '## 0.4.5 — 2026-11-14' in changelog and '## 0.4.4 — 2026-11-14' in changelog and '## 0.4.3 — 2026-11-14' in changelog and '## 0.4.2 — 2026-11-14' in changelog and '## 0.4.1 — 2026-11-14' in changelog and '## 0.4.0 — 2026-11-13' in changelog and '## 0.3.15 — 2026-11-13' in changelog and '## 0.3.14 — 2026-11-11' in changelog
     assert '## 0.3.7 — 2026-11-10' in changelog
     assert '## 0.2.4 — 2026-11-08' in changelog and '## 0.3.0 — 2026-11-08' in changelog and '## 0.3.1 — 2026-11-08' in changelog and '## 0.3.2 — 2026-11-09' in changelog and '## 0.3.3 — 2026-11-09' in changelog and '## 0.3.4 — 2026-11-09' in changelog and '## 0.3.5 — 2026-11-09' in changelog and '## 0.3.6 — 2026-11-09' in changelog
     assert '## 0.2.3 — 2026-11-08' in changelog

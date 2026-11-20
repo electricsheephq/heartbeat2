@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.31 — 2026-11-21
+
+- **Your reminders are no longer dropped silently after downtime.** If HeartBeat was off or the gateway was down when one of your own one-time reminders came due, a reminder more than `catch_up_hours` (6 by default) late was marked missed. The only trace was a line the agent saw on your next message, which didn't say which reminder it was. Your reminders, from `/pulse add` or asked for in chat, now always get their turn. Up to 24 hours late (or `catch_up_hours`, if longer) the reminder fires and says it is late. Later than that, the turn tells you in one line which reminder was missed and when it was due. The agent's own one-time wakes still end as missed after `catch_up_hours`. Their notice now names the wake and its due time, and `/pulse list` says it was too late after downtime. (#230)
+
 ## 0.4.30 — 2026-11-20
 
 - **One cold miss no longer turns keep-warm off for good on Claude routes.** Keep-warm stopped for a route as soon as the cache once went cold after a shorter gap than it had stayed warm, and nothing turned it back on. On Claude routes that miss is a changed prompt (a compaction or a rebuilt system prompt), because their caches last 5 minutes or 1 hour, so it no longer counts, and the learned lifetime is capped at the hour. Two pings in a row whose first model call finds the cache cold stop pings on that route instead, until a reply on that route reuses the cache after more than 15 minutes or you run `/pulse warm on` again, so a cache that really got shorter costs at most two cold pings per chat and route. Routes that report their cache lifetime, and routes to other models, keep their old rules. (#228)

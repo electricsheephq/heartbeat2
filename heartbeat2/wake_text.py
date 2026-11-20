@@ -21,6 +21,9 @@ HOLD_LABELS = {
 }
 
 
+# A late owner reminder says so once it is this late (#230); smaller delays are normal scheduling.
+LATE_NOTE_S = 15 * 60
+
 def _age(seconds: float) -> str:
     minutes = max(0, int(seconds // 60))
     days, minutes = divmod(minutes, 1440)
@@ -60,7 +63,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
                 max_messages: int = 6, payload=None, governor_hint: str = "",
                 late_by_s: float | None = None, trigger_summary: str = "", after_restart: bool = False,
                 held_by: str = "", message_held: str = "", cache_line: str = "", marker_tag: str | None = None,
-                desk: str = "", handoffs: str = "", held_reports: str = "",
+                desk: str = "", handoffs: str = "", held_reports: str = "", late_window_s: float | None = None,
                 stop_hint: str = 'once', stop_hint_shown: bool | None = None,
                 stop_hint_chat_shown: bool | None = None) -> str:
     now = clock.now()
@@ -84,6 +87,16 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
         f"Local time: {local:%a %d %b %H:%M} ({tz_name}){owner_clause} · fire {wake.fires + 1} of {fire_limit}",
         f"Why: {escape_text(why)}", f"Your note: {escape_text(wake.note)}",
     ]
+    # The owner's own one-time reminder after downtime (#230): late, it says so; past the late window it reports the miss.
+    if late_window_s is not None and late_by_s is not None and late_by_s >= LATE_NOTE_S:
+        due_local = datetime.fromtimestamp(now - late_by_s, zone(timezone))
+        if late_by_s > late_window_s:
+            lines.append(f"This reminder was due {due_local:%a %d %b %H:%M} and is {_age(late_by_s)} late, past the "
+                         f"{_age(late_window_s)} late window. Tell the owner in one line that it was missed: what it was and "
+                         "when it was due. Don't act on it as if it were on time.")
+        else:
+            lines.append(f"This reminder was due {due_local:%a %d %b %H:%M} and is {_age(late_by_s)} late: "
+                         "deliver it now and say it is late.")
     if wake.scratch:
         lines.append(f"Scratch: {escape_text(wake.scratch)}")
     if desk and (wake.role or wake.trigger_json.get('own_time')):

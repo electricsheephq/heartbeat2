@@ -17,7 +17,7 @@ import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
-from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every
+from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
 from . import governor
 
 LOG = logging.getLogger('heartbeat2')
@@ -538,7 +538,10 @@ class Poller:
                 tz=self.policy.resolved_timezone()
                 w=self.follow_zone(w,tz,now)
                 # A report-back is due now by design and waits on holds, so the timer catch-up cutoff never misses it (#137).
-                due=time_due(w,now=now,catch_up_s=10**9 if w.trigger_json.get('report_back') else self.policy.catch_up_hours*3600,
+                # Nor the owner's own one-time reminder (#230): it fires late and says so, or past the late window its turn
+                # tells the owner it was missed. Only the agent's own one-shots end as missed.
+                owner_reminder=owner_class(w) and one_shot(w)
+                due=time_due(w,now=now,catch_up_s=10**9 if w.trigger_json.get('report_back') or owner_reminder else self.policy.catch_up_hours*3600,
                              timezone=tz,jitter_unit=self.jitter(),**self.timing(w))
                 if due:
                     if not (w.kind in RECURRING_KINDS and due.state=='pending' and s.list_occurrences(w.id,state='pending')):
@@ -552,7 +555,9 @@ class Poller:
                         self.notice(w.session_key,'Some wakes were late / scheduler was stalled.')
                     if due.state=='missed':
                         self.terminal_one_shot(s.get_wake(w.id))
-                        self.notice(w.session_key,'A wake was too late after restart and was missed.')
+                        when=datetime.fromtimestamp(float(due.dedupe_key[2:]),zone(tz))
+                        name=' '.join((w.title or w.note).split())[:60]
+                        self.notice(w.session_key,f'A wake ({w.id}'+(f': {name}' if name else '')+f', due {when:%a %d %b %H:%M}) was too late after downtime and was missed.')
             elif w.kind in PROBE_KINDS|EVENT_KINDS and w.deadline_at is not None and w.deadline_at<=now:
                 # Deadline fallback is one fire only, and only when no trigger
                 # occurrence has already been produced (including pending).
@@ -1014,6 +1019,7 @@ class Poller:
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-int(not o.force_silent and o.state in {'claimed','started'}),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
              after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
+             late_window_s=self.policy.late_window_s() if owner_class(w) and one_shot(w) else None,
              cache_line=cache_line,marker_tag=tag,handoffs=handoffs,held_reports=held_reports,
              desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
                               measure=lambda text: len(escape_text(text)),turn=o)
