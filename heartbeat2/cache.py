@@ -186,7 +186,9 @@ def _unknown_reason(store, session):
     except Exception:
         warm = cold = None
     if warm and cold:
-        return f"this route's cache lifetime isn't known: it stayed warm across {minutes(warm)} but went cold after {minutes(cold)}"
+        # A changed prompt or a new provider session reads as cold too, so this can't be settled from gaps alone (#203).
+        return (f"this route's cache lifetime isn't known: it stayed warm across {minutes(warm)} but went cold after {minutes(cold)}. "
+                "A changed prompt or a new provider session also reads as cold, so keep-warm stays off here rather than pay for cold pings")
     return "this route's cache lifetime isn't known yet: no call has reused the cache after a gap"
 
 

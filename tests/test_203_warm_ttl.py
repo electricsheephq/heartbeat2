@@ -90,3 +90,23 @@ def test_learned_ttl_ignores_a_sub_floor_cold_on_claude_only(engine, monkeypatch
     # On Claude a 200 s miss isn't expiry, so it can't close a learned bracket; elsewhere it still does.
     assert cache.cache_ttl_for(ROUTE, store=e.store) == (None, 'unknown')
     assert cache.cache_ttl_for(other, store=e.store) == (100, 'learned')
+
+
+def test_status_says_why_keep_warm_has_no_ping(engine, monkeypatch):
+    """The reported row (warm 60.1m, cold 9.8m on a DirectSDK route): status and the tool view say why no ping is due."""
+    from heartbeat2.commands import _item, keep_warm_id
+    from heartbeat2.model import Wake
+    monkeypatch.setattr(cache, 'cache_ttl_for', lambda *a, **k: (None, 'unknown'))
+    e, now = engine, engine.clock.now()
+    e.store.set_meta('cache_routes', json.dumps({ROUTE: {'max_warm_gap': 3603.9, 'min_cold_gap': 585.6}}))
+    session(e, last_route=ROUTE, last_prompt_tokens=580000, last_cache_touch_at=now, last_human_at=now)
+    s = e.store.get_session(KEY)
+    e.store.create_wake(Wake(KEY, 'Keep the prompt cache warm.', 'self', id=keep_warm_id(KEY), platform=s.platform,
+        chat_type=s.chat_type, chat_id=s.chat_id, creator='user', created_in='command', title='Keep-warm',
+        trigger_json={'builtin': True, 'keep_warm': True}))
+    wake = e.store.get_wake(keep_warm_id(KEY))
+    assert wake.next_due_at is None
+    text = _item(e, wake)
+    assert 'no ping due now: ' in text
+    assert 'stayed warm across 60.1m but went cold after 9.8m' in text
+    assert 'keep-warm stays off here rather than pay for cold pings' in text

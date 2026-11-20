@@ -147,7 +147,7 @@ def _item(engine, wake, today_budget=None):
     elif today_budget and wake.status == 'active' and today_budget[0] >= today_budget[1]: due = 'resting until tomorrow'
     else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
     role = f' · today {today_budget[0]}/{today_budget[1]}' if today_budget else ''
-    if is_keep_warm(wake) and wake.status == 'active' and wake.next_due_at is None: due = 'no ping due now'
+    if is_keep_warm(wake) and wake.status == 'active' and wake.next_due_at is None: due = 'no ping due now: ' + _no_ping_reason(engine, wake)
     kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
     held = app_closed_hold(engine, wake)
     if not held and _sleeping(engine, wake): held = 'asleep until you write'
@@ -606,6 +606,15 @@ def _transition(engine,session,wake,action,seconds):
 def keep_warm_id(session_key):
     import hashlib
     return 'warm_'+hashlib.sha256(session_key.encode()).hexdigest()[:16]
+
+
+def _no_ping_reason(engine, wake):
+    """Why an active keep-warm has no ping due, for status and the tool view (the agent reads these too)."""
+    try:
+        plan = cache.keep_warm_plan(engine.store, engine.store.get_session(wake.session_key), engine.policy, engine.clock.now())
+        return plan.get('reason') or 'the next ping is scheduled at the next check'
+    except Exception:
+        return '/pulse warm says why'
 
 
 def _keep_warm_line(engine, session, wake, counts):

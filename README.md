@@ -317,7 +317,9 @@ turn ("reply [SILENT]", no tools) that reads the cache and keeps it alive, so th
 - Pings are silent, aren't wake turns, and don't count toward wake turns, messages, active items or the daily priced-spend limit
   for the agent's own turns. `/pulse status` and `/pulse ledger` show them on their own row with their cost.
 - Only you turn it on or off (`/pulse warm off`); the agent can't. When the route doesn't report the cache lifetime,
-  HeartBeat uses the longest gap it has seen stay warm on that route. When it can't tell the lifetime, `/pulse warm` says why.
+  HeartBeat uses the longest gap it has seen stay warm on that route. A ping that finds the cache cold stops keep-warm on that
+  route: a changed prompt or a new provider session reads as cold too, and pinging on would pay a cold write each time.
+  `/pulse warm`, `/pulse status` and the agent's list say why no ping is due.
 - Hermes has no per-turn output cap for plugins, so the ping asks for a one-word reply rather than enforcing it.
 - Hermes builds that include its own prompt-cache warmer (NousResearch/hermes-agent#156455, merged after Hermes 0.23.2) keep
   most chats' caches warm by themselves, and HeartBeat can't yet see that schedule. In a chat that warmer handles, turn
