@@ -36,9 +36,9 @@ def test_an_existing_short_gap_cold_no_longer_blocks_keep_warm(engine, monkeypat
     e.store.set_meta('cache_routes', json.dumps({ROUTE: {'max_warm_gap': 3606, 'min_cold_gap': 6}}))
     session(e, last_route=ROUTE, last_prompt_tokens=570000, last_cache_touch_at=now, last_human_at=now)
     s = e.store.get_session(KEY)
-    assert cache.warm_lifetime(e.store, s) == (3606, 'warm_seen')
+    assert cache.warm_lifetime(e.store, s) == (3600, 'warm_seen')   # #228: a Claude lifetime is capped at the hour
     plan = keep_warm_plan(e.store, s, e.policy, now)
-    assert plan['due_at'] == now + 3606 - max(120, .08 * 3606) and plan['ttl'] == 3606
+    assert plan['due_at'] == now + 3600 - max(120, .08 * 3600) and plan['ttl'] == 3600
     assert 'cold' not in cache.line(e.store, s, now, pricing=False)
 
 

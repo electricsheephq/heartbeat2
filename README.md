@@ -320,7 +320,7 @@ turn ("reply [SILENT]", no tools) that reads the cache and keeps it alive, so th
   HeartBeat uses the longest gap it has seen stay warm on that route. Claude caches last 5 minutes or 1 hour, so once a Claude
   route has stayed warm past 5 minutes, a shorter cold miss (a compaction or a rebuilt system prompt changes the prompt) doesn't
   stop keep-warm. Two pings in a row whose first model call finds the cache cold do, until a reply on that route reuses the
-  cache after more than 5 minutes or you run `/pulse warm on` again. On other models' routes, a cold miss shorter than the
+  cache after more than 15 minutes or you run `/pulse warm on` again. On other models' routes, a cold miss shorter than the
   longest warm gap stops it. `/pulse warm`,
   `/pulse status`, `/pulse list` and the agent's list say why no ping is due.
 - Hermes has no per-turn output cap for plugins, so the ping asks for a one-word reply rather than enforcing it.

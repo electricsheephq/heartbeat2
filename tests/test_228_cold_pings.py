@@ -46,8 +46,8 @@ def test_the_reported_row_plans_a_ping(engine):
     e.store.set_meta('cache_routes', json.dumps({route: {'max_warm_gap': 3603.9, 'min_cold_gap': 585.6}}))
     session(e, last_route=route, last_prompt_tokens=580000, last_cache_touch_at=now, last_human_at=now)
     s = e.store.get_session(KEY)
-    assert cache.warm_lifetime(e.store, s) == (3603.9, 'warm_seen')
-    assert keep_warm_plan(e.store, s, e.policy, now)['due_at'] == now + 3603.9 - .08 * 3603.9
+    assert cache.warm_lifetime(e.store, s) == (3600, 'warm_seen')   # capped at the hour
+    assert keep_warm_plan(e.store, s, e.policy, now)['due_at'] == now + 3600 - .08 * 3600
 
 
 def test_a_warm_gap_under_five_minutes_proves_nothing_on_claude(engine):
@@ -89,7 +89,9 @@ def test_a_warm_reply_after_five_minutes_resumes_pings(engine, pulse):
     assert warm_wake(e).next_due_at is None
     reply(e, after=120, read=299000)      # warm, but too soon to prove anything
     assert warm_wake(e).next_due_at is None
-    reply(e, after=400, read=299000)      # the cache survived more than 5 minutes
+    reply(e, after=400, read=299000)      # warm after under 15 minutes: could be timing skew on a 5-minute cache
+    assert warm_wake(e).next_due_at is None
+    reply(e, after=1000, read=299000)     # the cache survived more than 15 minutes
     assert warm_wake(e).next_due_at == pytest.approx(e.clock.now() + EDGE)
 
 
@@ -196,7 +198,7 @@ def test_the_count_belongs_to_the_route_it_was_seen_on(engine, pulse):
     rows = json.loads(e.store.get_meta('cache_routes'))
     rows[other] = {'max_warm_gap': TTL}
     e.store.set_meta('cache_routes', json.dumps(rows))
-    for after in (0, 400):                # two calls on the other route, the second warm after 400 s
+    for after in (0, 1000):               # two calls on the other route, the second warm after 1000 s
         e.clock.advance(after)
         cache.touch(e.store, e.store.get_session(KEY), started_at=e.clock.now(), route=other, prompt=300000, read=299000)
     assert 'due_at' in plan(e)            # the other route isn't held off by the first route's count
@@ -214,3 +216,17 @@ def test_a_route_that_reports_its_ttl_keeps_pinging_as_before(engine, pulse, mon
     ping(e, read=0)
     ping(e, read=0)
     assert warm_wake(e).next_due_at is not None
+
+
+def test_a_cold_ping_on_another_route_keeps_the_first_routes_count(engine):
+    """Review (Codex r2): each route in a chat keeps its own count."""
+    e = engine
+    a, b = 'anthropic|claude-opus-5-5|https://api.anthropic.com', 'anthropic|claude-sonnet-5-5|https://api.anthropic.com'
+    cache.note_cold_ping(e.store, KEY, a)
+    cache.note_cold_ping(e.store, KEY, a)
+    cache.note_cold_ping(e.store, KEY, b)
+    assert (cache.cold_pings(e.store, KEY, a), cache.cold_pings(e.store, KEY, b)) == (2, 1)
+    cache.clear_cold_pings(e.store, KEY, b)
+    assert (cache.cold_pings(e.store, KEY, a), cache.cold_pings(e.store, KEY, b)) == (2, 0)
+    cache.clear_cold_pings(e.store, KEY)
+    assert cache.cold_pings(e.store, KEY, a) == 0
