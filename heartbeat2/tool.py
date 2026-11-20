@@ -179,7 +179,10 @@ class Tool:
                     if parent is not None and is_keep_warm(parent):
                         return {'error':'keep_warm_turn','detail':'This turn only keeps the cache warm: change nothing and reply [SILENT].'}
                 if action == 'list':
+                    from .cache import no_ping_reason
                     return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w),
+                        **({'no_ping_reason':no_ping_reason(e.store,s,e.policy,e.clock.now())}
+                           if is_keep_warm(w) and w.status=='active' and w.next_due_at is None else {}),
                         **({'handoff_to':target} if w.role and (target := e.store.get_meta('handoff_to:'+w.id)) else {})}
                         for w in e.store.list_wakes(s.session_key)]}
                 if action == 'desk':

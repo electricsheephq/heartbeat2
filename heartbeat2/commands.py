@@ -609,12 +609,7 @@ def keep_warm_id(session_key):
 
 
 def _no_ping_reason(engine, wake):
-    """Why an active keep-warm has no ping due, for status and the tool view (the agent reads these too)."""
-    try:
-        plan = cache.keep_warm_plan(engine.store, engine.store.get_session(wake.session_key), engine.policy, engine.clock.now())
-        return plan.get('reason') or 'the next ping is scheduled at the next check'
-    except Exception:
-        return '/pulse warm says why'
+    return cache.no_ping_reason(engine.store, engine.store.get_session(wake.session_key), engine.policy, engine.clock.now())
 
 
 def _keep_warm_line(engine, session, wake, counts):
@@ -701,6 +696,7 @@ def _warm(engine, key, rest):
                                          armed_session_id=session.current_session_id,error_streak=0,next_due_at=None):
                 raise ValueError('concurrent item change')
             engine.store.set_meta('card:'+wid,'')
+        cache.clear_cold_pings(engine.store, key)  # The owner asked again: earlier cold pings don't hold it off (#228).
         plan = cache.keep_warm_plan(engine.store, session, engine.policy, now)
     engine.signal()
     lines = [f'Keep-warm is on for this chat ({wid}). While you\'re writing here, a tiny silent ping just before the prompt cache '

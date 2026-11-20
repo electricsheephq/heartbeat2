@@ -983,6 +983,13 @@ class Intake:
             silenced=o.force_silent or not o.notify or not e.policy.enabled or not session.enabled or e.paused()
             delivered=bool(o.notify and not silenced and not f.owner_replied)
             if not s.finish(o.wake_id,o.dedupe_key,attempt=o.attempt,outcome=o.outcome or 'unreported',delivered=delivered,force_silent=silenced): return None
+            if is_keep_warm(w):
+                # A ping that found the cache cold; two in a row stop pings until the cache is reused again (#228).
+                fresh=s.get_session(key)
+                if (fresh is not None and fresh.last_cache_touch_at is not None and o.started_at is not None
+                        and fresh.last_cache_touch_at>=o.started_at and (fresh.last_cache_hit_ratio or 0)<.1):
+                    from .cache import note_cold_ping
+                    note_cold_ping(s,key)
             from .policy import is_watcher, holds_messages
             from .store import HELD_REPORT_OUTCOMES
             if (is_watcher(w) and holds_messages(w) and o.held_reason.startswith('message_held:')

@@ -2,7 +2,8 @@
 
 ## 0.4.30 — 2026-11-20
 
-- **Status says why keep-warm has no ping due.** `/pulse status` and the agent's list used to say only "no ping due now". They now give the same reason `/pulse warm` does. When a ping found the cache cold (a changed prompt or a new provider session reads as cold too), the reason says keep-warm stays off on that route rather than pay a cold write each hour. When keep-warm pings is unchanged. (#228)
+- **One cold miss no longer turns keep-warm off for good on Claude routes.** Keep-warm stopped for a route as soon as the cache once went cold after a shorter gap than it had stayed warm, and nothing turned it back on. On Claude routes that miss is a changed prompt (a compaction or a rebuilt system prompt), because their caches last 5 minutes or 1 hour, so it no longer counts. Two pings in a row that find the cache cold stop pings instead, until a reply reuses the cache after more than 5 minutes or you run `/pulse warm on` again, so a cache that really got shorter costs at most two cold pings. Other routes are unchanged. (#228)
+- **Status says why keep-warm has no ping due.** `/pulse status`, `/pulse list` and the agent's list used to say only "no ping due now". They now give the same reason `/pulse warm` does. (#228)
 
 ## 0.4.29 — 2026-11-19
 
