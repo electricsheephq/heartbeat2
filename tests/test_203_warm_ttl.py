@@ -6,6 +6,7 @@ from heartbeat2.cache import keep_warm_plan
 from test_engine import engine, session, KEY
 
 ROUTE = 'directsdk|claude-opus-5-5|'
+OTHER = 'custom|qwen3|http://localhost:8000/v1'  # #228: a Claude route trusts its warm gap; other routes still count colds
 
 
 def rows(e):
@@ -35,18 +36,18 @@ def test_an_existing_short_gap_cold_no_longer_blocks_keep_warm(engine, monkeypat
     e.store.set_meta('cache_routes', json.dumps({ROUTE: {'max_warm_gap': 3606, 'min_cold_gap': 6}}))
     session(e, last_route=ROUTE, last_prompt_tokens=570000, last_cache_touch_at=now, last_human_at=now)
     s = e.store.get_session(KEY)
-    assert cache.warm_lifetime(e.store, s) == (3606, 'warm_seen')
+    assert cache.warm_lifetime(e.store, s) == (3600, 'warm_seen')   # #228: a Claude lifetime is capped at the hour
     plan = keep_warm_plan(e.store, s, e.policy, now)
-    assert plan['due_at'] == now + 3606 - max(120, .08 * 3606) and plan['ttl'] == 3606
+    assert plan['due_at'] == now + 3600 - max(120, .08 * 3600) and plan['ttl'] == 3600
     assert 'cold' not in cache.line(e.store, s, now, pricing=False)
 
 
 def test_unknown_lifetime_says_why(engine, monkeypatch):
     monkeypatch.setattr(cache, 'cache_ttl_for', lambda *a, **k: (None, 'unknown'))
     e, now = engine, engine.clock.now()
-    session(e, last_route=ROUTE, last_prompt_tokens=570000, last_cache_touch_at=now, last_human_at=now)
+    session(e, last_route=OTHER, last_prompt_tokens=570000, last_cache_touch_at=now, last_human_at=now)
     s = e.store.get_session(KEY)
-    e.store.set_meta('cache_routes', json.dumps({ROUTE: {'max_warm_gap': 3606, 'min_cold_gap': 1200}}))
+    e.store.set_meta('cache_routes', json.dumps({OTHER: {'max_warm_gap': 3606, 'min_cold_gap': 1200}}))
     reason = keep_warm_plan(e.store, s, e.policy, now)['reason']
     assert 'stayed warm across 60.1m but went cold after 20m' in reason
     e.store.set_meta('cache_routes', json.dumps({}))
@@ -67,14 +68,14 @@ def test_other_routes_still_count_a_short_gap_miss(engine):
 
 
 def test_a_cold_ping_stops_keep_warm_on_a_recovered_row(engine, monkeypatch):
-    """A row recorded before the fix ({warm 60.1m, cold 6s}) plans a ping; if that ping lands cold, keep-warm stops (review)."""
+    """Off Claude, a route seen warm across 60.1m plans a ping; if that ping lands cold, keep-warm stops (review; Claude: #228)."""
     monkeypatch.setattr(cache, 'cache_ttl_for', lambda *a, **k: (None, 'unknown'))
     e, now = engine, engine.clock.now()
-    e.store.set_meta('cache_routes', json.dumps({ROUTE: {'max_warm_gap': 3606, 'min_cold_gap': 6}}))
-    session(e, last_route=ROUTE, last_prompt_tokens=570000, last_cache_touch_at=now, last_human_at=now)
+    e.store.set_meta('cache_routes', json.dumps({OTHER: {'max_warm_gap': 3606}}))
+    session(e, last_route=OTHER, last_prompt_tokens=570000, last_cache_touch_at=now, last_human_at=now)
     plan = keep_warm_plan(e.store, e.store.get_session(KEY), e.policy, now)
-    call(e, plan['due_at'], 0)   # the ping found the cache already cold
-    assert rows(e)[ROUTE]['min_cold_gap'] == plan['due_at'] - now
+    cache.touch(e.store, e.store.get_session(KEY), started_at=plan['due_at'], route=OTHER, prompt=500000, read=0)  # cold ping
+    assert rows(e)[OTHER]['min_cold_gap'] == plan['due_at'] - now
     s = e.store.get_session(KEY)
     assert cache.warm_lifetime(e.store, s) == (None, 'unknown')
     assert 'due_at' not in keep_warm_plan(e.store, s, e.policy, e.clock.now())
@@ -90,3 +91,23 @@ def test_learned_ttl_ignores_a_sub_floor_cold_on_claude_only(engine, monkeypatch
     # On Claude a 200 s miss isn't expiry, so it can't close a learned bracket; elsewhere it still does.
     assert cache.cache_ttl_for(ROUTE, store=e.store) == (None, 'unknown')
     assert cache.cache_ttl_for(other, store=e.store) == (100, 'learned')
+
+
+def test_status_says_why_keep_warm_has_no_ping(engine, monkeypatch):
+    """A route whose lifetime is unknown (warm 60.1m, cold 9.8m off Claude): /pulse status says why no ping is due."""
+    from heartbeat2.commands import _item, keep_warm_id
+    from heartbeat2.model import Wake
+    monkeypatch.setattr(cache, 'cache_ttl_for', lambda *a, **k: (None, 'unknown'))
+    e, now = engine, engine.clock.now()
+    e.store.set_meta('cache_routes', json.dumps({OTHER: {'max_warm_gap': 3603.9, 'min_cold_gap': 585.6}}))
+    session(e, last_route=OTHER, last_prompt_tokens=580000, last_cache_touch_at=now, last_human_at=now)
+    s = e.store.get_session(KEY)
+    e.store.create_wake(Wake(KEY, 'Keep the prompt cache warm.', 'self', id=keep_warm_id(KEY), platform=s.platform,
+        chat_type=s.chat_type, chat_id=s.chat_id, creator='user', created_in='command', title='Keep-warm',
+        trigger_json={'builtin': True, 'keep_warm': True}))
+    wake = e.store.get_wake(keep_warm_id(KEY))
+    assert wake.next_due_at is None
+    text = _item(e, wake)
+    assert 'no ping due now: ' in text
+    assert 'stayed warm across 60.1m but went cold after 9.8m' in text
+    assert 'pings stay off here rather than pay for cold ones' in text

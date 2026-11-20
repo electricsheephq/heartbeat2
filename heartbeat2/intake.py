@@ -286,6 +286,7 @@ class Flight:
     scratch: str | None=None
     owner_replied: bool=False
     replay: bool=False
+    first_call_seen: bool=False
 
 
 class Intake:
@@ -870,6 +871,11 @@ class Intake:
                 cache.touch(s,session,started_at=kwargs.get('started_at'),route=route,prompt=prompt,read=read,api_mode=kwargs.get('api_mode',''))
         f=self.flights.get(session_id)
         if not f or turn_id and f.turn_id and turn_id!=f.turn_id: return None
+        if priced and key and not f.invalid and not f.first_call_seen:
+            f.first_call_seen=True
+            w=s.get_wake(f.wake_id)
+            # A keep-warm ping's first model call says whether it found the cache cold, whatever the turn does next (#228).
+            if w is not None and is_keep_warm(w) and (read/prompt if prompt else 0)<.1: cache.note_cold_ping(s,key,route)
         price=None
         if priced:
             try: price=cache.cost(route,prompt=prompt,read=read,written=written,out=count('completion_tokens','output_tokens'),ttl=cache.cache_ttl_for(route,store=s,platform=s.get_session(key).platform,api_mode=kwargs.get('api_mode',''))[0])

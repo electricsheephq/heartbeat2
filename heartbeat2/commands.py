@@ -147,7 +147,7 @@ def _item(engine, wake, today_budget=None):
     elif today_budget and wake.status == 'active' and today_budget[0] >= today_budget[1]: due = 'resting until tomorrow'
     else: due = 'next '+_time(engine,wake.next_due_at or wake.deadline_at)
     role = f' · today {today_budget[0]}/{today_budget[1]}' if today_budget else ''
-    if is_keep_warm(wake) and wake.status == 'active' and wake.next_due_at is None: due = 'no ping due now'
+    if is_keep_warm(wake) and wake.status == 'active' and wake.next_due_at is None: due = 'no ping due now: ' + _no_ping_reason(engine, wake)
     kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
     held = app_closed_hold(engine, wake)
     if not held and _sleeping(engine, wake): held = 'asleep until you write'
@@ -608,6 +608,10 @@ def keep_warm_id(session_key):
     return 'warm_'+hashlib.sha256(session_key.encode()).hexdigest()[:16]
 
 
+def _no_ping_reason(engine, wake):
+    return cache.no_ping_reason(engine.store, engine.store.get_session(wake.session_key), engine.policy, engine.clock.now())
+
+
 def _keep_warm_line(engine, session, wake, counts):
     pings = counts.get('model_turns', 0)
     spend = (f' · ~${counts.get("cost_microusd",0)/1e6:.2f}' if pings and not counts.get('unpriced_calls',0) else '')
@@ -692,6 +696,7 @@ def _warm(engine, key, rest):
                                          armed_session_id=session.current_session_id,error_streak=0,next_due_at=None):
                 raise ValueError('concurrent item change')
             engine.store.set_meta('card:'+wid,'')
+        cache.clear_cold_pings(engine.store, key)  # The owner asked again: earlier cold pings don't hold it off (#228).
         plan = cache.keep_warm_plan(engine.store, session, engine.policy, now)
     engine.signal()
     lines = [f'Keep-warm is on for this chat ({wid}). While you\'re writing here, a tiny silent ping just before the prompt cache '
