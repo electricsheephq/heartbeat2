@@ -230,3 +230,16 @@ def test_a_cold_ping_on_another_route_keeps_the_first_routes_count(engine):
     assert (cache.cold_pings(e.store, KEY, a), cache.cold_pings(e.store, KEY, b)) == (2, 0)
     cache.clear_cold_pings(e.store, KEY)
     assert cache.cold_pings(e.store, KEY, a) == 0
+
+
+def test_a_learned_claude_ttl_is_capped_and_stopped_too(engine, monkeypatch):
+    """Review (Codex r3): with both gaps learned (warm 4000 s, cold 5000 s) on Claude, the hour cap and the two-ping stop apply."""
+    e, now = engine, engine.clock.now()
+    route = 'directsdk|claude-opus-5-5|'
+    monkeypatch.setattr(cache, 'cache_ttl_for', lambda *a, **k: (4000, 'learned'))   # what the learned bracket gives
+    session(e, last_route=route, last_prompt_tokens=580000, last_cache_touch_at=now, last_human_at=now)
+    s = e.store.get_session(KEY)
+    assert cache.warm_lifetime(e.store, s) == (3600, 'learned')
+    cache.note_cold_ping(e.store, KEY, route)
+    cache.note_cold_ping(e.store, KEY, route)
+    assert 'the last 2 pings found the cache cold' in keep_warm_plan(e.store, s, e.policy, now)['reason']

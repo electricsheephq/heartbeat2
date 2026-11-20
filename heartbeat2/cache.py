@@ -205,6 +205,8 @@ def clear_cold_pings(store, session_key, route=None):
 def warm_lifetime(store, session):
     """The cache lifetime a keep-warm ping can rely on: the route's known TTL, else the longest gap this route stayed warm."""
     ttl, source = ttl_for_session(store, session)
+    # A lifetime learned from gaps on a Claude route is still capped at the hour (review): gaps run long by call time.
+    if ttl and source == 'learned' and _floor(session.last_route): return min(ttl, CLAUDE_MAX_TTL), source
     if ttl or source == 'off': return ttl, source  # Caching turned off: old warm gaps say nothing now.
     if not session or not session.last_route: return None, 'unknown'
     provider, model, part = session.last_route.split('|', 2)
@@ -254,7 +256,8 @@ def keep_warm_plan(store, session, policy, now):
     if session.last_human_at is None or now - session.last_human_at >= policy.keep_warm_idle_hours * 3600:
         return {'reason': f'resting: no message from you in {policy.keep_warm_idle_hours}h; it resumes when you write', 'touch': touch, 'ttl': ttl}
     # Only where a Claude route's lifetime was learned from gaps (#228): a route that reports its TTL pings as before.
-    cold = cold_pings(store, session.session_key, session.last_route) if source == 'warm_seen' and _floor(session.last_route) else 0
+    learned = source in {'warm_seen', 'learned'} and _floor(session.last_route)
+    cold = cold_pings(store, session.session_key, session.last_route) if learned else 0
     if cold >= KEEP_WARM_COLD_PINGS:
         return {'reason': f'the last {cold} pings found the cache cold, so pings stay off until a reply reuses the cache after '
                           'more than 15 minutes, or you run /pulse warm on', 'touch': touch, 'ttl': ttl}
