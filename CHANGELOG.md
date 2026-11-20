@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.30 — 2026-11-20
+
+- **Status says why keep-warm has no ping due.** `/pulse status` and the agent's list used to say only "no ping due now". They now give the same reason `/pulse warm` does. When a ping found the cache cold (a changed prompt or a new provider session reads as cold too), the reason says keep-warm stays off on that route rather than pay a cold write each hour. When keep-warm pings is unchanged. (#228)
+
 ## 0.4.29 — 2026-11-19
 
 - **File watchers no longer depend on `os.O_NONBLOCK`.** A file watcher opens the watched file with only the open flags the platform defines, and in binary mode where the platform has one, so a Python build without `os.O_NONBLOCK` no longer fails every check. Linux and macOS open files exactly as before. Native Windows is still not supported (the README lists macOS and Linux). Thanks to @zparallel5. (#115)
