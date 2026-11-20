@@ -136,3 +136,81 @@ def test_a_cold_ping_counts_only_when_the_ping_itself_touched_the_cache(engine, 
     e.intake.transform_llm_output(response_text='[SILENT]', session_id='sid', turn_id='turn')
     e.intake.on_session_end(session_id='sid', turn_id='turn', completed=True, failed=False, interrupted=False)
     assert e.store.get_meta('keep_warm_cold:' + KEY) in (None, '')
+
+
+def fire(e):
+    """Advance to the next ping and let the poller send it; returns the ping text."""
+    e.tick()
+    e.clock.advance(warm_wake(e).next_due_at - e.clock.now())
+    e.tick()
+    return e.ctx.calls[-1][0]
+
+
+def call(e, *, read, prompt=300000):
+    e.intake.post_api_request(session_id='sid', turn_id='turn', provider='anthropic', model='claude-opus-5-5',
+                              base_url='https://api.anthropic.com', started_at=e.clock.now(),
+                              usage={'input_tokens': prompt, 'cache_read_tokens': read, 'cache_write_tokens': prompt-read,
+                                     'output_tokens': 3})
+
+
+def test_an_interrupted_ping_still_counts_its_cold_first_call(engine, pulse):
+    """Review (Codex): the cold write is paid when the first call returns, even if the turn is then interrupted."""
+    e = engine
+    warm_chat(e)
+    pulse(e, 'warm on')
+    for _ in range(2):
+        text = fire(e)
+        assert e.intake.pre_llm_call(session_id='sid', turn_id='turn', user_message=text, platform='telegram') is None
+        call(e, read=0)
+        e.intake.on_session_end(session_id='sid', turn_id='turn', completed=False, failed=False, interrupted=True)
+        e.tick()
+    assert 'the last 2 pings found the cache cold' in plan(e)['reason']
+
+
+def test_a_ping_with_a_cold_first_call_counts_even_if_a_later_call_is_warm(engine, pulse):
+    """Review (Codex): a second call in the ping turn reads what the first one wrote; only the first call counts."""
+    e = engine
+    warm_chat(e)
+    pulse(e, 'warm on')
+    for _ in range(2):
+        text = fire(e)
+        assert e.intake.pre_llm_call(session_id='sid', turn_id='turn', user_message=text, platform='telegram') is None
+        call(e, read=0)
+        e.clock.advance(2)
+        call(e, read=299000)
+        e.intake.transform_llm_output(response_text='[SILENT]', session_id='sid', turn_id='turn')
+        e.intake.on_session_end(session_id='sid', turn_id='turn', completed=True, failed=False, interrupted=False)
+        e.tick()
+    assert 'the last 2 pings found the cache cold' in plan(e)['reason']
+
+
+def test_the_count_belongs_to_the_route_it_was_seen_on(engine, pulse):
+    """Review (Codex): a warm reuse on another route doesn't clear it, and it doesn't hold off another route."""
+    e = engine
+    warm_chat(e)
+    pulse(e, 'warm on')
+    ping(e, read=0)
+    ping(e, read=0)
+    assert warm_wake(e).next_due_at is None
+    other = 'anthropic|claude-sonnet-5-5|https://api.anthropic.com'
+    rows = json.loads(e.store.get_meta('cache_routes'))
+    rows[other] = {'max_warm_gap': TTL}
+    e.store.set_meta('cache_routes', json.dumps(rows))
+    for after in (0, 400):                # two calls on the other route, the second warm after 400 s
+        e.clock.advance(after)
+        cache.touch(e.store, e.store.get_session(KEY), started_at=e.clock.now(), route=other, prompt=300000, read=299000)
+    assert 'due_at' in plan(e)            # the other route isn't held off by the first route's count
+    e.clock.advance(5)
+    cache.touch(e.store, e.store.get_session(KEY), started_at=e.clock.now(), route=ROUTE, prompt=300000, read=299000)
+    assert 'the last 2 pings found the cache cold' in plan(e)['reason']   # back on the first route: still stopped
+
+
+def test_a_route_that_reports_its_ttl_keeps_pinging_as_before(engine, pulse, monkeypatch):
+    """Review (Codex): the stop applies only where a Claude route's lifetime was learned from gaps."""
+    e = engine
+    monkeypatch.setattr(cache, 'cache_ttl_for', lambda *a, **k: (3600, 'hermes'))
+    warm_chat(e)
+    pulse(e, 'warm on')
+    ping(e, read=0)
+    ping(e, read=0)
+    assert warm_wake(e).next_due_at is not None

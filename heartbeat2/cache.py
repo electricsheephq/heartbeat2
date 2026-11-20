@@ -78,7 +78,7 @@ def touch(store, session, *, started_at, route, prompt, read, api_mode=''):
             if ratio >= .5:
                 row['max_warm_gap'] = max(row.get('max_warm_gap',0), gap)
                 # The cache survived a real gap: cold pings before this were changed prompts, not a lifetime (#228).
-                if gap > COLD_GAP_FLOOR: clear_cold_pings(store, session.session_key)
+                if gap > COLD_GAP_FLOOR: clear_cold_pings(store, session.session_key, route)
             elif ratio < .1 and gap >= _floor(route):
                 # A stored cold below the floor (recorded before #203) must not hide this real one.
                 row['min_cold_gap'] = min(_gaps(row, route)[1] or float('inf'), gap)
@@ -171,12 +171,28 @@ def _cold_key(session_key):
     return 'keep_warm_cold:'+session_key
 
 
-def note_cold_ping(store, session_key):
-    store.set_meta(_cold_key(session_key), str(int(store.get_meta(_cold_key(session_key)) or 0)+1))
+def _cold_state(store, session_key):
+    try:
+        state = json.loads(store.get_meta(_cold_key(session_key)) or '{}')
+        return state if isinstance(state, dict) else {}
+    except ValueError:
+        return {}
 
 
-def clear_cold_pings(store, session_key):
-    if store.get_meta(_cold_key(session_key)): store.set_meta(_cold_key(session_key), '')
+def cold_pings(store, session_key, route):
+    """Pings in a row on this chat's route whose first model call found the cache cold."""
+    state = _cold_state(store, session_key)
+    return int(state.get('n') or 0) if state.get('route') == route else 0
+
+
+def note_cold_ping(store, session_key, route):
+    store.set_meta(_cold_key(session_key), json.dumps({'route': route, 'n': cold_pings(store, session_key, route)+1}))
+
+
+def clear_cold_pings(store, session_key, route=None):
+    """A warm reuse on the counted route clears it; route None (the owner's /pulse warm on) clears any."""
+    state = _cold_state(store, session_key)
+    if state and (route is None or state.get('route') == route): store.set_meta(_cold_key(session_key), '')
 
 
 def warm_lifetime(store, session):
@@ -229,9 +245,10 @@ def keep_warm_plan(store, session, policy, now):
         return {'reason': f'the context is small ({session.last_prompt_tokens or 0} tokens), so a cold start is cheap', 'touch': touch, 'ttl': ttl}
     if session.last_human_at is None or now - session.last_human_at >= policy.keep_warm_idle_hours * 3600:
         return {'reason': f'resting: no message from you in {policy.keep_warm_idle_hours}h; it resumes when you write', 'touch': touch, 'ttl': ttl}
-    cold_pings = int(store.get_meta(_cold_key(session.session_key)) or 0)
-    if cold_pings >= KEEP_WARM_COLD_PINGS:
-        return {'reason': f'the last {cold_pings} pings found the cache cold, so pings stay off until a reply reuses the cache after '
+    # Only where a Claude route's lifetime was learned from gaps (#228): a route that reports its TTL pings as before.
+    cold = cold_pings(store, session.session_key, session.last_route) if source == 'warm_seen' and _floor(session.last_route) else 0
+    if cold >= KEEP_WARM_COLD_PINGS:
+        return {'reason': f'the last {cold} pings found the cache cold, so pings stay off until a reply reuses the cache after '
                           'more than 5 minutes, or you run /pulse warm on', 'touch': touch, 'ttl': ttl}
     cold_at = touch + ttl - KEEP_WARM_COLD_MARGIN
     if now >= cold_at:
