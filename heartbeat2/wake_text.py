@@ -90,7 +90,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
     # The owner's own one-time reminder after downtime (#230): late, it says so; past the late window it reports the miss.
     # Only downtime counts (how late it was when it came due again); deliberate holds after that keep their own label.
     missed = False
-    if late_window_s is not None and late_by_s is not None and downtime_s is not None and downtime_s >= LATE_NOTE_S:
+    if late_window_s is not None and late_by_s is not None and downtime_s is not None and downtime_s > LATE_NOTE_S:
         due_local = datetime.fromtimestamp(now - late_by_s, zone(timezone))
         if downtime_s > late_window_s:
             missed = True  # report only: the contract below replaces "do the work" (review)

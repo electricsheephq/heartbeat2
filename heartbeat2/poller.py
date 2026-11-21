@@ -1029,8 +1029,12 @@ class Poller:
         if o.dedupe_key.startswith('t:'):
             try:
                 late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
-                # How late it was when it came due again (downtime), not later holds such as quiet hours or a pause (#230).
-                downtime=max(0,o.created_at-float(o.dedupe_key[2:])) if o.created_at is not None else None
+                # How late it was when it came due again (downtime), not later holds such as quiet hours (#230). A turn
+                # claimed before a crash and refunded at restart counts the downtime up to that restart (review).
+                due_at=float(o.dedupe_key[2:])
+                downtime=max(0,o.created_at-due_at) if o.created_at is not None else None
+                if downtime is not None and s.get_meta('recovered:'+o.id):
+                    downtime=max(downtime,float(s.get_meta('poller_started_at') or 0)-due_at)
             except ValueError: pass
         return render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              stop_hint=self.policy.stop_hint,stop_hint_shown=shown=='1',stop_hint_chat_shown=chat_shown=='1',

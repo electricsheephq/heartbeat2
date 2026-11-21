@@ -101,3 +101,23 @@ def test_a_deliberate_pause_is_not_downtime(engine, command):
     e.tick()
     text = e.ctx.calls[-1][0]
     assert 'it was missed' not in text and 'say it is late' not in text
+
+
+def test_a_turn_refunded_after_a_long_crash_reports_the_miss(engine, command):
+    """Review: claimed on time, then the gateway was down 30 h; the restart refund keeps created_at at the due time."""
+    e = engine
+    w = owner_reminder(e, command, 'command')
+    finish(e)
+    e.clock.advance(w.next_due_at - e.clock.now())
+    e.tick()
+    o, = e.store.list_occurrences(w.id)
+    assert o.state == 'claimed' and len(e.ctx.calls) == 1
+    assert 'Do the work the note describes' in e.ctx.calls[-1][0]
+    e.clock.advance(30*HOUR)       # crash before the turn started
+    e.process_start = True
+    e.reconcile()
+    assert e.store.get_meta('recovered:'+o.id) == '1'
+    e.tick()
+    text = e.ctx.calls[-1][0]
+    assert 'Tell the owner in one line that this reminder was missed' in text
+    assert 'Do the work the note describes' not in text
