@@ -52,6 +52,9 @@ def quiet_window(store, policy, key, now):
     return policy.quiet_hours, source, until
 
 
+# Reasons that read better spelled out in /pulse list and status (#230).
+STATUS_REASON_TEXT = {'missed': 'missed: too late after HeartBeat or the gateway was down'}
+
 def _activation(engine, session, wake):
     if not session.enabled: raise ValueError('this chat is off; use /pulse on')
     active_count, global_active_count = cap_counts(engine.store, session.session_key, exclude_id=wake.id)
@@ -151,7 +154,7 @@ def _item(engine, wake, today_budget=None):
     kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
     held = app_closed_hold(engine, wake)
     if not held and _sleeping(engine, wake): held = 'asleep until you write'
-    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) or agreed_watcher(wake) else '') + (f' · {wake.status_reason}' if wake.status_reason else '') + (' · '+held if held else '')
+    return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) or agreed_watcher(wake) else '') + (f' · {STATUS_REASON_TEXT.get(wake.status_reason, wake.status_reason)}' if wake.status_reason else '') + (' · '+held if held else '')
 
 
 def app_closed_hold(engine, wake):

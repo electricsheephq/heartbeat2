@@ -15,6 +15,9 @@ from .model import Wake, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, KINDS, agent
 from .schedule import parse_duration, quiet_end
 
 
+# An owner's own one-time reminder is delivered late, saying so, up to this many hours (or catch_up_hours if longer) (#230).
+OWNER_LATE_WINDOW_HOURS = 24
+
 def is_owner(wake):
     return wake.creator == 'user' and not wake.role and not wake.trigger_json.get('builtin') and not wake.agent_edited
 
@@ -528,6 +531,12 @@ class Policy:
             days += self.max_lifetime_days
         seconds = days * 86400
         return min(seconds, 4 * 3600) if wake.babysit else seconds
+
+    def late_window_s(self):
+        """How late the owner's own one-time reminder may be and still be delivered as the reminder (#230).
+
+        Past it the turn tells the owner the reminder was missed instead; it is never dropped silently."""
+        return max(self.catch_up_hours, OWNER_LATE_WINDOW_HOURS) * 3600
 
     def due_bound_s(self, wake):
         # Never later than the hard end: a babysit wake keeps its 4-hour bound.

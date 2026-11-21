@@ -224,8 +224,8 @@ def test_short_reminder_keeps_default_expiry_through_revocation(engine, command)
     assert result['wake']['expires_at'] == result['wake']['created_at']+14*DAY
 
 
-@pytest.mark.parametrize('late,fired', [(3*3600, True), (3*DAY, False)])
-def test_long_reminder_downtime_catches_up_or_reports_missed(engine, late, fired):
+@pytest.mark.parametrize('late,past_window', [(3*3600, False), (3*DAY, True)])
+def test_long_reminder_downtime_catches_up_or_reports_missed(engine, late, past_window):
     owner_turn(engine)
     result = create(engine, {'kind':'at','at':'in 30d'}, owner_asked=True)
     assert result.get('ok'), result
@@ -233,10 +233,11 @@ def test_long_reminder_downtime_catches_up_or_reports_missed(engine, late, fired
     finish(engine)
     engine.clock.advance(w.next_due_at-engine.clock.now()+late)  # The gateway was down across the due time.
     engine.tick()
-    assert len(engine.ctx.calls) == int(fired)
-    if not fired:  # Past catch_up_hours: reported as missed, never silently expired.
-        assert engine.store.list_occurrences(w.id)[0].state == 'missed'
-        assert 'missed' in engine.store.get_meta('notice:'+KEY)
+    # An owner's reminder always gets its turn (#230): late it says so; past the late window it reports the miss.
+    assert len(engine.ctx.calls) == 1
+    text = engine.ctx.calls[-1][0]
+    assert ('Tell the owner in one line that this reminder was missed' in text) == past_window
+    assert ('deliver it now and say it is late' in text) == (not past_window)
 
 
 def test_long_reminder_grace_bounded_by_hard_end(engine):

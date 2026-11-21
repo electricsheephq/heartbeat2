@@ -17,12 +17,14 @@ import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
-from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every
+from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
 from . import governor
 
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
 PROBES_PER_TICK = 16
+OUTAGE_GAP_S = 60     # a longer gap between ticks means the gateway or the poller was down (#230)
+OUTAGES_KEPT = 50
 FINAL_SKIP_REASONS = frozenset({'unanswered','asleep','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires','nothing_to_report'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
@@ -317,7 +319,15 @@ class Poller:
                 if now-previous>15:
                     self.log.info('heartbeat2 wall gap %.1fs',now-previous)
                     # A clock gap alone is not proof that a wake was late.
-                if not self.policy.enabled or self.paused(): return
+                # The gateway was down (#230). Within one process the monotonic clock must agree, so a wall-clock step
+                # is not downtime; after a restart the wall gap is all there is.
+                mono,last_mono=self.clock.monotonic(),getattr(self,'_last_tick_mono',None)
+                self._last_tick_mono=mono
+                if now-previous>OUTAGE_GAP_S and (last_mono is None or mono-last_mono>OUTAGE_GAP_S):
+                    self.record_outage(previous,now)
+                stopped=self.paused()  # read once per tick, so the outage log and the gate agree (review)
+                self.track_switched_off(now,stopped)
+                if not self.policy.enabled or stopped: return
                 governor.settle_ignored(self)
                 self.acks()
                 from .commands import resume_timed
@@ -510,13 +520,49 @@ class Poller:
             s.set_meta(key,json.dumps(items[-10:]))
             self.bring_role_forward(target.id)
 
+    def track_switched_off(self,now,stopped):
+        """A stretch with HeartBeat switched off (settings.enabled false) or Hermes' emergency stop is an outage too (#230),
+        before or after a reminder is queued, so both paths measure it the same way."""
+        off=self.store.get_meta('off_since')
+        if not self.policy.enabled or stopped:
+            if not off: self.store.set_meta('off_since',str(now))
+        elif off:
+            self.record_outage(float(off),now)
+            self.store.set_meta('off_since','')
+
+    def record_outage(self,start,end):
+        outages=json.loads(self.store.get_meta('outages') or '[]')
+        self.store.set_meta('outages',json.dumps((outages+[[start,end]])[-OUTAGES_KEPT:]))
+
+    def downtime_since(self,since,before=0):
+        """`before` plus the outage time after `since`; overlapping outages (down while switched off) count once."""
+        now,total,reach=self.clock.now(),0.0,since
+        for start,end in sorted(json.loads(self.store.get_meta('outages') or '[]')):
+            start,end=max(start,reach),min(end,now)
+            if end>start: total,reach=total+end-start,end
+        return before+total
+
+    def owner_turn_owed(self,w,now):
+        """The owner's own one-time reminder that came due in time keeps its one turn even when its expiry or lifetime passed
+        while HeartBeat or the gateway was down (#230). It fires late, saying so, or reports the miss; never silently."""
+        if not (owner_class(w) and one_shot(w)): return False
+        if w.next_due_at is not None:
+            due=w.next_due_at if w.next_due_at<=now else None
+        else:
+            live=[o for o in self.store.list_occurrences(w.id) if o.state in {'pending','claimed','started'} and o.dedupe_key.startswith('t:')]
+            due=float(live[-1].dedupe_key[2:]) if live else None
+        if due is None: return False
+        bounds=[w.created_at+self.policy.max_life_s(w),w.created_at+self.policy.due_bound_s(w)]+([w.expires_at] if w.expires_at is not None else [])
+        return due<=min(bounds)
+
     def _time(self,w):
         s,now=self.store,self.clock.now()
         if self.end_max_fires(w): return
         if is_keep_warm(w): return  # keep_warm() schedules it from the chat's last cache touch.
         # Retain the existing schedule decisions, isolated per wake/savepoint.
         if w.status=='active':
-            if w.expires_at is not None and w.expires_at<=now:
+            owed=self.owner_turn_owed(w,now)
+            if w.expires_at is not None and w.expires_at<=now and not owed:
                 s.cas_wake(w.id,'active',status='expired',status_reason='expired')
                 self.cancel_occurrences(w.id,'expired')
                 return
@@ -524,7 +570,7 @@ class Poller:
             # A reminder still not due at its due bound (the setting was lowered) ends there; the grace is for a due one.
             due_end=w.created_at+self.policy.due_bound_s(w)
             late=due_end<=now and w.next_due_at is not None and w.next_due_at>due_end
-            if not (w.role or w.trigger_json.get('builtin')) and (hard_end<=now or late):
+            if not (w.role or w.trigger_json.get('builtin')) and (hard_end<=now or late) and not owed:
                 s.cas_wake(w.id,'active',status='expired',status_reason='max_lifetime_changed')
                 self.cancel_occurrences(w.id,'max_lifetime_changed')
                 return
@@ -538,7 +584,10 @@ class Poller:
                 tz=self.policy.resolved_timezone()
                 w=self.follow_zone(w,tz,now)
                 # A report-back is due now by design and waits on holds, so the timer catch-up cutoff never misses it (#137).
-                due=time_due(w,now=now,catch_up_s=10**9 if w.trigger_json.get('report_back') else self.policy.catch_up_hours*3600,
+                # Nor the owner's own one-time reminder (#230): it fires late and says so, or past the late window its turn
+                # tells the owner it was missed. Only the agent's own one-shots end as missed.
+                owner_reminder=owner_class(w) and one_shot(w)
+                due=time_due(w,now=now,catch_up_s=10**9 if w.trigger_json.get('report_back') or owner_reminder else self.policy.catch_up_hours*3600,
                              timezone=tz,jitter_unit=self.jitter(),**self.timing(w))
                 if due:
                     if not (w.kind in RECURRING_KINDS and due.state=='pending' and s.list_occurrences(w.id,state='pending')):
@@ -552,7 +601,10 @@ class Poller:
                         self.notice(w.session_key,'Some wakes were late / scheduler was stalled.')
                     if due.state=='missed':
                         self.terminal_one_shot(s.get_wake(w.id))
-                        self.notice(w.session_key,'A wake was too late after restart and was missed.')
+                        when=datetime.fromtimestamp(float(due.dedupe_key[2:]),zone(tz))
+                        from .wake_text import escape_text
+                        name=escape_text(' '.join((w.title or w.note).split())[:60])
+                        self.notice(w.session_key,f'A wake ({w.id}'+(f': {name}' if name else '')+f', due {when:%a %d %b %H:%M}) was too late after downtime and was missed.')
             elif w.kind in PROBE_KINDS|EVENT_KINDS and w.deadline_at is not None and w.deadline_at<=now:
                 # Deadline fallback is one fire only, and only when no trigger
                 # occurrence has already been produced (including pending).
@@ -768,7 +820,7 @@ class Poller:
             if s and s.last_human_at is not None and now-s.last_human_at<after: return 'checkin_not_due',True,None
         held_paused=o.state=='pending' and w.status=='paused' and (o.held_since is not None or is_watcher(w))
         if w.status!='active' and not held_paused: return 'expired' if w.status=='expired' else 'wake_inactive',False,None
-        if w.expires_at is not None and now>=w.expires_at: return 'expired',False,None
+        if w.expires_at is not None and now>=w.expires_at and not self.owner_turn_owed(w,now): return 'expired',False,None
         if w.max_fires is not None and w.fires>=w.max_fires: return 'max_fires',False,None
         if held_paused: return 'held_paused',True,None
         if w.cancel_on_reply and s and s.last_human_at is not None and s.last_human_at>w.created_at: return 'cancel_on_reply',False,None
@@ -1005,15 +1057,22 @@ class Poller:
         tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
         if is_keep_warm(w): return render_keep_warm(w,o,marker_tag=tag)
         recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
-        late=None
+        late=downtime=None
         if o.dedupe_key.startswith('t:'):
-            try: late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
+            try:
+                late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
+                # Downtime (#230): how late it was when it was queued, plus any outage since (the gateway down, or
+                # HeartBeat switched off), so a turn queued or claimed before a crash still counts it. Deliberate holds
+                # such as quiet hours don't count.
+                due_at=float(o.dedupe_key[2:])
+                downtime=self.downtime_since(o.created_at,max(0,o.created_at-due_at)) if o.created_at is not None else None
             except ValueError: pass
         return render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              stop_hint=self.policy.stop_hint,stop_hint_shown=shown=='1',stop_hint_chat_shown=chat_shown=='1',
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-int(not o.force_silent and o.state in {'claimed','started'}),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
              after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
+             late_window_s=self.policy.late_window_s() if owner_class(w) and one_shot(w) else None,downtime_s=downtime,
              cache_line=cache_line,marker_tag=tag,handoffs=handoffs,held_reports=held_reports,
              desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
                               measure=lambda text: len(escape_text(text)),turn=o)
