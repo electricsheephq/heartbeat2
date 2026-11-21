@@ -32,7 +32,8 @@ def test_owner_reminder_after_downtime(engine, command, path, late, expect):
     assert len(e.ctx.calls) == 1, 'the owner reminder gets exactly one turn'
     text = e.ctx.calls[-1][0]
     assert ('deliver it now and say it is late' in text) == (expect == 'late')
-    assert ('Tell the owner in one line that it was missed' in text) == (expect == 'missed')
+    assert ('Tell the owner in one line that this reminder was missed' in text) == (expect == 'missed')
+    assert ('Do the work the note describes' in text) == (expect != 'missed')
     assert e.store.list_occurrences(w.id)[0].state == 'claimed'
     assert 'missed' not in (e.store.get_meta('notice:'+KEY) or '')
 

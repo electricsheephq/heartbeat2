@@ -236,7 +236,7 @@ def test_long_reminder_downtime_catches_up_or_reports_missed(engine, late, past_
     # An owner's reminder always gets its turn (#230): late it says so; past the late window it reports the miss.
     assert len(engine.ctx.calls) == 1
     text = engine.ctx.calls[-1][0]
-    assert ('Tell the owner in one line that it was missed' in text) == past_window
+    assert ('Tell the owner in one line that this reminder was missed' in text) == past_window
     assert ('deliver it now and say it is late' in text) == (not past_window)
 
 

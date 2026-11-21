@@ -89,12 +89,13 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
     ]
     # The owner's own one-time reminder after downtime (#230): late, it says so; past the late window it reports the miss.
     # Only downtime counts (how late it was when it came due again); deliberate holds after that keep their own label.
+    missed = False
     if late_window_s is not None and late_by_s is not None and downtime_s is not None and downtime_s >= LATE_NOTE_S:
         due_local = datetime.fromtimestamp(now - late_by_s, zone(timezone))
         if downtime_s > late_window_s:
+            missed = True  # report only: the contract below replaces "do the work" (review)
             lines.append(f"This reminder was due {due_local:%a %d %b %H:%M} and is {_age(late_by_s)} late, past the "
-                         f"{_age(late_window_s)} late window. Tell the owner in one line that it was missed: what it was and "
-                         "when it was due. Don't act on it as if it were on time.")
+                         f"{_age(late_window_s)} late window, so it was missed.")
         else:
             lines.append(f"This reminder was due {due_local:%a %d %b %H:%M} and is {_age(late_by_s)} late: "
                          "deliver it now and say it is late.")
@@ -124,7 +125,10 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
         source = html.escape(wake.kind, quote=True)
         lines += [f'<wake-payload source="{source}" trust="untrusted">', text, "</wake-payload>"]
     lines += [
-        'Contract: this turn is yours to act on. Do the work the note describes, then call pulse(action="respond", outcome=…, notify=true|false, summary=…); notify is required.',
+        ('Contract: report only. Do not do the work the note describes: it is too late for that. Tell the owner in one line that '
+         'this reminder was missed, what it was and when it was due, then call pulse(action="respond", outcome="done", notify=true, summary=…).'
+         if missed else
+         'Contract: this turn is yours to act on. Do the work the note describes, then call pulse(action="respond", outcome=…, notify=true|false, summary=…); notify is required.'),
         '- outcome: progress when you did something useful, even silently (always include a summary of what you did, written as a plain sentence, since the owner sees role summaries on the desk; silent progress without one counts as idle); no_change when there was nothing to do; done when the work is finished for good; blocked or needs_attention when you need the owner.',
         '- notify=true → your reply is delivered to the owner: one short, specific, warm message that leads with the result or the question. No guilt about silence, no mention of this mechanism, ids or ledgers.',
         '- notify=false → your final reply is not posted; the work still counts. Write no text alongside tool calls on a wake turn: Hermes can post that text even when you stay silent.',
