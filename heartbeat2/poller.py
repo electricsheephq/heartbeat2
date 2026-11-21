@@ -23,6 +23,8 @@ from . import governor
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
 PROBES_PER_TICK = 16
+OUTAGE_GAP_S = 60     # a longer gap between ticks means the gateway or the poller was down (#230)
+OUTAGES_KEPT = 50
 FINAL_SKIP_REASONS = frozenset({'unanswered','asleep','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires','nothing_to_report'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
@@ -317,6 +319,8 @@ class Poller:
                 if now-previous>15:
                     self.log.info('heartbeat2 wall gap %.1fs',now-previous)
                     # A clock gap alone is not proof that a wake was late.
+                if now-previous>OUTAGE_GAP_S: self.record_outage(previous,now)  # the gateway was down (#230)
+                self.track_switched_off(now)
                 if not self.policy.enabled or self.paused(): return
                 governor.settle_ignored(self)
                 self.acks()
@@ -509,6 +513,27 @@ class Poller:
                           'summary':o.summary[:500],'occ':o.id,'at':now})
             s.set_meta(key,json.dumps(items[-10:]))
             self.bring_role_forward(target.id)
+
+    def track_switched_off(self,now):
+        """A stretch with settings.enabled false is an outage too (#230); a deliberate /pulse pause is not."""
+        off=self.store.get_meta('off_since')
+        if not self.policy.enabled:
+            if not off: self.store.set_meta('off_since',str(now))
+        elif off:
+            self.record_outage(float(off),now)
+            self.store.set_meta('off_since','')
+
+    def record_outage(self,start,end):
+        outages=json.loads(self.store.get_meta('outages') or '[]')
+        self.store.set_meta('outages',json.dumps((outages+[[start,end]])[-OUTAGES_KEPT:]))
+
+    def downtime_since(self,since,before=0):
+        """`before` plus the outage time after `since`; overlapping outages (down while switched off) count once."""
+        now,total,reach=self.clock.now(),0.0,since
+        for start,end in sorted(json.loads(self.store.get_meta('outages') or '[]')):
+            start,end=max(start,reach),min(end,now)
+            if end>start: total,reach=total+end-start,end
+        return before+total
 
     def owner_turn_owed(self,w,now):
         """The owner's own one-time reminder that came due in time keeps its one turn even when its expiry or lifetime passed
@@ -1029,12 +1054,11 @@ class Poller:
         if o.dedupe_key.startswith('t:'):
             try:
                 late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
-                # How late it was when it came due again (downtime), not later holds such as quiet hours (#230). A turn
-                # claimed before a crash and refunded at restart counts the downtime up to that restart (review).
+                # Downtime (#230): how late it was when it was queued, plus any outage since (the gateway down, or
+                # HeartBeat switched off), so a turn queued or claimed before a crash still counts it. Deliberate holds
+                # such as quiet hours don't count.
                 due_at=float(o.dedupe_key[2:])
-                downtime=max(0,o.created_at-due_at) if o.created_at is not None else None
-                if downtime is not None and s.get_meta('recovered:'+o.id):
-                    downtime=max(downtime,float(s.get_meta('poller_started_at') or 0)-due_at)
+                downtime=self.downtime_since(o.created_at,max(0,o.created_at-due_at)) if o.created_at is not None else None
             except ValueError: pass
         return render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              stop_hint=self.policy.stop_hint,stop_hint_shown=shown=='1',stop_hint_chat_shown=chat_shown=='1',

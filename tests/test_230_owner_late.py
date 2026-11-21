@@ -97,6 +97,7 @@ def test_a_deliberate_pause_is_not_downtime(engine, command):
     e.tick()                       # on time: the occurrence is made, then held by the pause
     assert not e.ctx.calls and e.store.list_occurrences(w.id)
     e.clock.advance(25*HOUR + 60)
+    e.store.set_meta('last_tick_at', str(e.clock.now() - 5))  # the gateway kept ticking through the pause
     session(e, paused_until=None)
     e.tick()
     text = e.ctx.calls[-1][0]
@@ -116,8 +117,38 @@ def test_a_turn_refunded_after_a_long_crash_reports_the_miss(engine, command):
     e.clock.advance(30*HOUR)       # crash before the turn started
     e.process_start = True
     e.reconcile()
-    assert e.store.get_meta('recovered:'+o.id) == '1'
     e.tick()
     text = e.ctx.calls[-1][0]
     assert 'Tell the owner in one line that this reminder was missed' in text
     assert 'Do the work the note describes' not in text
+
+
+def test_a_turn_queued_before_an_outage_counts_it(engine, command):
+    """Codex connector: queued 8 h late (late), then HeartBeat switched off for 30 h before the turn ran."""
+    e = engine
+    from dataclasses import replace
+    w = owner_reminder(e, command, 'command')
+    finish(e)
+    e.ctx.accept = False                             # the gateway refuses the injection, so the late reminder stays queued
+    e.clock.advance(w.next_due_at - e.clock.now() + 8*HOUR)
+    e.tick()
+    assert e.store.list_occurrences(w.id)[0].state == 'pending'
+    e.ctx.accept = True
+    e.policy = replace(e.policy, enabled=False)      # HeartBeat switched off; it keeps ticking, but does nothing
+    e.tick()
+    e.clock.advance(30*HOUR)
+    e.tick()
+    e.policy = replace(e.policy, enabled=True)
+    e.tick()
+    text = e.ctx.calls[-1][0]
+    assert 'Tell the owner in one line that this reminder was missed' in text
+
+
+def test_overlapping_outages_count_once(engine):
+    e = engine
+    now = e.clock.now()
+    e.record_outage(now - 10*HOUR, now - 4*HOUR)   # the gateway was down...
+    e.record_outage(now - 8*HOUR, now - 2*HOUR)    # ...while HeartBeat was also switched off
+    e.record_outage(now - 30*HOUR, now - 20*HOUR)  # before the turn was queued: not counted
+    assert e.downtime_since(now - 12*HOUR) == 8*HOUR
+    assert e.downtime_since(now - 6*HOUR, before=60) == 60 + 4*HOUR
