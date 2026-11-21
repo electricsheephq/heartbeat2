@@ -134,10 +134,13 @@ def test_a_turn_queued_before_an_outage_counts_it(engine, command):
     e.tick()
     assert e.store.list_occurrences(w.id)[0].state == 'pending'
     e.ctx.accept = True
-    e.policy = replace(e.policy, enabled=False)      # HeartBeat switched off; it keeps ticking, but does nothing
+    e.policy = replace(e.policy, enabled=False)      # HeartBeat switched off; the gateway keeps ticking, but it does nothing
     e.tick()
     e.clock.advance(30*HOUR)
+    e.store.set_meta('last_tick_at', str(e.clock.now() - 5))  # continuous ticks: no gap, so only the off stretch counts
+    e._last_tick_mono = e.clock.monotonic() - 5
     e.tick()
+    assert e.store.get_meta('off_since') and not e.store.get_meta('outages')
     e.policy = replace(e.policy, enabled=True)
     e.tick()
     text = e.ctx.calls[-1][0]
@@ -152,3 +155,31 @@ def test_overlapping_outages_count_once(engine):
     e.record_outage(now - 30*HOUR, now - 20*HOUR)  # before the turn was queued: not counted
     assert e.downtime_since(now - 12*HOUR) == 8*HOUR
     assert e.downtime_since(now - 6*HOUR, before=60) == 60 + 4*HOUR
+
+
+def test_a_wall_clock_step_is_not_downtime(engine, command):
+    """Round 3: a 30 h forward wall-clock step with 5 s really elapsed must not turn an on-time reminder report-only."""
+    e = engine
+    w = owner_reminder(e, command, 'command')
+    finish(e)
+    e.ctx.accept = False
+    e.clock.advance(w.next_due_at - e.clock.now())
+    e.tick()                                          # queued on time; the injection is refused, so it waits
+    assert e.store.list_occurrences(w.id)[0].state == 'pending'
+    e.ctx.accept = True
+    e.clock.wall += 30*HOUR                           # wall clock steps; monotonic doesn't
+    e.clock.advance(5)
+    e.tick()
+    text = e.ctx.calls[-1][0]
+    assert 'Do the work the note describes' in text and 'this reminder was missed' not in text
+    assert not e.store.get_meta('outages')
+
+
+def test_report_only_turn_has_no_silent_settled_exit(engine, command):
+    e = engine
+    w = owner_reminder(e, command, 'command')
+    finish(e)
+    e.clock.advance(w.next_due_at - e.clock.now() + 30*HOUR)
+    e.tick()
+    text = e.ctx.calls[-1][0]
+    assert 'this reminder was missed' in text and 'end it silently' not in text

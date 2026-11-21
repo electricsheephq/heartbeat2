@@ -319,7 +319,12 @@ class Poller:
                 if now-previous>15:
                     self.log.info('heartbeat2 wall gap %.1fs',now-previous)
                     # A clock gap alone is not proof that a wake was late.
-                if now-previous>OUTAGE_GAP_S: self.record_outage(previous,now)  # the gateway was down (#230)
+                # The gateway was down (#230). Within one process the monotonic clock must agree, so a wall-clock step
+                # is not downtime; after a restart the wall gap is all there is.
+                mono,last_mono=self.clock.monotonic(),getattr(self,'_last_tick_mono',None)
+                self._last_tick_mono=mono
+                if now-previous>OUTAGE_GAP_S and (last_mono is None or mono-last_mono>OUTAGE_GAP_S):
+                    self.record_outage(previous,now)
                 self.track_switched_off(now)
                 if not self.policy.enabled or self.paused(): return
                 governor.settle_ignored(self)
