@@ -208,3 +208,15 @@ def test_an_emergency_stop_counts_the_same_before_or_after_queueing(engine, comm
     e.tick()
     text = e.ctx.calls[-1][0]
     assert 'this reminder was missed' in text and 'Do the work the note describes' not in text
+
+
+def test_the_stop_state_is_read_once_per_tick(engine):
+    """Review: a stop read that flips between the outage log and the gate must not record a false outage."""
+    e = engine
+    reads = iter([True, False, False, False])
+    e.paused = lambda: next(reads)
+    e.tick()        # one read: stopped → off_since set, and the tick returns
+    assert e.store.get_meta('off_since')
+    e.tick()        # clear → the stop ends: one outage, consistent with the gate
+    outages = __import__('json').loads(e.store.get_meta('outages') or '[]')
+    assert len(outages) == 1 and not e.store.get_meta('off_since')

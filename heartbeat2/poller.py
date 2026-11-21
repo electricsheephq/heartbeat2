@@ -325,8 +325,9 @@ class Poller:
                 self._last_tick_mono=mono
                 if now-previous>OUTAGE_GAP_S and (last_mono is None or mono-last_mono>OUTAGE_GAP_S):
                     self.record_outage(previous,now)
-                self.track_switched_off(now)
-                if not self.policy.enabled or self.paused(): return
+                stopped=self.paused()  # read once per tick, so the outage log and the gate agree (review)
+                self.track_switched_off(now,stopped)
+                if not self.policy.enabled or stopped: return
                 governor.settle_ignored(self)
                 self.acks()
                 from .commands import resume_timed
@@ -519,11 +520,11 @@ class Poller:
             s.set_meta(key,json.dumps(items[-10:]))
             self.bring_role_forward(target.id)
 
-    def track_switched_off(self,now):
+    def track_switched_off(self,now,stopped):
         """A stretch with HeartBeat switched off (settings.enabled false) or Hermes' emergency stop is an outage too (#230),
         before or after a reminder is queued, so both paths measure it the same way."""
         off=self.store.get_meta('off_since')
-        if not self.policy.enabled or self.paused():
+        if not self.policy.enabled or stopped:
             if not off: self.store.set_meta('off_since',str(now))
         elif off:
             self.record_outage(float(off),now)
