@@ -510,13 +510,27 @@ class Poller:
             s.set_meta(key,json.dumps(items[-10:]))
             self.bring_role_forward(target.id)
 
+    def owner_turn_owed(self,w,now):
+        """The owner's own one-time reminder that came due in time keeps its one turn even when its expiry or lifetime passed
+        while HeartBeat or the gateway was down (#230). It fires late, saying so, or reports the miss; never silently."""
+        if not (owner_class(w) and one_shot(w)): return False
+        if w.next_due_at is not None:
+            due=w.next_due_at if w.next_due_at<=now else None
+        else:
+            live=[o for o in self.store.list_occurrences(w.id) if o.state in {'pending','claimed','started'} and o.dedupe_key.startswith('t:')]
+            due=float(live[-1].dedupe_key[2:]) if live else None
+        if due is None: return False
+        bounds=[w.created_at+self.policy.max_life_s(w),w.created_at+self.policy.due_bound_s(w)]+([w.expires_at] if w.expires_at is not None else [])
+        return due<=min(bounds)
+
     def _time(self,w):
         s,now=self.store,self.clock.now()
         if self.end_max_fires(w): return
         if is_keep_warm(w): return  # keep_warm() schedules it from the chat's last cache touch.
         # Retain the existing schedule decisions, isolated per wake/savepoint.
         if w.status=='active':
-            if w.expires_at is not None and w.expires_at<=now:
+            owed=self.owner_turn_owed(w,now)
+            if w.expires_at is not None and w.expires_at<=now and not owed:
                 s.cas_wake(w.id,'active',status='expired',status_reason='expired')
                 self.cancel_occurrences(w.id,'expired')
                 return
@@ -524,7 +538,7 @@ class Poller:
             # A reminder still not due at its due bound (the setting was lowered) ends there; the grace is for a due one.
             due_end=w.created_at+self.policy.due_bound_s(w)
             late=due_end<=now and w.next_due_at is not None and w.next_due_at>due_end
-            if not (w.role or w.trigger_json.get('builtin')) and (hard_end<=now or late):
+            if not (w.role or w.trigger_json.get('builtin')) and (hard_end<=now or late) and not owed:
                 s.cas_wake(w.id,'active',status='expired',status_reason='max_lifetime_changed')
                 self.cancel_occurrences(w.id,'max_lifetime_changed')
                 return
@@ -556,7 +570,8 @@ class Poller:
                     if due.state=='missed':
                         self.terminal_one_shot(s.get_wake(w.id))
                         when=datetime.fromtimestamp(float(due.dedupe_key[2:]),zone(tz))
-                        name=' '.join((w.title or w.note).split())[:60]
+                        from .wake_text import escape_text
+                        name=escape_text(' '.join((w.title or w.note).split())[:60])
                         self.notice(w.session_key,f'A wake ({w.id}'+(f': {name}' if name else '')+f', due {when:%a %d %b %H:%M}) was too late after downtime and was missed.')
             elif w.kind in PROBE_KINDS|EVENT_KINDS and w.deadline_at is not None and w.deadline_at<=now:
                 # Deadline fallback is one fire only, and only when no trigger
@@ -773,7 +788,7 @@ class Poller:
             if s and s.last_human_at is not None and now-s.last_human_at<after: return 'checkin_not_due',True,None
         held_paused=o.state=='pending' and w.status=='paused' and (o.held_since is not None or is_watcher(w))
         if w.status!='active' and not held_paused: return 'expired' if w.status=='expired' else 'wake_inactive',False,None
-        if w.expires_at is not None and now>=w.expires_at: return 'expired',False,None
+        if w.expires_at is not None and now>=w.expires_at and not self.owner_turn_owed(w,now): return 'expired',False,None
         if w.max_fires is not None and w.fires>=w.max_fires: return 'max_fires',False,None
         if held_paused: return 'held_paused',True,None
         if w.cancel_on_reply and s and s.last_human_at is not None and s.last_human_at>w.created_at: return 'cancel_on_reply',False,None
@@ -1010,16 +1025,19 @@ class Poller:
         tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
         if is_keep_warm(w): return render_keep_warm(w,o,marker_tag=tag)
         recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
-        late=None
+        late=downtime=None
         if o.dedupe_key.startswith('t:'):
-            try: late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
+            try:
+                late=max(0,self.clock.now()-float(o.dedupe_key[2:]))
+                # How late it was when it came due again (downtime), not later holds such as quiet hours or a pause (#230).
+                downtime=max(0,o.created_at-float(o.dedupe_key[2:])) if o.created_at is not None else None
             except ValueError: pass
         return render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              stop_hint=self.policy.stop_hint,stop_hint_shown=shown=='1',stop_hint_chat_shown=chat_shown=='1',
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-int(not o.force_silent and o.state in {'claimed','started'}),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
              after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
-             late_window_s=self.policy.late_window_s() if owner_class(w) and one_shot(w) else None,
+             late_window_s=self.policy.late_window_s() if owner_class(w) and one_shot(w) else None,downtime_s=downtime,
              cache_line=cache_line,marker_tag=tag,handoffs=handoffs,held_reports=held_reports,
              desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
                               measure=lambda text: len(escape_text(text)),turn=o)
