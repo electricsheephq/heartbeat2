@@ -520,9 +520,10 @@ class Poller:
             self.bring_role_forward(target.id)
 
     def track_switched_off(self,now):
-        """A stretch with settings.enabled false is an outage too (#230); a deliberate /pulse pause is not."""
+        """A stretch with HeartBeat switched off (settings.enabled false) or Hermes' emergency stop is an outage too (#230),
+        before or after a reminder is queued, so both paths measure it the same way."""
         off=self.store.get_meta('off_since')
-        if not self.policy.enabled:
+        if not self.policy.enabled or self.paused():
             if not off: self.store.set_meta('off_since',str(now))
         elif off:
             self.record_outage(float(off),now)

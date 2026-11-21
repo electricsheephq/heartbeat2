@@ -183,3 +183,28 @@ def test_report_only_turn_has_no_silent_settled_exit(engine, command):
     e.tick()
     text = e.ctx.calls[-1][0]
     assert 'this reminder was missed' in text and 'end it silently' not in text
+
+
+@pytest.mark.parametrize('queued_first', [False, True])
+def test_an_emergency_stop_counts_the_same_before_or_after_queueing(engine, command, queued_first):
+    """Codex connector: a stop before queueing counted as downtime while a stop after it didn't; now both count."""
+    e = engine
+    w = owner_reminder(e, command, 'command')
+    finish(e)
+    if queued_first:
+        e.ctx.accept = False
+        e.clock.advance(w.next_due_at - e.clock.now())
+        e.tick()
+        assert e.store.list_occurrences(w.id)[0].state == 'pending'
+        e.ctx.accept = True
+    stopped = True
+    e.paused = lambda: stopped
+    e.tick()
+    e.clock.advance(w.next_due_at - e.clock.now() + 25*HOUR if not queued_first else 25*HOUR)
+    e.store.set_meta('last_tick_at', str(e.clock.now() - 5))  # the gateway kept ticking through the stop
+    e._last_tick_mono = e.clock.monotonic() - 5
+    e.tick()
+    stopped = False
+    e.tick()
+    text = e.ctx.calls[-1][0]
+    assert 'this reminder was missed' in text and 'Do the work the note describes' not in text
