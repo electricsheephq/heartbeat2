@@ -742,8 +742,9 @@ class Poller:
         kind=plan.get('blocked') or ''
         old=json.loads(self.store.get_meta(key) or '{}')
         pending=bool(old) and self.store.get_meta(card)==old.get('reason')  # our line, not shown yet
-        if old and old.get('route','')!=route:
+        if old and route and old.get('route') and old['route']!=route:
             # A model switch is a new route: it gets its own two hours, and the old route's unshown line goes (review).
+            # No route yet (/new clears it until the next model call) or state without one (0.4.32) is not a switch.
             self.store.set_meta(key,'')
             if pending: self.store.set_meta(card,'')
             old,pending={},False

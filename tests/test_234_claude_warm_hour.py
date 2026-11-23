@@ -273,3 +273,33 @@ def test_a_warm_gap_under_15_minutes_does_not_prove_the_hour(engine):
     assert 'due_at' not in plan and plan['blocked'] == 'short' and 'lasts 5m or less' in plan['reason']
     s = chat(e, CLAUDE, {'max_warm_gap': 901})
     assert cache.warm_lifetime(e.store, s) == (3600, 'warm_seen')
+
+
+def test_new_conversation_keeps_a_due_line(engine):
+    """Review: /new clears the chat's route until the next model call; that is not a model switch."""
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    blocked_two_hours(e)
+    assert e.store.get_meta('card:'+w.id)
+    session(e, last_route='')                    # what /new leaves behind
+    e.tick()
+    assert e.store.get_meta('card:'+w.id) and e.store.get_meta('keep_warm_blocked:'+w.id)
+    session(e, last_route=CLAUDE)
+    assert "can't ping in this chat" in owner_context(e, 't1')
+
+
+def test_state_from_0_4_32_without_a_route_is_kept(engine):
+    """Review: an owner already told under 0.4.32 (state without 'route') is not told again after the upgrade."""
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    e.store.set_meta('keep_warm_blocked:'+w.id, json.dumps({'kind': 'short', 'reason': 'x', 'since': e.clock.now(), 'told': True}))
+    e.clock.advance(3 * KEEP_WARM_NOTICE_AFTER)
+    session(e, last_human_at=e.clock.now(), last_cache_touch_at=e.clock.now())
+    e.tick()
+    e.clock.advance(KEEP_WARM_NOTICE_AFTER)      # the re-tell would come two hours after the upgrade
+    session(e, last_human_at=e.clock.now(), last_cache_touch_at=e.clock.now())
+    e.tick()
+    assert not e.store.get_meta('card:'+w.id)
+    assert "can't ping" not in owner_context(e, 't1')
