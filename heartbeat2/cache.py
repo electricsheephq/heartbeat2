@@ -254,7 +254,9 @@ def keep_warm_plan(store, session, policy, now):
     if not ttl:
         return {'reason': _unknown_reason(store, session), 'touch': touch, 'blocked': 'unknown'}
     if ttl < KEEP_WARM_MIN_TTL:
-        return {'reason': f'the cache lasts {minutes(ttl)}; keep-warm needs 30m or more', 'touch': touch, 'ttl': ttl, 'blocked': 'short'}
+        # A Claude cache is 5 minutes or 1 hour, so a shorter learned gap reads as the 5-minute cache, not "1m" (review).
+        lasts = '5m or less' if _floor(session.last_route) and ttl <= COLD_GAP_FLOOR else minutes(ttl)
+        return {'reason': f'the cache lasts {lasts}; keep-warm needs 30m or more', 'touch': touch, 'ttl': ttl, 'blocked': 'short'}
     if (session.last_prompt_tokens or 0) < policy.keep_warm_min_tokens:
         return {'reason': f'the context is small ({session.last_prompt_tokens or 0} tokens), so a cold start is cheap', 'touch': touch, 'ttl': ttl}
     if session.last_human_at is None or now - session.last_human_at >= policy.keep_warm_idle_hours * 3600:

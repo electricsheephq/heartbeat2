@@ -25,6 +25,7 @@ RETRY_DELAYS = (30,60,300,900,3600)
 PROBES_PER_TICK = 16
 OUTAGE_GAP_S = 60     # a longer gap between ticks means the gateway or the poller was down (#230)
 OUTAGES_KEPT = 50
+KEEP_WARM_NOTICE_AFTER = 7200  # keep-warm unable to ping this long is worth one line to the owner (#234)
 FINAL_SKIP_REASONS = frozenset({'unanswered','asleep','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires','nothing_to_report'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
@@ -742,9 +743,14 @@ class Poller:
         old=json.loads(self.store.get_meta(key) or '{}')
         pending=bool(old) and self.store.get_meta(card)==old.get('reason')  # our line, not shown yet
         if kind:
-            self.store.set_meta(key,json.dumps({'kind':kind,'reason':plan['reason']}))
-            # A new kind tells the owner again; the same kind with new numbers only refreshes a line not yet shown (review).
-            if old.get('kind')!=kind or pending: self.store.set_meta(card,plan['reason'])
+            now=self.clock.now()
+            since=old.get('since',now) if old.get('kind')==kind else now
+            told=old.get('told',False) if old.get('kind')==kind else False
+            # A route still learning after a model switch is not news: tell the owner once it has lasted two hours (review).
+            due=not told and now-since>=KEEP_WARM_NOTICE_AFTER
+            self.store.set_meta(key,json.dumps({'kind':kind,'reason':plan['reason'],'since':since,'told':told or due}))
+            # The same kind with new numbers only refreshes a line not yet shown (review).
+            if due or pending: self.store.set_meta(card,plan['reason'])
         elif old and 'due_at' in plan:
             # Cleared only when a ping is planned again: rest or a small context in between doesn't make it tell again (review).
             self.store.set_meta(key,'')
