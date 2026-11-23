@@ -303,3 +303,22 @@ def test_state_from_0_4_32_without_a_route_is_kept(engine):
     e.tick()
     assert not e.store.get_meta('card:'+w.id)
     assert "can't ping" not in owner_context(e, 't1')
+
+
+def test_a_queued_owner_message_does_not_hand_the_line_to_the_goal_turn_before_it(engine):
+    """Review (orphan-rescue ordering, as in test_u11): the owner's message is queued, a standing-goal turn runs first."""
+    from heartbeat2.intake import GOAL_PREFIXES
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    blocked_two_hours(e)
+    admit(e, mid='q1', text='new')               # queued while the agent is busy
+    goal = {'role': 'user', 'content': GOAL_PREFIXES[0]}
+    auto = str(e.intake.pre_llm_call(session_id='sid', turn_id='goal', user_message=goal['content'],
+                                     conversation_history=[goal], platform='telegram'))
+    assert "can't ping" not in auto
+    assert e.store.get_meta('card:'+w.id)          # kept for the owner
+    mine = {'role': 'user', 'content': 'next', 'platform_message_id': 'q2'}
+    admit(e, mid='q2', text='next')
+    assert "can't ping in this chat" in str(e.intake.pre_llm_call(session_id='sid', turn_id='t2', user_message='next',
+                                                                    conversation_history=[mine], platform='telegram'))

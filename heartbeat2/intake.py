@@ -677,12 +677,19 @@ class Intake:
                 # A proposal is not armed until /pulse ok; say so, as its receipt does.
                 counts=', '.join(([f'{armed} armed'] if armed else [])+([f'{proposed} awaiting /pulse ok'] if proposed else []))
                 lines.append(f'HeartBeat 2.0: {counts}; /pulse shows status, /pulse off stops checks.')
+            # #234 review: owner_seen is chat-wide (a queued owner message marks the chat before a standing-goal turn runs),
+            # so the keep-warm line also needs this turn's own row to be the owner's, not a goal, heartbeat or notification.
+            last=conversation_history[-1] if conversation_history else None
+            agent_turn=(isinstance(user_message,str) and user_message.startswith(GOAL_PREFIXES+(HB_PREFIX,))) or (
+                isinstance(last,dict) and last.get('role')=='user' and bool(last.get('display_kind')
+                or owner_text(last.get('content','')).startswith(GOAL_PREFIXES+(HB_PREFIX,))))
+            owner_turn=owner_seen and not agent_turn
             for w in s.list_wakes(key):
                 card=s.get_meta('card:'+w.id)
                 if card and is_keep_warm(w):
-                    # #234 review: only on the owner's own turn (a reaction marks the chat, and an agent-started turn may come
-                    # next) and while HeartBeat may speak here; otherwise the line waits.
-                    if w.status=='active' and not (can_speak and owner_seen): continue
+                    # #234 review: only on the owner's own turn (a reaction or a queued message marks the chat, and an
+                    # agent-started turn may come next) and while HeartBeat may speak here; otherwise the line waits.
+                    if w.status=='active' and not (can_speak and owner_turn): continue
                     if w.status=='paused': lines.append(f'Keep-warm ({w.id}) paused ({card}); /pulse warm on turns it back on.')
                     elif w.status=='active':  # #234: never silently off
                         lines.append(f"HeartBeat 2.0: keep-warm ({w.id}) can't ping in this chat: {card}. Tell the owner in one short line.")
