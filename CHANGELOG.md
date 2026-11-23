@@ -3,7 +3,7 @@
 ## 0.4.32 — 2026-11-23
 
 - **Keep-warm keeps working after a model switch on Claude.** A new model is a new cache route, and keep-warm took the longest gap it had seen that route's cache stay warm as the cache's lifetime. After a switch, a 22-minute warm gap read as a 22-minute cache, below the 30 minutes keep-warm needs, so it stopped pinging and two idle gaps paid full cache rewrites. Claude caches last 5 minutes or 1 hour, so a Claude route seen warm past 5 minutes now counts as the hour; two cold pings in a row still stop it if that's ever wrong. A 5-minute cache still gets no pings. Other models' routes are unchanged. (#234)
-- **A keep-warm that can't ping tells you.** When keep-warm has been unable to ping for two hours because the cache lifetime is unknown or short, caching is off, or two pings in a row found the cache cold, the agent tells you once on your next message (not while HeartBeat is off in the chat), and `/pulse desk` shows the reason from the start, while it lasts. A new reason tells you again after its own two hours; your rest or a small context doesn't count. On Claude a cache under 5 minutes now reads "5m or less". (#234)
+- **A keep-warm that can't ping tells you.** When keep-warm has been unable to ping for two hours because the cache lifetime is unknown or short, caching is off, or two pings in a row found the cache cold, the agent tells you once on your next message (not while HeartBeat is off in the chat), and `/pulse desk` shows the reason from the start, while it lasts. A new reason tells you again after its own two hours. Your rest or a small context is not a reason in itself, but resting time counts toward the two hours. On Claude a cache under 5 minutes now reads "5m or less". (#234)
 
 ## 0.4.31 — 2026-11-21
 
