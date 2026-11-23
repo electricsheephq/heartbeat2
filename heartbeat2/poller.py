@@ -25,6 +25,7 @@ RETRY_DELAYS = (30,60,300,900,3600)
 PROBES_PER_TICK = 16
 OUTAGE_GAP_S = 60     # a longer gap between ticks means the gateway or the poller was down (#230)
 OUTAGES_KEPT = 50
+KEEP_WARM_NOTICE_AFTER = 7200  # keep-warm unable to ping this long is worth one line to the owner (#234)
 FINAL_SKIP_REASONS = frozenset({'unanswered','asleep','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires','nothing_to_report'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
@@ -734,12 +735,36 @@ class Poller:
         for w in self.store.list_wakes(status='active'):
             if is_keep_warm(w): self.evaluate(w,lambda w=w:self._keep_warm(w))
 
+    def keep_warm_blocked(self,w,plan):
+        """Tell the owner once when keep-warm can't ping for a reason other than rest or a small context (#234): one line on
+        their next message, and the desk shows it while it lasts. A new kind of reason tells them again."""
+        key,card='keep_warm_blocked:'+w.id,'card:'+w.id
+        kind=plan.get('blocked') or ''
+        old=json.loads(self.store.get_meta(key) or '{}')
+        pending=bool(old) and self.store.get_meta(card)==old.get('reason')  # our line, not shown yet
+        if kind:
+            now=self.clock.now()
+            since=old.get('since',now) if old.get('kind')==kind else now
+            told=old.get('told',False) if old.get('kind')==kind else False
+            # A route still learning after a model switch is not news: tell the owner once it has lasted two hours (review).
+            due=not told and now-since>=KEEP_WARM_NOTICE_AFTER
+            self.store.set_meta(key,json.dumps({'kind':kind,'reason':plan['reason'],'since':since,'told':told or due}))
+            # The same kind with new numbers only refreshes a line not yet shown; a new kind drops it and waits its own two
+            # hours, so the owner isn't told twice (review).
+            if due or (pending and old.get('kind')==kind): self.store.set_meta(card,plan['reason'])
+            elif pending: self.store.set_meta(card,'')
+        elif old and 'due_at' in plan:
+            # Cleared only when a ping is planned again: rest or a small context in between doesn't make it tell again (review).
+            self.store.set_meta(key,'')
+            if pending: self.store.set_meta(card,'')
+
     def _keep_warm(self,w):
         from .cache import keep_warm_plan, keep_warm_key
         s,now=self.store,self.clock.now()
         session=s.get_session(w.session_key)
         if session is None or session.platform not in MESSAGING_PLATFORMS: return
         plan=keep_warm_plan(s,session,self.policy,now)
+        self.keep_warm_blocked(w,plan)
         due=plan.get('due_at')
         if due!=w.next_due_at:
             if not s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due): return
