@@ -11,7 +11,8 @@ from heartbeat2.policy import Policy, cap_counts, is_keep_warm
 from test_engine import engine, arm, session, KEY
 
 ROUTE = 'anthropic|claude-opus-5-5|https://api.anthropic.com'
-TTL = 3594.0  # the longest gap seen warm on this route (the route reports no TTL itself)
+WARM_GAP = 3594.0  # the longest gap seen warm on this route (the route reports no TTL itself)
+TTL = 3600.0  # a Claude cache seen warm past 5 minutes has the hour (#234)
 EDGE = TTL - max(120, .08 * TTL)
 
 
@@ -29,7 +30,7 @@ def pulse(monkeypatch):
     return lambda e, args: commands.handle(args, SimpleNamespace(get_engine=lambda: e))
 
 
-def warm_chat(e, *, prompt=300000, warm_gap=TTL, touch=None, human=None):
+def warm_chat(e, *, prompt=300000, warm_gap=WARM_GAP, touch=None, human=None):
     now = e.clock.now()
     e.store.set_meta('cache_routes', json.dumps({ROUTE: {'max_warm_gap': warm_gap}}))
     session(e, last_route=ROUTE, last_prompt_tokens=prompt,
@@ -155,7 +156,7 @@ def test_no_ping_when_it_would_not_save(engine, pulse, case, reason):
         session(e, last_human_at=now)
     else:
         warm_chat(e, prompt=1000 if case == 'small' else 300000,
-                  warm_gap={'short_ttl': 600, 'unknown_ttl': None}.get(case, TTL),
+                  warm_gap={'short_ttl': 240, 'unknown_ttl': None}.get(case, WARM_GAP),  # 240 s: a 5-minute Claude cache
                   touch=now - TTL if case == 'cold' else now,
                   human=now - 12 * 3600 if case == 'idle' else now)
     assert ('No ping now' in pulse(e, 'warm on'))

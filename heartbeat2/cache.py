@@ -206,7 +206,9 @@ def warm_lifetime(store, session):
     """The cache lifetime a keep-warm ping can rely on: the route's known TTL, else the longest gap this route stayed warm."""
     ttl, source = ttl_for_session(store, session)
     # A lifetime learned from gaps on a Claude route is still capped at the hour (review): gaps run long by call time.
-    if ttl and source == 'learned' and _floor(session.last_route): return min(ttl, CLAUDE_MAX_TTL), source
+    # A Claude cache lasts 5 minutes or 1 hour, so a learned lifetime past 5 minutes is the hour (#234).
+    if ttl and source == 'learned' and _floor(session.last_route):
+        return (CLAUDE_MAX_TTL if ttl > COLD_GAP_FLOOR else ttl), source
     if ttl or source == 'off': return ttl, source  # Caching turned off: old warm gaps say nothing now.
     if not session or not session.last_route: return None, 'unknown'
     provider, model, part = session.last_route.split('|', 2)
@@ -217,7 +219,9 @@ def warm_lifetime(store, session):
     # A Claude cache lasts 5 minutes or 1 hour. Staying warm past 5 minutes proves the hour, so a shorter miss was a changed
     # prompt (a compaction, a rebuilt system prompt), not expiry (#228). Cold pings in a row stop it instead (keep_warm_plan).
     # Capped at the hour: a measured gap runs long by call time and retries, and a ping after the hour lands cold (review).
-    if warm and _floor(session.last_route) and warm > COLD_GAP_FLOOR: return min(warm, CLAUDE_MAX_TTL), 'warm_seen'
+    # Staying warm past 5 minutes proves the hour, so the lifetime is the hour, not the measured gap (#234): a new route
+    # whose longest warm gap so far is 22 minutes still has a 1-hour cache. Cold pings in a row stop it if that is wrong.
+    if warm and _floor(session.last_route) and warm > COLD_GAP_FLOOR: return CLAUDE_MAX_TTL, 'warm_seen'
     # Elsewhere a warm gap is a lower bound on the lifetime, unless a shorter gap was already seen cold.
     if warm and (cold is None or warm < cold): return warm, 'warm_seen'
     return None, 'unknown'
@@ -246,11 +250,11 @@ def keep_warm_plan(store, session, policy, now):
     touch = session.last_cache_touch_at
     ttl, source = warm_lifetime(store, session)
     if source == 'off':
-        return {'reason': 'prompt caching is off for this route', 'touch': touch}
+        return {'reason': 'prompt caching is off for this route', 'touch': touch, 'blocked': 'off'}
     if not ttl:
-        return {'reason': _unknown_reason(store, session), 'touch': touch}
+        return {'reason': _unknown_reason(store, session), 'touch': touch, 'blocked': 'unknown'}
     if ttl < KEEP_WARM_MIN_TTL:
-        return {'reason': f'the cache lasts {minutes(ttl)}; keep-warm needs 30m or more', 'touch': touch, 'ttl': ttl}
+        return {'reason': f'the cache lasts {minutes(ttl)}; keep-warm needs 30m or more', 'touch': touch, 'ttl': ttl, 'blocked': 'short'}
     if (session.last_prompt_tokens or 0) < policy.keep_warm_min_tokens:
         return {'reason': f'the context is small ({session.last_prompt_tokens or 0} tokens), so a cold start is cheap', 'touch': touch, 'ttl': ttl}
     if session.last_human_at is None or now - session.last_human_at >= policy.keep_warm_idle_hours * 3600:
@@ -260,7 +264,7 @@ def keep_warm_plan(store, session, policy, now):
     cold = cold_pings(store, session.session_key, session.last_route) if learned else 0
     if cold >= KEEP_WARM_COLD_PINGS:
         return {'reason': f'the last {cold} pings found the cache cold, so pings stay off until a reply reuses the cache after '
-                          'more than 15 minutes, or you run /pulse warm on', 'touch': touch, 'ttl': ttl}
+                          'more than 15 minutes, or you run /pulse warm on', 'touch': touch, 'ttl': ttl, 'blocked': 'cold_pings'}
     cold_at = touch + ttl - KEEP_WARM_COLD_MARGIN
     if now >= cold_at:
         return {'reason': 'the cache has gone cold; it resumes after the next model call', 'touch': touch, 'ttl': ttl}

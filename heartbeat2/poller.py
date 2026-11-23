@@ -734,12 +734,26 @@ class Poller:
         for w in self.store.list_wakes(status='active'):
             if is_keep_warm(w): self.evaluate(w,lambda w=w:self._keep_warm(w))
 
+    def keep_warm_blocked(self,w,plan):
+        """Tell the owner once when keep-warm can't ping for a reason other than rest or a small context (#234): one line on
+        their next message, and the desk shows it while it lasts. A new kind of reason tells them again."""
+        key='keep_warm_blocked:'+w.id
+        kind=plan.get('blocked') or ''
+        old=json.loads(self.store.get_meta(key) or '{}')
+        if kind:
+            self.store.set_meta(key,json.dumps({'kind':kind,'reason':plan['reason']}))
+            if old.get('kind')!=kind: self.store.set_meta('card:'+w.id,plan['reason'])
+        elif old:
+            self.store.set_meta(key,'')
+            if self.store.get_meta('card:'+w.id)==old.get('reason'): self.store.set_meta('card:'+w.id,'')
+
     def _keep_warm(self,w):
         from .cache import keep_warm_plan, keep_warm_key
         s,now=self.store,self.clock.now()
         session=s.get_session(w.session_key)
         if session is None or session.platform not in MESSAGING_PLATFORMS: return
         plan=keep_warm_plan(s,session,self.policy,now)
+        self.keep_warm_blocked(w,plan)
         due=plan.get('due_at')
         if due!=w.next_due_at:
             if not s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due): return

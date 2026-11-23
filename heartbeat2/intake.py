@@ -680,6 +680,8 @@ class Intake:
                 card=s.get_meta('card:'+w.id)
                 if card and is_keep_warm(w):
                     if w.status=='paused': lines.append(f'Keep-warm ({w.id}) paused ({card}); /pulse warm on turns it back on.')
+                    elif w.status=='active':  # #234: never silently off
+                        lines.append(f"HeartBeat 2.0: keep-warm ({w.id}) can't ping in this chat: {card}. Tell the owner in one short line.")
                     s.set_meta('card:'+w.id,'')
                 elif card:
                     ending = '.' if w.role or w.trigger_json.get('own_time') else f'; convert with /pulse watch {w.id}.'
