@@ -735,20 +735,25 @@ class Poller:
         for w in self.store.list_wakes(status='active'):
             if is_keep_warm(w): self.evaluate(w,lambda w=w:self._keep_warm(w))
 
-    def keep_warm_blocked(self,w,plan):
+    def keep_warm_blocked(self,w,plan,route=''):
         """Tell the owner once when keep-warm can't ping for a reason other than rest or a small context (#234): one line on
-        their next message, and the desk shows it while it lasts. A new kind of reason tells them again."""
+        their own next message, after it has lasted two hours on this route. A new kind of reason tells them again."""
         key,card='keep_warm_blocked:'+w.id,'card:'+w.id
         kind=plan.get('blocked') or ''
         old=json.loads(self.store.get_meta(key) or '{}')
         pending=bool(old) and self.store.get_meta(card)==old.get('reason')  # our line, not shown yet
+        if old and old.get('route','')!=route:
+            # A model switch is a new route: it gets its own two hours, and the old route's unshown line goes (review).
+            self.store.set_meta(key,'')
+            if pending: self.store.set_meta(card,'')
+            old,pending={},False
         if kind:
             now=self.clock.now()
             since=old.get('since',now) if old.get('kind')==kind else now
             told=old.get('told',False) if old.get('kind')==kind else False
             # A route still learning after a model switch is not news: tell the owner once it has lasted two hours (review).
             due=not told and now-since>=KEEP_WARM_NOTICE_AFTER
-            self.store.set_meta(key,json.dumps({'kind':kind,'reason':plan['reason'],'since':since,'told':told or due}))
+            self.store.set_meta(key,json.dumps({'kind':kind,'reason':plan['reason'],'since':since,'told':told or due,'route':route}))
             # The same kind with new numbers only refreshes a line not yet shown; a new kind drops it and waits its own two
             # hours, so the owner isn't told twice (review).
             if due or (pending and old.get('kind')==kind): self.store.set_meta(card,plan['reason'])
@@ -764,7 +769,7 @@ class Poller:
         session=s.get_session(w.session_key)
         if session is None or session.platform not in MESSAGING_PLATFORMS: return
         plan=keep_warm_plan(s,session,self.policy,now)
-        self.keep_warm_blocked(w,plan)
+        self.keep_warm_blocked(w,plan,session.last_route or '')
         due=plan.get('due_at')
         if due!=w.next_due_at:
             if not s.cas_wake(w.id,'active',expected_version=w.version,next_due_at=due): return

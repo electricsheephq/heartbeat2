@@ -680,7 +680,9 @@ class Intake:
             for w in s.list_wakes(key):
                 card=s.get_meta('card:'+w.id)
                 if card and is_keep_warm(w):
-                    if w.status=='active' and not can_speak: continue  # #234 review: no notice while HeartBeat may not speak here; it waits
+                    # #234 review: only on the owner's own turn (a reaction marks the chat, and an agent-started turn may come
+                    # next) and while HeartBeat may speak here; otherwise the line waits.
+                    if w.status=='active' and not (can_speak and owner_seen): continue
                     if w.status=='paused': lines.append(f'Keep-warm ({w.id}) paused ({card}); /pulse warm on turns it back on.')
                     elif w.status=='active':  # #234: never silently off
                         lines.append(f"HeartBeat 2.0: keep-warm ({w.id}) can't ping in this chat: {card}. Tell the owner in one short line.")
