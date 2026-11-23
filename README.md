@@ -324,7 +324,8 @@ turn ("reply [SILENT]", no tools) that reads the cache and keeps it alive, so th
   longest warm gap stops it. `/pulse warm`,
   `/pulse status`, `/pulse list` and the agent's list say why no ping is due. When keep-warm has been unable to ping for two
   hours because the cache lifetime is unknown or short, caching is off, or two pings in a row found it cold, the agent tells
-  you once on your next message, and the desk shows it while it lasts.
+  you once on your next message (not while HeartBeat is off in the chat). `/pulse desk` shows the reason from the start, while
+  it lasts. A small context or your rest doesn't count: keep-warm wouldn't ping then anyway.
 - Hermes has no per-turn output cap for plugins, so the ping asks for a one-word reply rather than enforcing it.
 - Hermes builds that include its own prompt-cache warmer (NousResearch/hermes-agent#156455, merged after Hermes 0.23.2) keep
   most chats' caches warm by themselves, and HeartBeat can't yet see that schedule. In a chat that warmer handles, turn

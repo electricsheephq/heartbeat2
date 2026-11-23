@@ -249,17 +249,22 @@ def keep_warm_plan(store, session, policy, now):
         return {'reason': 'waiting for the first model call in this chat'}
     touch = session.last_cache_touch_at
     ttl, source = warm_lifetime(store, session)
+    small = (session.last_prompt_tokens or 0) < policy.keep_warm_min_tokens
+    resting = session.last_human_at is None or now - session.last_human_at >= policy.keep_warm_idle_hours * 3600
+    # Only a large chat whose owner is writing reports a blocked keep-warm: a small or resting one gets no ping anyway (review).
+    quiet = small or resting
     if source == 'off':
-        return {'reason': 'prompt caching is off for this route', 'touch': touch, 'blocked': 'off'}
+        return {'reason': 'prompt caching is off for this route', 'touch': touch, **({} if quiet else {'blocked': 'off'})}
     if not ttl:
-        return {'reason': _unknown_reason(store, session), 'touch': touch, 'blocked': 'unknown'}
+        return {'reason': _unknown_reason(store, session), 'touch': touch, **({} if quiet else {'blocked': 'unknown'})}
     if ttl < KEEP_WARM_MIN_TTL:
         # A Claude cache is 5 minutes or 1 hour, so a shorter learned gap reads as the 5-minute cache, not "1m" (review).
         lasts = '5m or less' if _floor(session.last_route) and ttl <= COLD_GAP_FLOOR else minutes(ttl)
-        return {'reason': f'the cache lasts {lasts}; keep-warm needs 30m or more', 'touch': touch, 'ttl': ttl, 'blocked': 'short'}
-    if (session.last_prompt_tokens or 0) < policy.keep_warm_min_tokens:
+        return {'reason': f'the cache lasts {lasts}; keep-warm needs 30m or more', 'touch': touch, 'ttl': ttl,
+                **({} if quiet else {'blocked': 'short'})}
+    if small:
         return {'reason': f'the context is small ({session.last_prompt_tokens or 0} tokens), so a cold start is cheap', 'touch': touch, 'ttl': ttl}
-    if session.last_human_at is None or now - session.last_human_at >= policy.keep_warm_idle_hours * 3600:
+    if resting:
         return {'reason': f'resting: no message from you in {policy.keep_warm_idle_hours}h; it resumes when you write', 'touch': touch, 'ttl': ttl}
     # Only where a Claude route's lifetime was learned from gaps (#228): a route that reports its TTL pings as before.
     learned = source in {'warm_seen', 'learned'} and _floor(session.last_route)

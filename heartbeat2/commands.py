@@ -679,6 +679,7 @@ def _warm(engine, key, rest):
                 raise ValueError('concurrent item change')
             engine.cancel_occurrences(wid,'cancelled')
             engine.store.set_meta('card:'+wid,'')
+            engine.store.set_meta('keep_warm_blocked:'+wid,'')  # #234: a later /pulse warm on starts its two hours afresh
             engine.signal()
             return 'Keep-warm is off for this chat.'
         if session.platform not in MESSAGING_PLATFORMS:
@@ -699,6 +700,7 @@ def _warm(engine, key, rest):
                                          armed_session_id=session.current_session_id,error_streak=0,next_due_at=None):
                 raise ValueError('concurrent item change')
             engine.store.set_meta('card:'+wid,'')
+            engine.store.set_meta('keep_warm_blocked:'+wid,'')
         cache.clear_cold_pings(engine.store, key)  # The owner asked again: earlier cold pings don't hold it off (#228).
         plan = cache.keep_warm_plan(engine.store, session, engine.policy, now)
     engine.signal()

@@ -749,8 +749,10 @@ class Poller:
             # A route still learning after a model switch is not news: tell the owner once it has lasted two hours (review).
             due=not told and now-since>=KEEP_WARM_NOTICE_AFTER
             self.store.set_meta(key,json.dumps({'kind':kind,'reason':plan['reason'],'since':since,'told':told or due}))
-            # The same kind with new numbers only refreshes a line not yet shown (review).
-            if due or pending: self.store.set_meta(card,plan['reason'])
+            # The same kind with new numbers only refreshes a line not yet shown; a new kind drops it and waits its own two
+            # hours, so the owner isn't told twice (review).
+            if due or (pending and old.get('kind')==kind): self.store.set_meta(card,plan['reason'])
+            elif pending: self.store.set_meta(card,'')
         elif old and 'due_at' in plan:
             # Cleared only when a ping is planned again: rest or a small context in between doesn't make it tell again (review).
             self.store.set_meta(key,'')

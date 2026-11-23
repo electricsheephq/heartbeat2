@@ -649,7 +649,8 @@ class Intake:
             owner_session=s.get_session(key)
             # While HeartBeat may not speak into this chat (off, estop, no injection consent, dm_only, not a gateway chat),
             # held results stay pending: the owner's limits cover them too.
-            reports,shown=held_report_lines(s,key) if e.session_can_receive(owner_session) else ([],[])
+            can_speak=e.session_can_receive(owner_session)
+            reports,shown=held_report_lines(s,key) if can_speak else ([],[])
             if reports:
                 lines.append("HeartBeat 2.0: while the owner's limits held your messages, your wake turns finished these and wanted to tell the owner. In this reply, tell them what still matters, briefly:")
                 lines+=reports
@@ -679,6 +680,7 @@ class Intake:
             for w in s.list_wakes(key):
                 card=s.get_meta('card:'+w.id)
                 if card and is_keep_warm(w):
+                    if w.status=='active' and not can_speak: continue  # #234 review: no notice while HeartBeat may not speak here; it waits
                     if w.status=='paused': lines.append(f'Keep-warm ({w.id}) paused ({card}); /pulse warm on turns it back on.')
                     elif w.status=='active':  # #234: never silently off
                         lines.append(f"HeartBeat 2.0: keep-warm ({w.id}) can't ping in this chat: {card}. Tell the owner in one short line.")

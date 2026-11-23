@@ -32,6 +32,10 @@ def test_new_claude_route_with_a_22_minute_warm_gap_pings_on_the_hour(engine):
     assert cache.warm_lifetime(e.store, s) == (3600, 'warm_seen')
     plan = keep_warm_plan(e.store, s, e.policy, now)
     assert plan['due_at'] == now + 3600 - max(120, .08 * 3600) and 'blocked' not in plan
+    # After an install or restart, the ping is timed from the chat's last model call, not from the restart.
+    e.clock.advance(1800)
+    plan = keep_warm_plan(e.store, e.store.get_session(KEY), e.policy, e.clock.now())
+    assert plan['due_at'] == now + 3600 - max(120, .08 * 3600)
 
 
 def test_a_five_minute_claude_cache_still_refuses(engine):
@@ -156,3 +160,68 @@ def test_no_line_in_the_first_two_hours_after_a_model_switch(engine):
     e.clock.advance(60)
     e.tick()
     assert 'lasts 5m or less' in owner_context(e, 't3')
+
+
+def test_small_or_resting_chats_report_no_blocked_keep_warm(engine):
+    """Review: a small or resting chat would get no ping anyway, so a short cache there is not a blocked keep-warm."""
+    e, now = engine, engine.clock.now()
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    session(e, last_prompt_tokens=1000)
+    plan = keep_warm_plan(e.store, e.store.get_session(KEY), e.policy, now)
+    assert 'blocked' not in plan and 'lasts 5m or less' in plan['reason']
+    session(e, last_prompt_tokens=370000, last_human_at=now - 13*3600)
+    plan = keep_warm_plan(e.store, e.store.get_session(KEY), e.policy, now)
+    assert 'blocked' not in plan and 'lasts 5m or less' in plan['reason']
+    w = keep_warm(e)
+    session(e, last_prompt_tokens=1000)
+    blocked_two_hours(e)
+    assert "can't ping" not in owner_context(e, 't1')
+
+
+def test_no_notice_while_heartbeat_is_off_in_the_chat(engine):
+    """Review: /pulse off means HeartBeat may not speak here; the line waits until it may."""
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    blocked_two_hours(e)
+    session(e, enabled=False)
+    assert "can't ping" not in owner_context(e, 't1')
+    assert e.store.get_meta('card:'+w.id)          # kept, not dropped
+    session(e, enabled=True)
+    assert "can't ping in this chat" in owner_context(e, 't2')
+
+
+def test_a_new_kind_drops_an_unshown_line_and_tells_once(engine):
+    """Review: an unshown line for one reason, then another reason: the owner is told once, about the new reason."""
+    e = engine
+    chat(e, OTHER, None)                         # nothing learned: lifetime unknown
+    w = keep_warm(e)
+    blocked_two_hours(e)
+    assert e.store.get_meta('card:'+w.id)        # due, not shown yet
+    e.store.set_meta('cache_routes', json.dumps({OTHER: {'max_warm_gap': 240}}))  # another call teaches 4 minutes
+    e.tick()
+    assert not e.store.get_meta('card:'+w.id)
+    assert "can't ping" not in owner_context(e, 't1')
+    e.clock.advance(KEEP_WARM_NOTICE_AFTER)
+    e.tick()
+    assert 'lasts 4m;' in owner_context(e, 't2')
+    e.clock.advance(KEEP_WARM_NOTICE_AFTER)
+    e.tick()
+    assert "can't ping" not in owner_context(e, 't3')
+
+
+def test_warm_off_and_on_starts_the_two_hours_afresh(engine, monkeypatch):
+    """Review: state kept across /pulse warm off and on made the line due on the first tick after on."""
+    monkeypatch.setattr(commands, 'session_env', lambda name: KEY if name == 'HERMES_SESSION_KEY' else '')
+    pulse = lambda args: commands.handle(args, type('Ctx', (), {'get_engine': staticmethod(lambda: e)})())
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    e.tick()                                     # blocked, not yet two hours
+    assert pulse('warm off') == 'Keep-warm is off for this chat.'
+    e.clock.advance(KEEP_WARM_NOTICE_AFTER)
+    session(e, last_human_at=e.clock.now(), last_cache_touch_at=e.clock.now())
+    pulse('warm on')
+    e.tick()
+    assert not e.store.get_meta('card:'+w.id)
+    assert "can't ping" not in owner_context(e, 't1')
