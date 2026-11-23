@@ -48,7 +48,7 @@ def test_a_five_minute_claude_cache_still_refuses(engine):
     assert 'lasts 4m;' in keep_warm_plan(e.store, s, e.policy, now)['reason']
 
 
-@pytest.mark.parametrize('learned,expect', [(1359.3, 3600), (240, 240)])
+@pytest.mark.parametrize('learned,expect', [(1359.3, 3600), (600, 600), (240, 240)])
 def test_learned_claude_lifetime_past_5_minutes_is_the_hour(engine, monkeypatch, learned, expect):
     e = engine
     s = chat(e, CLAUDE, {})
@@ -262,3 +262,14 @@ def test_a_model_switch_gets_its_own_two_hours_and_drops_the_old_line(engine):
     e.tick()
     assert not e.store.get_meta('card:'+w.id) and not e.store.get_meta('keep_warm_blocked:'+w.id)
     assert "can't ping" not in owner_context(e, 't2')
+
+
+def test_a_warm_gap_under_15_minutes_does_not_prove_the_hour(engine):
+    """Review: 400 s warm can be timing skew on a 5-minute cache (the bound the cold-ping reset already uses)."""
+    e, now = engine, engine.clock.now()
+    s = chat(e, CLAUDE, {'max_warm_gap': 400})
+    assert cache.warm_lifetime(e.store, s) == (400, 'warm_seen')
+    plan = keep_warm_plan(e.store, s, e.policy, now)
+    assert 'due_at' not in plan and plan['blocked'] == 'short' and 'lasts 5m or less' in plan['reason']
+    s = chat(e, CLAUDE, {'max_warm_gap': 901})
+    assert cache.warm_lifetime(e.store, s) == (3600, 'warm_seen')
