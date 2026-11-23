@@ -318,11 +318,12 @@ turn ("reply [SILENT]", no tools) that reads the cache and keeps it alive, so th
   for the agent's own turns. `/pulse status` and `/pulse ledger` show them on their own row with their cost.
 - Only you turn it on or off (`/pulse warm off`); the agent can't. When the route doesn't report the cache lifetime,
   HeartBeat uses the longest gap it has seen stay warm on that route. Claude caches last 5 minutes or 1 hour, so once a Claude
-  route has stayed warm past 5 minutes, a shorter cold miss (a compaction or a rebuilt system prompt changes the prompt) doesn't
-  stop keep-warm. Two pings in a row whose first model call finds the cache cold do, until a reply on that route reuses the
+  route has stayed warm past 5 minutes HeartBeat counts on the hour, even on a route new after a model switch, and a shorter
+  cold miss (a compaction or a rebuilt system prompt changes the prompt) doesn't stop keep-warm. Two pings in a row whose first model call finds the cache cold do, until a reply on that route reuses the
   cache after more than 15 minutes or you run `/pulse warm on` again. On other models' routes, a cold miss shorter than the
   longest warm gap stops it. `/pulse warm`,
-  `/pulse status`, `/pulse list` and the agent's list say why no ping is due.
+  `/pulse status`, `/pulse list` and the agent's list say why no ping is due. When keep-warm can't ping for any other reason
+  than your rest or a small context, the agent tells you once on your next message, and the desk shows it while it lasts.
 - Hermes has no per-turn output cap for plugins, so the ping asks for a one-word reply rather than enforcing it.
 - Hermes builds that include its own prompt-cache warmer (NousResearch/hermes-agent#156455, merged after Hermes 0.23.2) keep
   most chats' caches warm by themselves, and HeartBeat can't yet see that schedule. In a chat that warmer handles, turn

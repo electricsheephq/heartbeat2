@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.32 — 2026-11-23
+
+- **Keep-warm keeps working after a model switch on Claude.** A new model is a new cache route, and keep-warm took the longest gap it had seen that route's cache stay warm as the cache's lifetime. After a switch, a 22-minute warm gap read as a 22-minute cache, below the 30 minutes keep-warm needs, so it stopped pinging and two idle gaps paid full cache rewrites. Claude caches last 5 minutes or 1 hour, so a Claude route seen warm past 5 minutes now counts as the hour; two cold pings in a row still stop it if that's ever wrong. A 5-minute cache still gets no pings. Other models' routes are unchanged. (#234)
+- **A keep-warm that can't ping tells you.** When keep-warm can't ping for a reason other than your rest or a small context (an unknown or short cache lifetime, caching off, or two cold pings in a row), the agent tells you once on your next message, and `/pulse desk` shows it while it lasts. A new reason tells you again. (#234)
+
 ## 0.4.31 — 2026-11-21
 
 - **Your reminders are no longer dropped silently after downtime.** If HeartBeat was off or the gateway was down when one of your own one-time reminders came due, a reminder more than `catch_up_hours` (6 by default) late was marked missed. The only trace was a line the agent saw on your next message, which didn't say which reminder it was. Your reminders, from `/pulse add` or asked for in chat, now get their turn after downtime, even when their expiry passed during it. More than 15 minutes and up to 24 hours late (or `catch_up_hours`, if longer), the reminder fires and says it is late. Later than that, the turn tells you in one line which reminder was missed and when it was due. Past the late window the turn only reports the miss and doesn't do the reminder's work. Downtime is time the gateway was down, HeartBeat was switched off or Hermes' emergency stop was on, including after the reminder was queued; time held by quiet hours doesn't count. The agent's own one-time wakes still end as missed after `catch_up_hours`. Their notice now names the wake and its due time, and `/pulse list` says it was too late after downtime. (#230)
