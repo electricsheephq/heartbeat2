@@ -737,15 +737,18 @@ class Poller:
     def keep_warm_blocked(self,w,plan):
         """Tell the owner once when keep-warm can't ping for a reason other than rest or a small context (#234): one line on
         their next message, and the desk shows it while it lasts. A new kind of reason tells them again."""
-        key='keep_warm_blocked:'+w.id
+        key,card='keep_warm_blocked:'+w.id,'card:'+w.id
         kind=plan.get('blocked') or ''
         old=json.loads(self.store.get_meta(key) or '{}')
+        pending=bool(old) and self.store.get_meta(card)==old.get('reason')  # our line, not shown yet
         if kind:
             self.store.set_meta(key,json.dumps({'kind':kind,'reason':plan['reason']}))
-            if old.get('kind')!=kind: self.store.set_meta('card:'+w.id,plan['reason'])
-        elif old:
+            # A new kind tells the owner again; the same kind with new numbers only refreshes a line not yet shown (review).
+            if old.get('kind')!=kind or pending: self.store.set_meta(card,plan['reason'])
+        elif old and 'due_at' in plan:
+            # Cleared only when a ping is planned again: rest or a small context in between doesn't make it tell again (review).
             self.store.set_meta(key,'')
-            if self.store.get_meta('card:'+w.id)==old.get('reason'): self.store.set_meta('card:'+w.id,'')
+            if pending: self.store.set_meta(card,'')
 
     def _keep_warm(self,w):
         from .cache import keep_warm_plan, keep_warm_key

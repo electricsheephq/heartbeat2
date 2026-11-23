@@ -94,3 +94,33 @@ def test_resting_and_small_context_stay_quiet(engine):
     e.tick()
     assert e.store.get_wake(w.id).next_due_at is None
     assert "can't ping" not in owner_context(e, 't1')
+
+
+def test_no_stale_line_after_the_reason_changes_and_pings_resume(engine):
+    """Review: 'lasts 4m' then 'lasts 4m 40s' (same kind), then the hour: no 'can't ping' line once it pings."""
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    e.tick()
+    chat(e, CLAUDE, {'max_warm_gap': 280})
+    e.tick()
+    assert '4.7m' in (e.store.get_meta('card:'+w.id) or '')  # the unshown line follows the new numbers
+    chat(e, CLAUDE, {'max_warm_gap': 1359.3})
+    e.tick()
+    assert e.store.get_wake(w.id).next_due_at is not None
+    assert "can't ping" not in owner_context(e, 't1')
+
+
+def test_rest_in_between_does_not_tell_again(engine):
+    """Review: blocked, told once, then the owner rests 13 h, then blocked again for the same reason: no second line."""
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    e.tick()
+    assert "can't ping" in owner_context(e, 't1')
+    e.clock.advance(13*3600)                     # resting: no message for longer than keep_warm_idle_hours
+    e.tick()
+    assert e.store.get_meta('keep_warm_blocked:'+w.id)
+    session(e, last_human_at=e.clock.now(), last_cache_touch_at=e.clock.now())
+    e.tick()
+    assert "can't ping" not in owner_context(e, 't2')
