@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.33 — 2026-11-23
+
+- **The keep-warm notice comes only with a message you send.** In 0.4.32 a reaction could let the next turn the agent started on its own pick up the "keep-warm can't ping" line, and role turns saw it on their desk. Now the agent gets it only on a message you send, and the desk no longer lists it; `/pulse warm`, `/pulse status` and `/pulse list` still say why no ping is due. After a model switch the new model's route gets its own two hours, and a line about the old route that you hadn't seen yet is dropped. (#234)
+- **Keep-warm counts on the hour only after a Claude route stays warm past 15 minutes**, not 5. A warm gap under 15 minutes can be timing skew on a 5-minute cache (a retry refreshes it mid-gap), and pinging on the hour there would pay for cold pings. The reported case, a 22-minute warm gap after a model switch, still counts as the hour. (#234)
+
 ## 0.4.32 — 2026-11-23
 
 - **Keep-warm keeps working after a model switch on Claude.** A new model is a new cache route, and keep-warm took the longest gap it had seen that route's cache stay warm as the cache's lifetime. After a switch, a 22-minute warm gap read as a 22-minute cache, below the 30 minutes keep-warm needs, so it stopped pinging and two idle gaps paid full cache rewrites. Claude caches last 5 minutes or 1 hour, so a Claude route seen warm past 5 minutes now counts as the hour; two cold pings in a row still stop it if that's ever wrong. A 5-minute cache still gets no pings. Other models' routes are unchanged. (#234)

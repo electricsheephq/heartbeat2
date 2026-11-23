@@ -318,15 +318,16 @@ turn ("reply [SILENT]", no tools) that reads the cache and keeps it alive, so th
   for the agent's own turns. `/pulse status` and `/pulse ledger` show them on their own row with their cost.
 - Only you turn it on or off (`/pulse warm off`); the agent can't. When the route doesn't report the cache lifetime,
   HeartBeat uses the longest gap it has seen stay warm on that route. Claude caches last 5 minutes or 1 hour, so once a Claude
-  route has stayed warm past 5 minutes HeartBeat counts on the hour, even on a route new after a model switch, and a shorter
+  route has stayed warm past 15 minutes HeartBeat counts on the hour, even on a route new after a model switch (a shorter
+  warm gap can be timing skew on a 5-minute cache), and a shorter
   cold miss (a compaction or a rebuilt system prompt changes the prompt) doesn't stop keep-warm. Two pings in a row whose first model call finds the cache cold do, until a reply on that route reuses the
   cache after more than 15 minutes or you run `/pulse warm on` again. On other models' routes, a cold miss shorter than the
   longest warm gap stops it. `/pulse warm`,
   `/pulse status`, `/pulse list` and the agent's list say why no ping is due. When keep-warm has been unable to ping for two
   hours because the cache lifetime is unknown or short, caching is off, or two pings in a row found it cold, the agent tells
-  you once on your next message (not while HeartBeat is off in the chat). `/pulse desk` shows the reason from the start, while
-  it lasts. A small context or your rest is not a reason in itself, since keep-warm wouldn't ping then anyway, but time you
-  spend resting still counts toward the two hours.
+  you once, on the next message you send (not while HeartBeat is off in the chat). A model switch starts the two hours again
+  for the new model. A small context or your rest is not a reason in itself, since keep-warm wouldn't ping then anyway, but
+  time you spend resting still counts toward the two hours.
 - Hermes has no per-turn output cap for plugins, so the ping asks for a one-word reply rather than enforcing it.
 - Hermes builds that include its own prompt-cache warmer (NousResearch/hermes-agent#156455, merged after Hermes 0.23.2) keep
   most chats' caches warm by themselves, and HeartBeat can't yet see that schedule. In a chat that warmer handles, turn

@@ -48,7 +48,7 @@ def test_a_five_minute_claude_cache_still_refuses(engine):
     assert 'lasts 4m;' in keep_warm_plan(e.store, s, e.policy, now)['reason']
 
 
-@pytest.mark.parametrize('learned,expect', [(1359.3, 3600), (240, 240)])
+@pytest.mark.parametrize('learned,expect', [(1359.3, 3600), (600, 600), (240, 240)])
 def test_learned_claude_lifetime_past_5_minutes_is_the_hour(engine, monkeypatch, learned, expect):
     e = engine
     s = chat(e, CLAUDE, {})
@@ -92,13 +92,13 @@ def test_a_keep_warm_that_cannot_ping_says_so_once(engine):
     first = owner_context(e, 't1')
     assert "can't ping in this chat" in first and 'needs 30m' in first
     assert "can't ping in this chat" not in owner_context(e, 't2')   # once, not on every message
-    desk = render_desk(e, e.store.get_session(KEY), clock=e.clock, timezone='UTC', policy=e.policy)
-    assert f'keep-warm {w.id}: no ping' in desk
-    # The route learns the hour: keep-warm pings again, and the desk line goes.
+    # Role and own-time turns read the desk, so it never lists this (review); /pulse warm, status and list say why.
+    assert 'keep-warm' not in render_desk(e, e.store.get_session(KEY), clock=e.clock, timezone='UTC', policy=e.policy)
+    # The route learns the hour: keep-warm pings again, and the stored state goes.
     chat(e, CLAUDE, {'max_warm_gap': 1359.3})
     e.tick()
     assert e.store.get_wake(w.id).next_due_at is not None
-    assert 'keep-warm' not in render_desk(e, e.store.get_session(KEY), clock=e.clock, timezone='UTC', policy=e.policy)
+    assert not e.store.get_meta('keep_warm_blocked:'+w.id)
 
 
 def test_resting_and_small_context_stay_quiet(engine):
@@ -225,3 +225,100 @@ def test_warm_off_and_on_starts_the_two_hours_afresh(engine, monkeypatch):
     e.tick()
     assert not e.store.get_meta('card:'+w.id)
     assert "can't ping" not in owner_context(e, 't1')
+
+
+def test_a_reaction_does_not_hand_the_line_to_a_turn_the_owner_did_not_start(engine):
+    """Review: a reaction marks the chat as the owner's; the next turn may be one the agent started (a standing goal)."""
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    blocked_two_hours(e)
+    e.intake.gateway_platform_event(platform='telegram', event_type='reaction', payload={'chat_id': 'unit', 'emoji': 'ok'})
+    assert e.store.get_meta('human_context:'+KEY)
+    auto = str(e.intake.pre_llm_call(session_id='sid', turn_id='auto1', user_message='continue the goal', platform='telegram'))
+    assert "can't ping" not in auto
+    assert e.store.get_meta('card:'+w.id)          # still waiting for the owner
+    assert "can't ping in this chat" in owner_context(e, 't1')
+
+
+def test_a_model_switch_gets_its_own_two_hours_and_drops_the_old_line(engine):
+    """Review: the stored state belongs to the route; a new model must not inherit its timer, told flag or unshown line."""
+    e = engine
+    other = 'claude-subscription|claude-opus-5-5|process://claude-subscription'
+    chat(e, CLAUDE, None)                        # unknown
+    w = keep_warm(e)
+    e.tick()
+    e.clock.advance(KEEP_WARM_NOTICE_AFTER - 600)
+    e.tick()
+    chat(e, other, None)                         # switched: also unknown, but a new route
+    e.tick()
+    e.clock.advance(1200)
+    e.tick()
+    assert "can't ping" not in owner_context(e, 't1')
+    e.clock.advance(KEEP_WARM_NOTICE_AFTER - 1200)
+    e.tick()
+    assert e.store.get_meta('card:'+w.id)        # its own two hours: due now, not yet shown
+    session(e, last_route=CLAUDE, last_prompt_tokens=1000)  # back to the first model, small context: no ping, not blocked
+    e.tick()
+    assert not e.store.get_meta('card:'+w.id) and not e.store.get_meta('keep_warm_blocked:'+w.id)
+    assert "can't ping" not in owner_context(e, 't2')
+
+
+def test_a_warm_gap_under_15_minutes_does_not_prove_the_hour(engine):
+    """Review: 400 s warm can be timing skew on a 5-minute cache (the bound the cold-ping reset already uses)."""
+    e, now = engine, engine.clock.now()
+    s = chat(e, CLAUDE, {'max_warm_gap': 400})
+    assert cache.warm_lifetime(e.store, s) == (400, 'warm_seen')
+    plan = keep_warm_plan(e.store, s, e.policy, now)
+    assert 'due_at' not in plan and plan['blocked'] == 'short' and 'lasts 5m or less' in plan['reason']
+    s = chat(e, CLAUDE, {'max_warm_gap': 901})
+    assert cache.warm_lifetime(e.store, s) == (3600, 'warm_seen')
+
+
+def test_new_conversation_keeps_a_due_line(engine):
+    """Review: /new clears the chat's route until the next model call; that is not a model switch."""
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    blocked_two_hours(e)
+    assert e.store.get_meta('card:'+w.id)
+    session(e, last_route='')                    # what /new leaves behind
+    e.tick()
+    assert e.store.get_meta('card:'+w.id) and e.store.get_meta('keep_warm_blocked:'+w.id)
+    session(e, last_route=CLAUDE)
+    assert "can't ping in this chat" in owner_context(e, 't1')
+
+
+def test_state_from_0_4_32_without_a_route_is_kept(engine):
+    """Review: an owner already told under 0.4.32 (state without 'route') is not told again after the upgrade."""
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    e.store.set_meta('keep_warm_blocked:'+w.id, json.dumps({'kind': 'short', 'reason': 'x', 'since': e.clock.now(), 'told': True}))
+    e.clock.advance(3 * KEEP_WARM_NOTICE_AFTER)
+    session(e, last_human_at=e.clock.now(), last_cache_touch_at=e.clock.now())
+    e.tick()
+    e.clock.advance(KEEP_WARM_NOTICE_AFTER)      # the re-tell would come two hours after the upgrade
+    session(e, last_human_at=e.clock.now(), last_cache_touch_at=e.clock.now())
+    e.tick()
+    assert not e.store.get_meta('card:'+w.id)
+    assert "can't ping" not in owner_context(e, 't1')
+
+
+def test_a_queued_owner_message_does_not_hand_the_line_to_the_goal_turn_before_it(engine):
+    """Review (orphan-rescue ordering, as in test_u11): the owner's message is queued, a standing-goal turn runs first."""
+    from heartbeat2.intake import GOAL_PREFIXES
+    e = engine
+    chat(e, CLAUDE, {'max_warm_gap': 240})
+    w = keep_warm(e)
+    blocked_two_hours(e)
+    admit(e, mid='q1', text='new')               # queued while the agent is busy
+    goal = {'role': 'user', 'content': GOAL_PREFIXES[0]}
+    auto = str(e.intake.pre_llm_call(session_id='sid', turn_id='goal', user_message=goal['content'],
+                                     conversation_history=[goal], platform='telegram'))
+    assert "can't ping" not in auto
+    assert e.store.get_meta('card:'+w.id)          # kept for the owner
+    mine = {'role': 'user', 'content': 'next', 'platform_message_id': 'q2'}
+    admit(e, mid='q2', text='next')
+    assert "can't ping in this chat" in str(e.intake.pre_llm_call(session_id='sid', turn_id='t2', user_message='next',
+                                                                    conversation_history=[mine], platform='telegram'))

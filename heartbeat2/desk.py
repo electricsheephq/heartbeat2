@@ -108,10 +108,6 @@ def render_desk(engine_or_store, session, *, clock, timezone, policy, measure=le
         title = _plain(_clip(_oneline(w.title or w.note), 80))
         summary = _plain(_clip(_oneline(last.summary or last.outcome or last.state), 80))
         rows.append(f'- done role {w.id} {title} · finished {_time(view, last.ended_at, compact=True)} · last: {summary}'+handoff_suffix(w))
-    for w in wakes:
-        if is_keep_warm(w) and w.status == 'active':
-            blocked = json.loads(store.get_meta('keep_warm_blocked:'+w.id) or '{}')
-            if blocked.get('reason'): rows.append(f"- keep-warm {w.id}: no ping ({_plain(_clip(blocked['reason'], 120))})")
     other = [w for w in wakes if not w.role and w.status == 'active' and not is_keep_warm(w)]
     due = [(t, w) for w in other for t in (w.next_due_at, w.deadline_at) if t is not None]
     next_due = min(due, key=lambda pair: pair[0]) if due else None
