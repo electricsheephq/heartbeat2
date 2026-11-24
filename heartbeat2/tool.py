@@ -87,6 +87,23 @@ def filter_text(w, limit=None):
     return text
 
 
+APP_BACKEND_REFUSAL = ("Wakes can't run in this Desktop chat yet: it's served by the Desktop app's own backend (hermes serve), "
+                       "where HeartBeat's scheduler doesn't run and Hermes gives plugins no session platform (heartbeat2#233). "
+                       "Arm the wake from a messaging chat on this profile.")
+
+
+def refusal_detail(detail, platform):
+    """#233: in the Desktop app's own chat backend (hermes serve) Hermes gives plugin tools no platform and no surface, only the
+    session's source, and HeartBeat's scheduler only runs in a messaging gateway, so a wake armed there would never fire. The
+    refusal stays, but it says why."""
+    if detail or platform not in ('', 'local'): return detail
+    try:
+        source = session_env('HERMES_SESSION_SOURCE')
+    except Exception:
+        source = ''
+    return APP_BACKEND_REFUSAL if source in LOCAL_SURFACES else detail
+
+
 class Tool:
     def __init__(self, engine, session_key_fn=current_session_key):
         self.engine, self.session_key_fn = engine, session_key_fn
@@ -221,7 +238,7 @@ class Tool:
                         if gate.reason in {'max_active', 'global_max_active'}:
                             logging.getLogger('heartbeat2').warning('pulse create refused: %s session=%s',
                                 gate.reason, hashlib.sha256(s.session_key.encode()).hexdigest()[:16])
-                        return {'error':gate.reason,'detail':gate.detail}
+                        return {'error':gate.reason,'detail':refusal_detail(gate.detail, s.platform) if gate.reason=='non_gateway' else gate.detail}
                     kind = (args.get('trigger') or {})['kind']
                     requested = args.get('owner_asked') is True and evidence and (kind == 'at' or kind in PROBE_KINDS|EVENT_KINDS)
                     w = Wake(s.session_key, args.get('note',''), (args.get('trigger') or {})['kind'],
@@ -285,7 +302,7 @@ class Tool:
                         if not s.enabled:
                             return {'error':'session_off'}
                         if not deliverable_platform(s.platform):
-                            return {'error':'non_gateway', 'detail':platform_refusal(s.platform)}
+                            return {'error':'non_gateway', 'detail':refusal_detail(platform_refusal(s.platform), s.platform)}
                         if e.policy.dm_only and s.chat_type != 'dm':
                             return {'error':'dm_only'}
                         if not e.injection_allowed():
