@@ -9,6 +9,7 @@ have admitted the home: it skips a profile that still runs its own gateway. The
 served set changes at runtime, so callers ask on every step.
 """
 import logging
+import math
 import os
 
 LOG=logging.getLogger('heartbeat2')
@@ -17,6 +18,8 @@ REASONS={FOREIGN:'this gateway does not serve this profile',
          UNKNOWN:'cannot tell whether this gateway serves this profile',
          NO_GATEWAY:'no gateway in this process'}
 _WARNED=set()
+# On Linux psutil derives the start timestamp from the wall-clock boot time.
+CREATE_TIME_TOLERANCE_S=2
 
 
 def pid_alive(pid):
@@ -27,9 +30,16 @@ def pid_alive(pid):
     return True
 
 
+def _start_timestamp(value):
+    try: value=float(value)
+    except (TypeError, ValueError, OverflowError): return None
+    return value if math.isfinite(value) else None
+
+
 def _create_time(psutil, pid):
-    try: return psutil.Process(pid).create_time()
-    except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied): return None
+    try: return _start_timestamp(psutil.Process(pid).create_time())
+    except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied, OSError, RuntimeError):
+        return None
 
 
 def backend_epoch(nonce):
@@ -40,17 +50,20 @@ def backend_epoch(nonce):
     return f'{pid}:{created if created is not None else ""}:{nonce}'
 
 
-def backend_epoch_alive(epoch, *, pid=None):
+def backend_epoch_alive(epoch, *, pid=None, require_create_time=False):
     owner,_,identity=(epoch or '').partition(':')
     if not owner.isdecimal(): return False
     owner=int(owner)
     if (pid is not None and owner!=pid) or not pid_alive(owner): return False
-    # Fall back to PID-only detection when Hermes does not provide psutil.
-    try: import psutil
-    except ImportError: return True
+    # Legacy epochs and failed inspection can prove liveness, but not ownership across reloads.
     created,sep,_=identity.partition(':')
-    if not sep or not created: return False
-    return created==str(_create_time(psutil,owner))
+    recorded=_start_timestamp(created) if sep else None
+    if recorded is None: return not require_create_time
+    try: import psutil
+    except ImportError: return not require_create_time
+    current=_create_time(psutil,owner)
+    if current is None: return not require_create_time and pid_alive(owner)
+    return abs(recorded-current)<=CREATE_TIME_TOLERANCE_S
 
 
 def state(manager):

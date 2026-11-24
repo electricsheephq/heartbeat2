@@ -111,13 +111,15 @@ class Tool:
     def __init__(self, engine, session_key_fn=current_session_key):
         self.engine, self.session_key_fn = engine, session_key_fn
 
-    def app_backend_unavailable(self, *, surface=''):
+    def app_backend_unavailable(self, *, surface='', key=None):
         platform = session_env('HERMES_SESSION_PLATFORM')
         source = session_env('HERMES_SESSION_SOURCE')
         if session_platform(platform, self.engine.ctx, surface=surface, source=source) not in LOCAL_SURFACES:
             return False
         here = serving.state(getattr(self.engine.ctx, '_manager', None))
-        return here == serving.NO_GATEWAY or here == serving.BACKEND and not self.engine.store.backend
+        store = self.engine.store
+        return here == serving.NO_GATEWAY or here == serving.BACKEND and (
+            not store.backend or key not in (None, '', 'default') and store.get_meta('host:' + key) != 'backend')
 
     def identity(self, *, surface='', key=None):
         if key is None: key = self.session_key_fn()
@@ -132,7 +134,7 @@ class Tool:
             platform = session_platform(bound_platform, self.engine.ctx, surface=surface, source=source)
         with store.atomic():
             if store.backend and platform in LOCAL_SURFACES and self.engine.eligible():
-                store.stamp_backend(key)
+                if not store.stamp_backend(key): return None
                 chat_type = chat_type or 'dm'
             s = store.get_session(key)
             if s is None:
@@ -144,7 +146,7 @@ class Tool:
                 if bound_platform == 'local' and s.platform != platform and not (platform == 'local' and s.platform in LOCAL_SURFACES):
                     updates['platform'] = platform
                 if store.backend and platform in LOCAL_SURFACES:
-                    if not s.platform: updates['platform'] = platform
+                    if s.platform in ('', 'local'): updates['platform'] = platform
                     if not s.chat_type: updates['chat_type'] = chat_type
                 if updates:
                     store.cas_session(key, {'platform':s.platform, 'chat_type':s.chat_type}, **updates)
@@ -181,9 +183,10 @@ class Tool:
                 value = trigger['after'].strip()
                 at = value if value.startswith('+') or value.lower().startswith('in ') else 'in ' + value
                 args = {**args, 'trigger': {'kind': 'at', 'at': at}}
-            s = self.identity()
+            key = self.session_key_fn()
+            s = self.identity(key=key)
             if s is None:
-                if args.get('action') in {'create','resume','update'} and self.app_backend_unavailable():
+                if args.get('action') in {'create','resume','update'} and self.app_backend_unavailable(key=key):
                     return {'error':'non_gateway', 'detail':APP_BACKEND_REFUSAL}
                 return {'error':'missing_session'}
             action = args.get('action')

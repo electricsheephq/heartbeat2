@@ -1,5 +1,5 @@
 """Real OS locks and pinned Hermes injection slots, driven without listeners or model calls."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import multiprocessing
 import os
@@ -33,19 +33,24 @@ def child(pipe, home, backend, wall):
     manager = get_plugin_manager()
     manager._discovered = True
     ctx = PluginContext(PluginManifest(name='heartbeat2', key='heartbeat2', source='user'), manager)
-    calls, live = [], {}
+    calls, live, queued = [], {}, {}
     if backend:
         from tui_gateway import server
         server.install_tui_message_injector(manager)
 
         def enqueue(session, text, transport):
-            calls.append((session['session_key'], text))
+            key = session['session_key']
+            calls.append((key, text))
+            if session['attached']:
+                assert key not in queued, 'Hermes already holds a wake prompt for this chat'
+                queued[key] = text
 
         server._enqueue_prompt = enqueue
         live = server._sessions
     else:
         def inject(*, session_key, content, **kwargs):
             calls.append((session_key, content))
+            queued[session_key] = content
             return True  # Detect even an attempt to route a foreign key to the gateway slot.
 
         manager.set_gateway_message_injector(Runner(home), inject)
@@ -67,6 +72,7 @@ def child(pipe, home, backend, wall):
     engine = rt.get_engine()
     engine.paused = lambda: False
     try:
+        pipe.send('ready')
         while True:
             op, args = pipe.recv()
             if op == 'exit':
@@ -74,9 +80,22 @@ def child(pipe, home, backend, wall):
             result = None
             if op == 'open':
                 import threading
-                key, = args
-                live[key] = {'session_key': key, 'history_lock': threading.RLock(), 'running': True}
-            elif op in {'arm', 'command', 'start', 'finish'}:
+                key, *attached = args
+                live[key] = {'session_key': key, 'history_lock': threading.RLock(), 'running': True,
+                             'attached': attached[0] if attached else True}
+            elif op == 'drop':
+                queued.pop(args[0])
+            elif op == 'reload':
+                rt.close()
+                if args[0]:
+                    # A Hermes directory-plugin reload also discards the module's epoch registry.
+                    from importlib import reload
+                    from heartbeat2 import poller
+                    reload(poller)
+                rt = Runtime(ctx, clock=clock)
+                engine = rt.get_engine()
+                engine.paused = lambda: False
+            elif op in {'arm', 'command', 'start', 'finish', 'start_human', 'end_human'}:
                 key, platform, *rest = args
                 with bound(key, platform):
                     if op == 'arm':
@@ -84,7 +103,11 @@ def child(pipe, home, backend, wall):
                     elif op == 'command':
                         result = rt.command(rest[0])
                     elif op == 'start':
-                        engine.intake.pre_llm_call(session_id=key, turn_id='wake-turn', user_message=calls[-1][1])
+                        engine.intake.pre_llm_call(session_id=key, turn_id='wake-turn', user_message=queued.pop(key))
+                    elif op == 'start_human':
+                        engine.intake.pre_llm_call(session_id=key, turn_id='human-turn', user_message='Hello.')
+                    elif op == 'end_human':
+                        engine.intake.on_session_end(session_id=key, turn_id='human-turn', completed=True)
                     else:
                         result = engine.tool.handle({'action': 'respond', 'outcome': 'done',
                                                      'notify': True, 'summary': 'Task checked.'}, session_id=key)
@@ -118,6 +141,7 @@ def cluster(tmp_path, clock, monkeypatch):
     if os.environ.get('HEARTBEAT2_REQUIRE_HERMES') != '1':
         pytest.skip('requires a read-only Hermes pin')
     monkeypatch.setenv('PYTHONDONTWRITEBYTECODE', '1')
+    monkeypatch.setenv('HERMES_AGENT_TIMEOUT', '1800')
     (tmp_path / 'config.yaml').write_text(json.dumps({'plugins': {'entries': {'heartbeat2': {
         'allow_gateway_injection': True, 'settings': {'quiet_hours': '', 'timezone': 'UTC'}}}}}))
     mp = multiprocessing.get_context('spawn')
@@ -137,25 +161,31 @@ def cluster(tmp_path, clock, monkeypatch):
             return parent.recv()
 
         try:
+            assert parent.poll(20), f'initialization timed out in process {proc.pid}'
+            assert parent.recv() == 'ready'
             yield ask
         finally:
-            if proc.is_alive():
-                parent.send(('exit', ()))
-            parent.close()
-            proc.join(5)
+            try:
+                if proc.is_alive():
+                    parent.send(('exit', ()))
+            finally:
+                parent.close()
+                proc.join(5)
 
     def rows(sql, *params):
         import sqlite3
         file = tmp_path / 'plugin-data/heartbeat2/pulse.db'
-        with sqlite3.connect(file) as db:
+        with closing(sqlite3.connect(file)) as db:
             return db.execute(sql, params).fetchall()
 
     yield SimpleNamespace(serve=serve, rows=rows, wall=clock.now())
     for proc in processes:
         if proc.is_alive():
             proc.kill()
-            proc.join()
-        assert proc.exitcode == 0
+        proc.join()
+    assert all(proc.exitcode == 0 for proc in processes), {
+        proc.pid: proc.exitcode for proc in processes
+    }
 
 
 @pytest.mark.parametrize('backend_first', [False, True])
@@ -242,12 +272,15 @@ def test_non_holder_recovers_dropped_prompt(cluster):
         owner('open', CHAT)
         assert holder('tick', 61) == []
         assert owner('tick', 61) == [CHAT]
-        # Hermes drops the queued prompt without running the start hook.
+        # Hermes drops the queued prompt behind a running turn without running its start hook.
+        owner('start_human', CHAT, '')
+        owner('drop', CHAT)
         assert holder('tick', 599) == []
         assert owner('tick', 599) == [CHAT]
         assert cluster.rows('SELECT state FROM occurrences') == [('claimed',)]
         assert holder('tick', 2) == []
         assert cluster.rows('SELECT state FROM occurrences') == [('claimed',)]
+        owner('end_human', CHAT, '')
         assert owner('tick', 2) == [CHAT, CHAT]
         owner('start', CHAT, '')
         assert owner('finish', CHAT, '')['ok']
@@ -267,6 +300,74 @@ def test_non_holder_recovers_own_started_turn_at_ttl(cluster):
         assert owner('tick', 20000) == [CHAT]
         assert cluster.rows('SELECT state,error FROM occurrences') == [('interrupted', 'no_session_end')]
         assert cluster.rows('SELECT busy_since FROM sessions') == [(None,)]
+
+
+def test_backend_restart_refunds_false_accept(cluster):
+    with cluster.serve(True) as original:
+        assert original('acquire')
+        assert original('arm', CHAT, '')['armed']
+    with cluster.serve(True, cluster.wall + 61) as restarted:
+        # Hermes accepts the registered session even though the agent is not attached.
+        restarted('open', CHAT, False)
+        assert restarted('tick', 0) == [CHAT]
+        assert cluster.rows("SELECT value FROM meta WHERE key LIKE 'accepted:%'") == [('1',)]
+        restarted('open', CHAT)
+        assert restarted('tick', 59) == [CHAT]
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('claimed', 1)]
+        assert restarted('tick', 1) == [CHAT]
+        assert cluster.rows('SELECT state,error,attempt FROM occurrences') == [('pending', 'app_closed', 1)]
+        assert cluster.rows("SELECT value FROM meta WHERE key LIKE 'accepted:%'") == [('0',)]
+        assert restarted('tick', 5) == [CHAT, CHAT]
+        restarted('start', CHAT, '')
+        assert restarted('finish', CHAT, '')['ok']
+        assert restarted('tick', 601) == [CHAT, CHAT]
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('done', 2)]
+        assert cluster.rows('SELECT fires,model_turns FROM wakes') == [(1, 1)]
+        assert cluster.rows("SELECT value FROM meta WHERE key LIKE 'accepted:%'") == [('1',)]
+        assert cluster.rows("SELECT value FROM meta WHERE key LIKE 'inject_failures:%'") == []
+
+
+def test_backend_keeps_wake_queued_behind_busy_turn(cluster):
+    with cluster.serve(True) as owner:
+        owner('open', CHAT)
+        assert owner('arm', CHAT, '')['armed']
+        assert owner('tick', 61) == [CHAT]
+        # A human turn won the admission race after the dispatch check.
+        owner('start_human', CHAT, '')
+        assert cluster.rows('SELECT busy_since IS NOT NULL FROM sessions') == [(1,)]
+        assert owner('tick', 65) == [CHAT]
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('claimed', 1)]
+        owner('end_human', CHAT, '')
+        assert owner('tick', 5) == [CHAT]  # Queue handoff before the wake's start hook.
+        owner('start', CHAT, '')
+        assert owner('finish', CHAT, '')['ok']
+        assert owner('tick', 601) == [CHAT]
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('done', 1)]
+        assert cluster.rows('SELECT fires,model_turns FROM wakes') == [(1, 1)]
+        assert cluster.rows("SELECT value FROM meta WHERE key LIKE 'accepted:%'") == [('1',)]
+
+
+@pytest.mark.parametrize('reload_module', [False, True], ids=['retained-module', 'reloaded-module'])
+def test_non_holder_recovers_retired_busy_epoch(cluster, reload_module):
+    with cluster.serve(True) as holder, cluster.serve(True) as owner:
+        assert holder('acquire') and not owner('acquire')
+        owner('open', CHAT)
+        assert owner('arm', CHAT, '')['armed']
+        owner('start_human', CHAT, '')
+        busy, = cluster.rows('SELECT busy_epoch FROM sessions')
+        assert busy[0]
+        owner('reload', reload_module)
+        assert not owner('acquire')
+        assert holder('tick', 17999) == []
+        assert owner('tick', 17999) == []
+        assert cluster.rows('SELECT busy_epoch FROM sessions') == [busy]
+        assert holder('tick', 1) == []
+        assert cluster.rows('SELECT busy_epoch FROM sessions') == [busy]
+        assert owner('tick', 1) == [CHAT]
+        assert cluster.rows('SELECT busy_epoch FROM sessions') == [(None,)]
+        owner('start', CHAT, '')
+        assert owner('finish', CHAT, '')['ok']
+        assert cluster.rows('SELECT state FROM occurrences') == [('done',)]
 
 
 def test_backend_absence_and_recurring_catch_up(cluster):

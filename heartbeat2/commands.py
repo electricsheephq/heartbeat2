@@ -358,18 +358,22 @@ def handle(raw_args, runtime):
     key = session_env('HERMES_SESSION_KEY')
     if not key or key == 'default': return 'Error: /pulse needs the invoking gateway session.'
     try:
+        action, _, rest = (raw_args or 'status').strip().partition(' ')
+        rest = rest.strip()
         engine = runtime.get_engine()
-        if engine.tool.app_backend_unavailable():
+        arms = action in {'add','role','run','resume','ok','keep','slow'} or action in {'warm','owntime'} and rest=='on'
+        if arms and engine.tool.app_backend_unavailable():
             from .tool import APP_BACKEND_REFUSAL
             return APP_BACKEND_REFUSAL
         engine.refresh()  # Never inside a transaction: refresh takes the policy lock before the store lock.
-        action, _, rest = (raw_args or 'status').strip().partition(' ')
-        rest = rest.strip()
         preview=engine.store.get_wake(rest) if action=='test' else None
         cache_line=engine.tool.cache_result(preview) if preview and preview.session_key==key else ''
         wake_cache=engine.cache_line(preview) if preview and preview.session_key==key else ''
         if engine.store.backend:
             session = engine.tool.identity(key=key)
+            if session is None and arms and engine.tool.app_backend_unavailable(key=key):
+                from .tool import APP_BACKEND_REFUSAL
+                return APP_BACKEND_REFUSAL
             if session is None or not engine.deliverable(session.platform):
                 return 'Error: /pulse needs a known app session.'
         else:

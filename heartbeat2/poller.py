@@ -24,6 +24,7 @@ LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
 PROBES_PER_TICK = 16
 OUTAGE_GAP_S = 60     # a longer gap between ticks means the gateway or the poller was down (#230)
+BACKEND_START_GRACE_S = 60
 OUTAGES_KEPT = 50
 KEEP_WARM_NOTICE_AFTER = 7200  # keep-warm unable to ping this long is worth one line to the owner (#234)
 FINAL_SKIP_REASONS = frozenset({'unanswered','asleep','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
@@ -163,6 +164,21 @@ class Poller:
         return (self.store.backend and o.pid is not None and o.pid!=os.getpid()
                 and serving.backend_epoch_alive(o.epoch,pid=o.pid))
 
+    @staticmethod
+    def _own_backend_epoch(epoch):
+        pid=os.getpid()
+        if not epoch or not epoch.startswith(f'{pid}:'): return False
+        # Hermes can evict this module during reload, losing its in-memory epoch registry.
+        return epoch in CREATED_EPOCHS or serving.backend_epoch_alive(epoch,pid=pid,require_create_time=True)
+
+    def _own_claim(self,o):
+        # A replaced delivery runner can leave a queued prompt in this process.
+        return o.pid==os.getpid() and self._own_backend_epoch(o.epoch)
+
+    def has_own_work(self):
+        return any(self._own_claim(o) for state in ('claimed','started')
+                   for o in self.store.list_occurrences(state=state))
+
     def _foreign_backend_busy(self,session):
         epoch=session.busy_epoch or ''
         return (self.store.backend and not epoch.startswith(f'{os.getpid()}:')
@@ -184,14 +200,16 @@ class Poller:
                             noticed.add(w.session_key)
             for o in s.list_occurrences() if self.process_start else []:
                 if o.state in {'claimed','started'} and s.backend:
-                    if (o.pid==os.getpid() and o.epoch in LOCAL_EPOCHS) or self._foreign_backend_claim(o): continue
+                    if self._own_claim(o) or self._foreign_backend_claim(o): continue
                 if o.state=='claimed':
                     self.refund_claimed(o,'restart_refund')
                     s.set_meta('recovered:'+o.id,'1')
                 elif o.state=='started': self.interrupt(o,'restart')
             for session in s.list_sessions() if self.process_start else []:
-                if (session.busy_since is not None and session.busy_epoch not in LOCAL_EPOCHS
-                        and not self._foreign_backend_busy(session)):
+                if session.busy_since is None: continue
+                local=(self._own_backend_epoch(session.busy_epoch) if s.backend
+                       else session.busy_epoch in LOCAL_EPOCHS)
+                if not local and not self._foreign_backend_busy(session):
                     s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             # Persisted future deadlines remain future. time_due() coalesces
             # genuinely overdue intervals at the next tick without changing them
@@ -400,12 +418,8 @@ class Poller:
         provider_limit=timeout if math.isfinite(timeout) and timeout>0 else None
         ttl=max((provider_limit or 0)*10,7200)
         now=self.clock.now()
-        # A replaced delivery runner can leave a queued prompt in this same process.
-        def own_claim(o):
-            return o.pid==os.getpid() and o.epoch in CREATED_EPOCHS
-
         for o in s.list_occurrences(state='started'):
-            if own_only and not own_claim(o): continue
+            if own_only and not self._own_claim(o): continue
             if self._foreign_backend_claim(o): continue
             w=s.get_wake(o.wake_id)
             session=s.get_session(w.session_key)
@@ -414,13 +428,17 @@ class Poller:
             if now-activity<limit: continue
             self.interrupt(o,'no_session_end')
         for session in s.list_sessions():
-            if own_only and session.busy_epoch not in LOCAL_EPOCHS: continue
+            # A reload retires the hook epoch, but the PID still owns its abandoned mark.
+            if own_only and not self._own_backend_epoch(session.busy_epoch): continue
             if (session.busy_since is not None and now-max(session.busy_since,session.last_activity_at or 0)>=ttl
                     and not self._foreign_backend_busy(session)):
                 s.cas_session(session.session_key,{'busy_since':session.busy_since,'last_activity_at':session.last_activity_at},busy_since=None,busy_epoch=None)
         for o in s.list_occurrences(state='claimed'):
-            if own_only and not own_claim(o): continue
+            if own_only and not self._own_claim(o): continue
             if self._foreign_backend_claim(o): continue
+            if (s.backend and o.claimed_at is not None
+                    and now-o.claimed_at>=BACKEND_START_GRACE_S and self.eligible()
+                    and self._refund_backend_false_accept(o,now)): continue
             if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
                 if self.supersede_claimed(o): continue
@@ -429,6 +447,23 @@ class Poller:
                 self.terminal_one_shot(s.get_wake(o.wake_id))
                 governor.error(self,s.get_wake(o.wake_id))
             else: self.refund_claimed(o,'ack_timeout')
+
+    def _refund_backend_false_accept(self,o,now):
+        s=self.store
+        accepted=int(s.get_meta('accepted:'+o.id) or 0)
+        if not accepted: return False
+        session=s.get_session(s.get_wake(o.wake_id).session_key)
+        if session and session.busy_since is not None:
+            if not session.busy_epoch or serving.backend_epoch_alive(session.busy_epoch): return False
+        # A queued prompt may still be starting after the previous turn's end hook.
+        if session and now-(session.last_activity_at or 0)<BACKEND_START_GRACE_S: return False
+        if not self.refund_claimed(o,'app_closed'): return False
+        s.set_meta('accepted:'+o.id,str(accepted-1))
+        s.set_meta('not_before:'+o.id,str(now+1))  # The next scheduler tick can retry.
+        if session and session.busy_since is not None:
+            s.cas_session(session.session_key,{'busy_epoch':session.busy_epoch,'busy_since':session.busy_since},
+                          busy_since=None,busy_epoch=None)
+        return True
 
     def family_enabled(self,w):
         family='silence' if w.kind=='owner_silent' else 'events' if w.kind in EVENT_KINDS else w.kind if w.kind in PROBE_KINDS else None
@@ -1085,7 +1120,7 @@ class Poller:
             flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]
             s.set_meta('injections',json.dumps(flood+[self.clock.now()]))
             # A silent ping isn't a wake turn: it must not push the chat's real wakes back by wake spacing.
-            if not is_keep_warm(w):
+            if not s.backend and not is_keep_warm(w):
                 s.cas_session(session.session_key,{'last_wake_turn_at':session.last_wake_turn_at},last_wake_turn_at=self.clock.now())
         else:
             if health:
@@ -1185,11 +1220,10 @@ class Poller:
             if provider and not s.get_meta('provider_health'): self.provider_failure(provider)
             session=s.get_session(w.session_key)
             if session:
-                if s.backend:
-                    # The dead occurrence can coexist with a newer turn owned by a live peer.
-                    may_clear=session.busy_epoch==o.epoch or session.busy_epoch in LOCAL_EPOCHS
-                else:
-                    may_clear=not (cause=='restart' and session.busy_epoch in LOCAL_EPOCHS)
+                may_clear=not (cause=='restart' and session.busy_epoch in LOCAL_EPOCHS)
+                if s.backend and o.pid!=os.getpid():
+                    # Claim and busy epochs come from different pollers. Check the busy owner itself.
+                    may_clear=(not self._own_backend_epoch(session.busy_epoch) and not self._foreign_backend_busy(session))
                 if may_clear:
                     s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             return True

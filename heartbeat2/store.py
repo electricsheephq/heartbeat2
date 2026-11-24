@@ -19,7 +19,7 @@ import time
 from typing import Any
 
 from .clock import Clock
-from .model import (Wake, Occurrence, Session, KINDS, WAKE_STATUSES,
+from .model import (Wake, Occurrence, Session, KINDS, WAKE_STATUSES, FINISHED_WAKE_STATUSES,
                     TERMINAL_OCCURRENCE_STATES)
 from .schedule import local_day
 from .serving import backend_epoch_alive
@@ -302,10 +302,25 @@ class Store:
             self.connection.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                     (key, str(value)))
 
-    def stamp_backend(self, session_key: str):
+    def stamp_backend(self, session_key: str) -> bool:
         with self.atomic():
+            if self.get_meta('host:' + session_key) == 'backend':
+                return True
+            # Stamping changes which poller can see the key. Keep gateway work with its owner.
+            done_wakes = sorted(FINISHED_WAKE_STATUSES)
+            done_occurrences = sorted(TERMINAL_OCCURRENCE_STATES)
+            wake_params = ','.join('?' for _ in done_wakes)
+            occurrence_params = ','.join('?' for _ in done_occurrences)
+            work = self.connection.execute(
+                f"SELECT 1 FROM wakes WHERE session_key=? AND status NOT IN ({wake_params}) "
+                "UNION ALL SELECT 1 FROM occurrences o JOIN wakes w ON w.id=o.wake_id "
+                f"WHERE w.session_key=? AND o.state NOT IN ({occurrence_params}) LIMIT 1",
+                (session_key, *done_wakes, session_key, *done_occurrences)).fetchone()
+            if work:
+                return False
             self.connection.execute("INSERT OR IGNORE INTO meta(key,value) VALUES (?, 'backend')",
                                     ('host:' + session_key,))
+            return self.get_meta('host:' + session_key) == 'backend'
 
     def _host_filter(self, session_key):
         match = f"EXISTS (SELECT 1 FROM meta host WHERE host.key='host:' || ({session_key}) AND host.value='backend')"
@@ -469,9 +484,17 @@ class Store:
 
     def release_backend_notice(self, key, epoch):
         if not self.backend: return
-        with self.atomic():
-            self.connection.execute('DELETE FROM meta WHERE key=? AND value=?',
-                                    ('backend:notice_in_flight:' + key, epoch))
+        with self._lock:
+            # A finalizer outside a transaction retries without the connection lock held.
+            timeout=None
+            if not self.connection.in_transaction:
+                timeout=self.connection.execute('PRAGMA busy_timeout').fetchone()[0]
+                self.connection.execute('PRAGMA busy_timeout=0')
+            try:
+                self.connection.execute('DELETE FROM meta WHERE key=? AND value=?',
+                                        ('backend:notice_in_flight:' + key, epoch))
+            finally:
+                if timeout is not None: self.connection.execute(f'PRAGMA busy_timeout={timeout}')
 
     def daily_counts(self, key, timezone):
         totals = {'model_turns': 0, 'delivered': 0}

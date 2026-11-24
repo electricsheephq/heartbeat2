@@ -1,13 +1,11 @@
 """Standalone backend behavior and the unchanged gateway path."""
 from dataclasses import replace
 from importlib.util import module_from_spec, spec_from_file_location
-from io import BytesIO
 import os
 from pathlib import Path
 import sqlite3
 import subprocess
 import sys
-import tarfile
 from threading import Event, Thread
 from types import SimpleNamespace
 
@@ -16,6 +14,7 @@ import pytest
 from heartbeat2 import commands, policy, serving, tool
 from heartbeat2.model import Session, Wake
 from heartbeat2.notifier import NOTIFY_AFTER_S, Notifier
+from heartbeat2.poller import Poller
 from heartbeat2.registration import Runtime
 from heartbeat2.store import Store
 from test_engine import KEY, GatewayCtx
@@ -73,6 +72,53 @@ def test_backend_identity_and_allowed_schedules(hosts, monkeypatch, blank_row):
     recurring = backend.tool.handle({**ARM, 'trigger': {'kind': 'every', 'every': '10m'}})
     assert recurring.get('armed'), recurring
     assert [w.kind for w in backend.store.list_wakes(CHAT)].count('every') == 2
+
+
+@pytest.mark.parametrize('source', ['desktop', 'tui'])
+def test_backend_repairs_stored_local_platform(hosts, monkeypatch, source):
+    gateway, backend = hosts
+    gateway.store.upsert_session(Session(CHAT, platform='local', unanswered_count=2))
+    bind(monkeypatch, backend, CHAT, source=source)
+    assert backend.tool.handle(ARM).get('armed')
+    session = backend.store.get_session(CHAT)
+    assert (session.platform, session.chat_type, session.unanswered_count) == (source, 'dm', 2)
+
+
+@pytest.mark.parametrize('status,occurrence', [
+    ('active', None), ('paused', None), ('proposed', None),
+    ('cancelled', 'pending'), ('cancelled', 'claimed'), ('cancelled', 'started'),
+])
+def test_backend_does_not_stamp_gateway_work(hosts, monkeypatch, status, occurrence):
+    gateway, backend = hosts
+    db = gateway.store
+    db.upsert_session(Session(CHAT, 'desktop', 'dm', '', CHAT))
+    db.create_wake(Wake(CHAT, 'Existing wake.', 'at', id='legacy', status=status,
+                        platform='desktop', chat_type='dm'))
+    if occurrence:
+        db.add_occurrence('legacy', 'slot')
+        if occurrence != 'pending':
+            assert db.claim('legacy', 'slot', epoch=gateway.epoch, pid=os.getpid())
+        if occurrence == 'started':
+            assert db.start('legacy', 'slot', attempt=1)
+    bind(monkeypatch, backend, CHAT)
+    assert backend.tool.handle(ARM) == {'error': 'non_gateway', 'detail': tool.APP_BACKEND_REFUSAL}
+    assert commands.handle('add in 1m Check the task.', SimpleNamespace(get_engine=lambda: backend)) == tool.APP_BACKEND_REFUSAL
+    assert db.get_meta('host:' + CHAT) is None
+    assert db.get_wake('legacy').status == status
+    if occurrence:
+        assert db.get_occurrence('legacy', 'slot').state == occurrence
+
+
+def test_backend_can_stamp_terminal_gateway_history(hosts, monkeypatch):
+    gateway, backend = hosts
+    db = gateway.store
+    db.upsert_session(Session(CHAT, 'desktop', 'dm', '', CHAT))
+    db.create_wake(Wake(CHAT, 'Existing wake.', 'at', id='legacy', status='cancelled',
+                        platform='desktop', chat_type='dm'))
+    db.add_occurrence('legacy', 'slot', state='skipped')
+    bind(monkeypatch, backend, CHAT)
+    assert backend.tool.handle(ARM).get('armed')
+    assert backend.store.get_occurrence('legacy', 'slot').state == 'skipped'
 
 
 def test_backend_refuses_unsupported_work(hosts, monkeypatch):
@@ -168,6 +214,7 @@ def test_backend_peers_see_inflight_notice_reservation(hosts, monkeypatch):
 def test_backend_rejects_stored_non_schedule(hosts, monkeypatch, action, kind, trigger, error):
     gateway, backend = hosts
     gateway.store.upsert_session(Session(CHAT, 'desktop', 'dm', '', CHAT))
+    gateway.store.set_meta('host:' + CHAT, 'backend')
     gateway.store.create_wake(Wake(CHAT, 'Check the task.', kind, id='legacy', status='paused',
                                    platform='desktop', chat_type='dm', trigger_json=trigger,
                                    base_interval_s=600, eff_interval_s=600))
@@ -180,6 +227,7 @@ def test_backend_rejects_stored_non_schedule(hosts, monkeypatch, action, kind, t
 def test_backend_command_cannot_resume_stored_own_time(hosts, monkeypatch):
     gateway, backend = hosts
     gateway.store.upsert_session(Session(CHAT, 'desktop', 'dm', '', CHAT))
+    gateway.store.set_meta('host:' + CHAT, 'backend')
     gateway.store.create_wake(Wake(CHAT, 'Check the task.', 'self', id='legacy', status='paused',
                                    platform='desktop', chat_type='dm', base_interval_s=600, eff_interval_s=600,
                                    trigger_json={'builtin': True, 'own_time': True}))
@@ -187,6 +235,25 @@ def test_backend_command_cannot_resume_stored_own_time(hosts, monkeypatch):
     result = commands.handle('resume legacy', SimpleNamespace(get_engine=lambda: backend))
     assert result.startswith('Error: backend_schedule_only')
     assert backend.store.get_wake('legacy').status == 'paused'
+
+
+@pytest.mark.parametrize('action,expected', [
+    ('off', 'HeartBeat 2.0 off'), ('on', 'HeartBeat 2.0 on'),
+    ('status', 'HeartBeat 2.0'), ('list', 'No wakes'),
+    ('add in 1m Check the task.', 'own backend'), ('resume all', 'own backend'),
+])
+def test_unserved_app_command_only_refuses_arming(hosts, monkeypatch, action, expected):
+    gateway, _ = hosts
+    monkeypatch.setattr(policy, 'local_injection_supported', lambda: True)
+    gateway.store.upsert_session(Session(CHAT, 'desktop', 'dm', '', CHAT, enabled=action != 'on'))
+    bind(monkeypatch, gateway, CHAT, platform='local')
+    # A non-serving Desktop runtime has the gateway store view for unstamped rows.
+    gateway.ctx._manager.has_gateway_message_injector = False
+    reply = commands.handle(action, SimpleNamespace(get_engine=lambda: gateway))
+    assert expected in reply
+    if action in {'off', 'on'}:
+        assert gateway.store.get_session(CHAT).enabled == (action == 'on')
+    assert gateway.store.get_meta('host:' + CHAT) is None
 
 
 @pytest.fixture
@@ -230,6 +297,61 @@ def test_dead_claimant_recovery_keeps_live_busy_mark(hosts, monkeypatch, process
     assert backend.store.get_session(CHAT).busy_epoch == busy
 
 
+@pytest.mark.parametrize('owner,mark,keep', [
+    ('peer', 'dead_hook', False), ('peer', 'local_hook', True),
+    ('peer', 'replaced_local', True), ('peer', 'foreign_hook', True),
+    ('self', 'dead_hook', False),
+])
+def test_backend_acks_respects_busy_owner(hosts, monkeypatch, process_table, owner, mark, keep):
+    _, backend = hosts
+    pid = os.getpid()
+    dead, live = pid + 1, pid + 2
+    del process_table[dead]
+    runner = Poller(backend.ctx, backend.store, backend.policy, backend.clock)
+    runner.close()
+    claimed_by = runner.epoch if owner == 'self' else f'{dead}:10.0:dead_runner'
+    o = backend_occurrence(backend, monkeypatch, claimed_by)
+    db = backend.store
+    assert db.cas_occurrence(o.wake_id, o.dedupe_key, 'claimed', 'started',
+                             attempt=o.attempt, started_at=backend.clock.now())
+    backend.clock.advance(7201)
+    monkeypatch.setenv('HERMES_AGENT_TIMEOUT', '600')
+    marks = {'dead_hook': f'{dead}:10.0:dead_hook', 'local_hook': backend.epoch,
+             'replaced_local': runner.epoch, 'foreign_hook': f'{live}:20.0:live_hook'}
+    busy = marks[mark]
+    assert busy != claimed_by
+    assert db.cas_session(CHAT, {'busy_since': None}, busy_since=backend.clock.now(), busy_epoch=busy)
+    backend.acks()
+    settled = db.get_occurrence(o.wake_id, o.dedupe_key)
+    assert (settled.state, settled.error) == ('interrupted', 'no_session_end')
+    session = db.get_session(CHAT)
+    assert (session.busy_epoch, session.busy_since) == (
+        (busy, backend.clock.now()) if keep else (None, None))
+
+
+def test_backend_reconcile_keeps_claim_from_replaced_runner(hosts, monkeypatch, process_table):
+    _, backend = hosts
+    old_runner = Poller(backend.ctx, backend.store, backend.policy, backend.clock)
+    o = backend_occurrence(backend, monkeypatch, old_runner.epoch)
+    old_runner.close()
+    assert backend.acquire()
+    assert backend.store.get_occurrence(o.wake_id, o.dedupe_key).state == 'claimed'
+
+
+@pytest.mark.parametrize('created,owned', [(20.0, False), (30.0, True)])
+def test_backend_own_busy_recovery_checks_process_start(process_table, hosts, monkeypatch, created, owned):
+    _, backend = hosts
+    bind(monkeypatch, backend, CHAT)
+    assert backend.tool.identity() is not None
+    db = backend.store
+    epoch = f'{os.getpid()}:{created}:evicted-module'
+    assert db.cas_session(CHAT, {'busy_since': None}, busy_since=backend.clock.now(), busy_epoch=epoch)
+    monkeypatch.setenv('HERMES_AGENT_TIMEOUT', '600')
+    backend.clock.advance(7200)
+    backend.acks(own_only=True)
+    assert db.get_session(CHAT).busy_epoch == (None if owned else epoch)
+
+
 def test_backend_pid_reuse_recovers_claim_busy_and_notice(hosts, monkeypatch, process_table):
     _, backend = hosts
     pid = os.getpid() + 1
@@ -243,7 +365,7 @@ def test_backend_pid_reuse_recovers_claim_busy_and_notice(hosts, monkeypatch, pr
     assert db.get_session(CHAT).busy_epoch == epoch
     assert db.daily_counts(CHAT, zone)['delivered'] == 2
 
-    process_table[pid] += 1
+    process_table[pid] += 10
     backend.process_start = True
     backend.reconcile()
     assert db.get_occurrence(o.wake_id, o.dedupe_key).state == 'pending'
@@ -267,6 +389,34 @@ def test_backend_pid_only_without_psutil(hosts, monkeypatch, process_table):
     assert db.notice_reserved(CHAT)
     del process_table[pid]
     assert not db.notice_reserved(CHAT)
+
+
+@pytest.mark.parametrize('identity,current,alive', [
+    ('10.0:peer', 11.9, True), ('10.0:peer', 12.0, True), ('10.0:peer', 12.1, False),
+    ('peer', 10.0, True), (':peer', 10.0, True), ('invalid:peer', 10.0, True),
+    ('10.0:peer', None, True), ('10.0:peer', float('nan'), True),
+])
+def test_backend_epoch_liveness(process_table, identity, current, alive):
+    pid = os.getpid() + 1
+    process_table[pid] = current
+    assert serving.backend_epoch_alive(f'{pid}:{identity}', pid=pid) is alive
+    del process_table[pid]
+    assert not serving.backend_epoch_alive(f'{pid}:{identity}', pid=pid)
+
+
+def test_backend_epoch_access_denied_at_lookup_or_mint(monkeypatch, process_table):
+    psutil = sys.modules['psutil']
+    process = psutil.Process
+
+    def denied(pid):
+        raise psutil.AccessDenied()
+
+    monkeypatch.setattr(psutil, 'Process', denied)
+    assert serving.backend_epoch_alive(f'{os.getpid() + 1}:10.0:peer')
+    epoch = serving.backend_epoch('fixture')
+    assert epoch == f'{os.getpid()}::fixture'
+    monkeypatch.setattr(psutil, 'Process', process)
+    assert serving.backend_epoch_alive(epoch)
 
 
 def test_backend_notice_cleanup_survives_sqlite_busy(hosts, monkeypatch):
@@ -301,6 +451,52 @@ def test_backend_notice_cleanup_survives_sqlite_busy(hosts, monkeypatch):
     assert worker.thread.is_alive()
     assert all(all(state) for state in attempts)
     assert not db.notice_reserved(CHAT)
+
+
+@pytest.mark.parametrize('stop_early', [False, True], ids=['retry-cap', 'shutdown'])
+def test_backend_notice_cleanup_bounds_persistent_writer(hosts, monkeypatch, caplog, stop_early):
+    _, backend = hosts
+    worker, db = backend.notifications, backend.store
+    first_attempt, exhausted, next_job = Event(), Event(), Event()
+    release = db.release_backend_notice
+    attempts = []
+
+    def release_notice(key, epoch):
+        if key == CHAT:
+            attempts.append(key)
+            first_attempt.set()
+            if len(attempts) == 10:
+                exhausted.set()
+        release(key, epoch)
+
+    def send(engine, key, *_):
+        if key != CHAT:
+            next_job.set()
+
+    monkeypatch.setattr(worker, '_send', send)
+    monkeypatch.setattr(db, 'release_backend_notice', release_notice)
+    db.reserve_backend_notice(CHAT, backend.epoch)
+    with Store(db.path, backend.clock, backend=True) as writer:
+        # A real SQLite write lock persists until after the worker assertions.
+        # Shorten the connection's bounded SQLite wait to make the baseline probe fast.
+        db.connection.execute('PRAGMA busy_timeout=25')
+        with writer.atomic():
+            worker.job = (backend, CHAT, 'fixture', None)
+            worker.thread = Thread(target=worker._run, daemon=True)
+            worker.thread.start()
+            worker.ready.set()
+            assert first_attempt.wait(1)
+            if not stop_early:
+                assert exhausted.wait(2)
+                with db._lock:
+                    worker.job = (backend, 'next-chat', 'next', None)
+                    worker.ready.set()
+                assert next_job.wait(1), 'reservation cleanup blocked the next job'
+                assert len(attempts) == 10
+                assert 'notice reservation cleanup' in caplog.text
+            worker.stop()
+            worker.thread.join(timeout=1)
+            assert not worker.thread.is_alive(), 'reservation cleanup blocked shutdown'
 
 
 def gateway_trace(package, home, clock, monkeypatch):
@@ -360,19 +556,36 @@ def gateway_trace(package, home, clock, monkeypatch):
             engine.close()
 
 
-def test_gateway_matches_v0434(tmp_path, clock, monkeypatch):
+def materialize_gateway_baseline(destination):
     root = Path(__file__).resolve().parents[1]
-    try:
-        archive = subprocess.check_output(['git', 'archive', 'c87874589518a539b6a40ea90c0482a329d607ab',
-                                           'heartbeat2'], cwd=root, stderr=subprocess.PIPE)
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        pytest.skip('v0.4.34 baseline is unavailable; run in a Git checkout with the pinned release object')
-    with tarfile.open(fileobj=BytesIO(archive)) as tree:
-        if hasattr(tarfile, 'data_filter'):
-            tree.extractall(tmp_path, filter='data')
-        else:
-            # This archive is produced locally from the exact, trusted release object above.
-            tree.extractall(tmp_path)
+    pin = 'c87874589518a539b6a40ea90c0482a329d607ab'
+    destination = destination.resolve()
+
+    def git(*args):
+        try:
+            return subprocess.check_output(['git', *args], cwd=root, stderr=subprocess.PIPE)
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            diagnostic = exc.stderr.decode(errors='replace').strip() if getattr(exc, 'stderr', None) else str(exc)
+            message = f'v0.4.34 baseline is unavailable in this checkout: {diagnostic}'
+            if any(os.environ.get(name, '').lower() == 'true' for name in ('CI', 'GITHUB_ACTIONS')):
+                pytest.fail(message)
+            pytest.skip(message)
+
+    for raw_path in git('ls-tree', '-r', '--name-only', '-z', pin, '--', 'heartbeat2').split(b'\0'):
+        if not raw_path:
+            continue
+        path = Path(os.fsdecode(raw_path))
+        target = destination / path
+        if (path.is_absolute() or '..' in path.parts or not path.is_relative_to('heartbeat2')
+                or not target.resolve().is_relative_to(destination)):
+            pytest.fail(f'v0.4.34 baseline has an unsafe path: {path!s}')
+        content = git('show', f'{pin}:{path.as_posix()}')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+
+def test_gateway_matches_v0434(tmp_path, clock, monkeypatch):
+    materialize_gateway_baseline(tmp_path)
     spec = spec_from_file_location('hb_v0434', tmp_path / 'heartbeat2/__init__.py')
     baseline = module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, baseline)
@@ -387,24 +600,45 @@ def test_gateway_matches_v0434(tmp_path, clock, monkeypatch):
             assert rows == old_tables[table], table
 
 
-def test_gateway_baseline_unavailable_has_clear_skip(tmp_path, clock, monkeypatch):
+@pytest.mark.parametrize('ci_env', [None, 'CI', 'GITHUB_ACTIONS'])
+def test_gateway_baseline_unavailable_policy(tmp_path, monkeypatch, ci_env):
     def missing(args, **kwargs):
         raise subprocess.CalledProcessError(128, args, stderr=b'fatal: not a valid object name')
 
+    for name in ('CI', 'GITHUB_ACTIONS'):
+        monkeypatch.delenv(name, raising=False)
+    if ci_env:
+        monkeypatch.setenv(ci_env, 'true')
     monkeypatch.setattr(subprocess, 'check_output', missing)
-    with pytest.raises(pytest.skip.Exception, match='v0.4.34 baseline'):
-        test_gateway_matches_v0434(tmp_path, clock, monkeypatch)
+    error = pytest.fail.Exception if ci_env else pytest.skip.Exception
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as unavailable:
+        materialize_gateway_baseline(tmp_path)
+    assert isinstance(unavailable.value, error)
+    assert 'v0.4.34 baseline' in str(unavailable.value)
+    assert 'fatal: not a valid object name' in str(unavailable.value)
 
 
-def test_gateway_baseline_extracts_on_older_tarfile(tmp_path, clock, monkeypatch):
-    extract = tarfile.TarFile.extractall
-    supports_filter = hasattr(tarfile, 'data_filter')
+def test_gateway_baseline_uses_tree_and_blobs(tmp_path, monkeypatch):
+    git = subprocess.check_output
+    commands = []
 
-    def without_filter(self, path):
-        if supports_filter:
-            return extract(self, path, filter='data')
-        return extract(self, path)
+    def observe(args, **kwargs):
+        commands.append(args[1])
+        return git(args, **kwargs)
 
-    monkeypatch.delattr(tarfile, 'data_filter', raising=False)
-    monkeypatch.setattr(tarfile.TarFile, 'extractall', without_filter)
-    test_gateway_matches_v0434(tmp_path, clock, monkeypatch)
+    monkeypatch.setattr(subprocess, 'check_output', observe)
+    materialize_gateway_baseline(tmp_path)
+    assert commands[0] == 'ls-tree'
+    assert commands[1:] and set(commands[1:]) == {'show'}
+    assert (tmp_path / 'heartbeat2/__init__.py').is_file()
+
+
+@pytest.mark.parametrize('path', [b'heartbeat2/../../escape', b'/escape'])
+def test_gateway_baseline_rejects_escaping_path(tmp_path, monkeypatch, path):
+    def list_tree(args, **kwargs):
+        assert args[1] == 'ls-tree'
+        return path + b'\0'
+
+    monkeypatch.setattr(subprocess, 'check_output', list_tree)
+    with pytest.raises(pytest.fail.Exception, match='unsafe path'):
+        materialize_gateway_baseline(tmp_path)

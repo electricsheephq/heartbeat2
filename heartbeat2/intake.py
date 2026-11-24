@@ -520,6 +520,9 @@ class Intake:
         key=self._key(session_id)
         if not key: return None
         identity=e.tool.identity(surface=platform)
+        if identity is None and s.backend:
+            # A queued turn can reach its first hook after the injector shuts down.
+            identity=s.get_session(key)
         if identity is None: return None
         key=identity.session_key
         owner_seen=key in self.inbounds or self.owner_turns.get(session_id)==turn_id
@@ -627,6 +630,9 @@ class Intake:
                         s.cas_occurrence(wid,dedupe,o.state,'superseded',attempt=o.attempt,force_silent=True,error='stale_turn')
                     return None
                 if o.state=='claimed' and s.start(wid,dedupe,attempt=attempt):
+                    # A backend transport can accept without ever starting a wake turn.
+                    if s.backend and not is_keep_warm(w):
+                        s.cas_session(key,{'busy_epoch':e.epoch},last_wake_turn_at=now)
                     s.cas_wake(w.id,w.status,expected_version=w.version,fires=w.fires+1,model_turns=w.model_turns+1,last_fired_at=now)
                     e.ledger(w,fires=1,model_turns=1)
                 return None
@@ -974,7 +980,8 @@ class Intake:
             # Clear only this engine's busy mark: a late end in a gateway that lost the profile
             # must not free a turn its successor is running.
             if session and session.busy_epoch in (None,'',e.epoch):
-                s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
+                activity={'last_activity_at':e.clock.now()} if s.backend else {}
+                s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None,**activity)
             self.flights.pop(session_id,None)
             self._drop_children(f)
             shown=s.get_meta('owner_report:'+session_id)

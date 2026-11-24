@@ -377,3 +377,60 @@ def test_backend_role_follows_tui_injector(tmp_path, clock, monkeypatch, injecto
         assert rt.get_engine().store.list_sessions() == []
     finally:
         rt.close()
+
+
+@pytest.fixture
+def backend_runtime(tmp_path, clock, monkeypatch):
+    ctx = GatewayCtx(tmp_path, settings=SETTINGS)
+    ctx._manager.has_gateway_message_injector = False
+    ctx._manager.has_tui_message_injector = True
+    ctx.session_surface = lambda: 'desktop'
+    rt = Runtime(ctx, clock=clock, bootstrap_interval=.01, tick_interval=1)
+    try:
+        e = rt.get_engine()
+        bind_chat(monkeypatch, e, CHAT, platform='local')
+        assert json.loads(rt.tool(ARM))['armed']
+        rt.start()
+        assert until(lambda: holds(rt), timeout=2)
+        clock.advance(61)
+        assert ctx.injected.wait(2)
+        yield rt, e
+    finally:
+        rt.close()
+
+
+@pytest.mark.parametrize('flip_before_start', [False, True], ids=['started', 'claimed'])
+def test_backend_role_loss_silences_and_settles_wake(backend_runtime, flip_before_start):
+    rt, e = backend_runtime
+    db = e.store
+    o, = db.list_occurrences()
+    assert o.state == 'claimed'
+    assert db.update_occurrence(o.wake_id, o.dedupe_key, 'claimed', attempt=o.attempt, force_silent=True)
+    tags = dict(session_id=CHAT, turn_id='wake')
+    manager = e.ctx._manager
+    if flip_before_start:
+        manager.has_tui_message_injector = False
+    rt.hook('pre_llm_call', **tags, user_message=e.ctx.calls[0][0], platform='desktop')
+    assert db.get_occurrence(o.wake_id, o.dedupe_key).state == 'started'
+    manager.has_tui_message_injector = False
+    assert rt.hook('transform_llm_output', **tags, response_text='Chatty output') == '[SILENT]'
+    rt.hook('on_session_end', **tags, completed=True)
+    settled = db.get_occurrence(o.wake_id, o.dedupe_key)
+    assert (settled.state, settled.delivered) == ('done', False)
+    rt.hook('on_session_end', **tags, completed=True)
+    assert db.get_occurrence(o.wake_id, o.dedupe_key) == settled
+    assert db.get_wake(o.wake_id).fires == len(e.ctx.calls) == 1
+    assert db.get_session(CHAT).busy_since is None
+    assert not rt.get_engine().store.backend
+
+
+def test_backend_role_loss_keeps_own_ack_recovery(backend_runtime):
+    rt, e = backend_runtime
+    o, = e.store.list_occurrences()
+    assert o.state == 'claimed'
+    e.ctx._manager.has_tui_message_injector = False
+    assert until(lambda: not holds(rt), timeout=2)
+    rt.clock.advance(601)
+    assert until(lambda: e.store.get_occurrence(o.wake_id, o.dedupe_key).state == 'pending', timeout=2)
+    assert e.store.get_occurrence(o.wake_id, o.dedupe_key).error == 'ack_timeout'
+    assert len(e.ctx.calls) == 1

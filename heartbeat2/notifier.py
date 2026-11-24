@@ -310,7 +310,8 @@ class NotificationWorker:
 
     def _release_reservation(self, key, epoch):
         # Keep a transient write lock from stranding a reservation while this process is live.
-        while True:
+        for attempt in range(10):
+            if self.closed: return
             try:
                 self.store.release_backend_notice(key,epoch)
                 return
@@ -318,10 +319,11 @@ class NotificationWorker:
                 if (getattr(exc,'sqlite_errorcode',0)&0xff) not in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED):
                     LOG.warning('heartbeat2 notice reservation cleanup failed',exc_info=True)
                     return
-                time.sleep(.1)
+                if attempt<9: time.sleep(.1)
             except Exception:
                 LOG.warning('heartbeat2 notice reservation cleanup failed',exc_info=True)
                 return
+        LOG.warning('heartbeat2 notice reservation cleanup exhausted SQLite retries')
 
     def _send(self, engine, key, ident, transport):
         s=self.store

@@ -186,6 +186,20 @@ class Runtime:
                 engine.store.set_meta('settings_error',self.settings_error)
             return policy
 
+    def _backend_engine(self):
+        # A tool or command may have parked this view. Release the engine lock before reading its store.
+        with self._engine_lock:
+            if self.closed: return None
+            return next((engine for engine in (self._engine,self._other_engine)
+                         if engine is not None and engine.store.backend),None)
+
+    def _hook_engine(self, session_id):
+        if serving.state(self.ctx._manager)==serving.NO_GATEWAY:
+            retained=self._backend_engine()
+            if retained and (session_id in retained.intake.flights or retained.has_own_work()):
+                return retained
+        return self.get_engine()
+
     def get_engine(self):
         with self._engine_lock:
             if self.closed: raise RuntimeError('heartbeat2 runtime unloaded')
@@ -235,7 +249,7 @@ class Runtime:
                     from .intake import delegated_child
                     if not delegated_child(kwargs.get('platform','')) and (self._thread is None or not self._thread.is_alive()):
                         self.restart()
-                intake=self.get_engine().intake
+                intake=self._hook_engine(kwargs.get('session_id','')).intake
                 if name=='api_request_error': return intake.api_request_error(**kwargs)
                 if name in EVENTS: return intake.event(EVENTS[name],**kwargs)
                 return getattr(intake,name)(**kwargs)
@@ -303,8 +317,15 @@ class Runtime:
             with home_scope(self.home):
                 while not stop.is_set():
                     # Hermes stamps its injector on managers it does not serve; ask every step.
-                    if serving.state(self.ctx._manager) not in (serving.SERVED,serving.BACKEND):
+                    here=serving.state(self.ctx._manager)
+                    if here not in (serving.SERVED,serving.BACKEND):
                         if runner: runner.release()
+                        if here==serving.NO_GATEWAY and self.clock.monotonic()>=next_tick:
+                            retained=self._backend_engine()
+                            if retained and retained.has_own_work():
+                                # The injector is gone. Settle only our claims; leave dispatch to a serving process.
+                                with retained.store.atomic(): retained.acks(own_only=True)
+                                next_tick=self.clock.monotonic()+self.tick_interval
                         stop.wait(self.bootstrap_interval)
                         continue
                     self._served_once=True
