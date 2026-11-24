@@ -1,7 +1,7 @@
 """Import-light registration; profile-bound work starts only in the bootstrap.
 
-One daemon per immutable manager scope, plus a cross-process flock. Hooks in
-non-gateway processes may still write inbox events; they never run the poller.
+One daemon per immutable manager scope, with cross-process flocks for gateway
+and standalone backend scheduling. Other hosts may still write inbox events.
 A gateway that does not serve the profile (Hermes loads every profile's plugins
 at boot) opens nothing, holds no lock and delivers nothing for it.
 """
@@ -191,7 +191,8 @@ class Runtime:
                 from .store import Store
                 from .poller import Poller
                 with home_scope(self.home):
-                    store=Store(self.home/'plugin-data/heartbeat2/pulse.db',self.clock)
+                    backend=serving.state(self.ctx._manager)==serving.BACKEND
+                    store=Store(self.home/'plugin-data/heartbeat2/pulse.db',self.clock,backend=backend)
                     try:
                         self._engine=Poller(self.ctx,store,self.policy(),self.clock,boot_at=self.boot_at)
                         if store.get_meta('settings_error')!=self.settings_error:
@@ -215,7 +216,7 @@ class Runtime:
         poller stays off either way."""
         if self._served_once: return ''
         here=serving.state(self.ctx._manager)
-        if here==serving.SERVED: self._served_once=True
+        if here in (serving.SERVED,serving.BACKEND): self._served_once=True
         return serving.REASONS[here] if here in (serving.FOREIGN,serving.UNKNOWN) else ''
 
     def hook(self,name,**kwargs):
@@ -272,6 +273,8 @@ class Runtime:
         here=serving.state(self.ctx._manager)
         if here in (serving.FOREIGN,serving.UNKNOWN): return {'state':'not running','reason':serving.REASONS[here]}
         if self._runner is None or self._runner._lock_file is None:
+            if here==serving.BACKEND and self._runner and self._last_tick_monotonic is not None:
+                return {'state':'alive','reason':'delivery only; scheduler lock held elsewhere'}
             return {'state':'not running','reason':'lock held elsewhere' if self._runner else 'bootstrap starting'}
         return None
 
@@ -292,7 +295,7 @@ class Runtime:
             with home_scope(self.home):
                 while not stop.is_set():
                     # Hermes stamps its injector on managers it does not serve; ask every step.
-                    if serving.state(self.ctx._manager)!=serving.SERVED:
+                    if serving.state(self.ctx._manager) not in (serving.SERVED,serving.BACKEND):
                         if runner: runner.release()
                         stop.wait(self.bootstrap_interval)
                         continue
@@ -309,16 +312,17 @@ class Runtime:
                         runner.refresh_policy=self.policy
                         runner.process_start=not self._reconciled
                         self._runner=runner
-                    if not runner.acquire():
+                    if not runner.store.backend and not runner.acquire():
                         stop.wait(30)
                         continue
-                    self._reconciled=True
+                    if not runner.store.backend: self._reconciled=True
                     remaining=next_tick-self.clock.monotonic()
                     if remaining>0:
                         self._wake.wait(min(remaining,self.bootstrap_interval))
                         self._wake.clear()
                         continue
                     runner.tick()
+                    if runner.store.backend and runner._lock_file is not None: self._reconciled=True
                     self._last_tick_monotonic=self.clock.monotonic()
                     self._last_bootstrap_error=''
                     next_tick=self.clock.monotonic()+self.tick_interval

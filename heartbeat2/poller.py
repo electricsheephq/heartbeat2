@@ -18,7 +18,7 @@ import uuid
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
-from . import governor
+from . import governor, serving
 
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
@@ -68,6 +68,8 @@ class Poller:
         self.tool=Tool(self,session_key_fn or current_session_key)
         self.probe_runner=probe_runner or self._probe
         self.epoch=uuid.uuid4().hex
+        if store.backend: self.epoch=f'{os.getpid()}:{self.epoch}'
+        self._app_closed_until={}
         LOCAL_EPOCHS.add(self.epoch)
         CREATED_EPOCHS.add(self.epoch)
         self.log=LOG
@@ -106,7 +108,10 @@ class Poller:
         now=self.clock.now()
         return bool(self.policy.enabled and not self.paused() and self.injection_allowed() and s is not None and s.enabled
                     and not (s.paused_until is not None and s.paused_until>now)
-                    and not (self.policy.dm_only and s.chat_type!='dm') and deliverable_platform(s.platform))
+                    and not (self.policy.dm_only and s.chat_type!='dm') and self.deliverable(s.platform))
+
+    def deliverable(self, platform):
+        return deliverable_platform(platform, backend=self.store.backend)
 
     def injection_allowed(self):
         try:
@@ -118,13 +123,13 @@ class Poller:
             return False
 
     def eligible(self):
-        from .serving import state,SERVED
-        return state(getattr(self.ctx,'_manager',None))==SERVED
+        from .serving import state,SERVED,BACKEND
+        return state(getattr(self.ctx,'_manager',None))==(BACKEND if self.store.backend else SERVED)
 
     def acquire(self):
         if self.closed or not self.eligible(): return False
         if self._lock_file is not None: return True
-        f=open(self.store.path.parent/'poller.lock','a+')
+        f=open(self.store.path.parent/('poller-backend.lock' if self.store.backend else 'poller.lock'),'a+')
         try:
             fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:
@@ -154,6 +159,14 @@ class Poller:
         LOCAL_EPOCHS.discard(self.epoch)
         self.release()
 
+    def _foreign_backend_pid(self,pid):
+        return self.store.backend and pid!=os.getpid() and serving.pid_alive(pid)
+
+    def _foreign_backend_busy(self,session):
+        if not self.store.backend: return False
+        pid,_,_=(session.busy_epoch or '').partition(':')
+        return pid.isdecimal() and self._foreign_backend_pid(int(pid))
+
     def reconcile(self):
         s=self.store
         with s.atomic():
@@ -169,12 +182,14 @@ class Poller:
                             self.notice(w.session_key,f'A watcher ({w.id}) used an unsupported {field} and could never fire, so it was stopped. Ask me to set it up again.')
                             noticed.add(w.session_key)
             for o in s.list_occurrences() if self.process_start else []:
+                if o.state in {'claimed','started'} and self._foreign_backend_pid(o.pid): continue
                 if o.state=='claimed':
                     self.refund_claimed(o,'restart_refund')
                     s.set_meta('recovered:'+o.id,'1')
                 elif o.state=='started': self.interrupt(o,'restart')
             for session in s.list_sessions() if self.process_start else []:
-                if session.busy_since is not None and session.busy_epoch not in LOCAL_EPOCHS:
+                if (session.busy_since is not None and session.busy_epoch not in LOCAL_EPOCHS
+                        and not self._foreign_backend_busy(session)):
                     s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             # Persisted future deadlines remain future. time_due() coalesces
             # genuinely overdue intervals at the next tick without changing them
@@ -310,7 +325,9 @@ class Poller:
         if self.closed or not self.eligible(): return
         try:
             self.refresh()
-            if not self.acquire(): return
+            if not self.acquire():
+                if self.store.backend and self.policy.enabled and not self.paused(): self.dispatch_pending()
+                return
             s,now=self.store,self.clock.now()
             self._tick_started_wall=now
             with s.atomic():
@@ -354,16 +371,23 @@ class Poller:
                 if now-float(s.get_meta('last_gc_at') or 0)>=3600:
                     s.gc(ledger_days=self.policy.ledger_days,timezone=self.policy.resolved_timezone())
                 s.set_meta('last_error','')
-            for o in s.list_occurrences(state='pending'):
-                if not self.eligible(): break
-                w=s.get_wake(o.wake_id)
-                cache_line=self.cache_line(w)  # Pricing may fetch metadata; never hold the write lock.
-                self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
+            self.dispatch_pending()
             self.notifications.tick(self)
         except Exception as exc:
             self.log.warning('heartbeat2 tick failed',exc_info=True)
             try: self.store.set_meta('last_error',type(exc).__name__)
             except Exception: pass
+
+    def dispatch_pending(self):
+        occurrences=self.store.list_occurrences(state='pending')
+        if self.store.backend:
+            self._app_closed_until={o.id:self._app_closed_until[o.id] for o in occurrences if o.id in self._app_closed_until}
+        for o in occurrences:
+            if not self.eligible(): break
+            w=self.store.get_wake(o.wake_id)
+            if w is None: continue  # A legacy session may have been stamped after listing.
+            cache_line=self.cache_line(w)  # Pricing may fetch metadata; never hold the write lock.
+            self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
 
     def acks(self):
         s=self.store
@@ -373,6 +397,7 @@ class Poller:
         ttl=max((provider_limit or 0)*10,7200)
         now=self.clock.now()
         for o in s.list_occurrences(state='started'):
+            if self._foreign_backend_pid(o.pid): continue
             w=s.get_wake(o.wake_id)
             session=s.get_session(w.session_key)
             activity=max(o.started_at if o.started_at is not None else now,session.last_activity_at or 0 if session else 0)
@@ -380,9 +405,11 @@ class Poller:
             if now-activity<limit: continue
             self.interrupt(o,'no_session_end')
         for session in s.list_sessions():
-            if session.busy_since is not None and now-max(session.busy_since,session.last_activity_at or 0)>=ttl:
+            if (session.busy_since is not None and now-max(session.busy_since,session.last_activity_at or 0)>=ttl
+                    and not self._foreign_backend_busy(session)):
                 s.cas_session(session.session_key,{'busy_since':session.busy_since,'last_activity_at':session.last_activity_at},busy_since=None,busy_epoch=None)
         for o in s.list_occurrences(state='claimed'):
+            if self._foreign_backend_pid(o.pid): continue
             if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
                 if self.supersede_claimed(o): continue
@@ -657,6 +684,7 @@ class Poller:
         """Why own time may not run in this chat (a session or wake), or '' (#177). A chat known to be one-to-one has it
         unless the owner turned it off there; an app chat, group, topic, group DM or a chat whose platform can't tell, only where the
         owner turned it on with /pulse owntime on. Each topic is a chat."""
+        if self.store.backend: return 'backend_schedule_only'
         meta=self.store.get_meta
         if meta('own_time_off:'+key)=='1': return 'chat_off'
         if is_direct_chat(chat.platform,chat.chat_type,chat.chat_id): return ''
@@ -859,7 +887,7 @@ class Poller:
         if not s.enabled: return 'session_off',False,None
         if s.paused_until is not None and s.paused_until>now: return 'session_paused',True,None
         if self.policy.dm_only and (s.chat_type!='dm' or w.chat_type!='dm'): return 'dm_only',False,None
-        if not deliverable_platform(s.platform): return 'non_gateway',False,None
+        if not self.deliverable(s.platform): return 'non_gateway',False,None
         # The owner has been away sleep_after_days: the agent's own work runs no turn until they write (#62). This comes
         # before the message holds, which still run a turn silently. A report-back passes only for agreed results.
         if sleeps(w) and self.policy.asleep(s,now):
@@ -907,6 +935,7 @@ class Poller:
         if sum(now-t<60 for t in flood)>=5: return 'global_flood',True,None
         if now<float(self.store.get_meta('not_before:'+o.id) or 0):
             return ('app_closed' if o.error=='app_closed' else 'not_before'),True,None
+        if o.error=='app_closed' and now<self._app_closed_until.get(o.id,0): return 'app_closed',True,None
         if s.busy_since is not None: return 'busy',True,None
         if s.last_wake_turn_at is not None and now-s.last_wake_turn_at<self.policy.wake_spacing_minutes*60: return 'wake_spacing',True,None
         if self.store.list_occurrences(session_key=s.session_key,state='claimed') or self.store.list_occurrences(session_key=s.session_key,state='started'): return 'in_flight',True,None
@@ -1058,7 +1087,10 @@ class Poller:
                         from .notifier import episode_over, end_episode
                         if episode_over(self,w.session_key): end_episode(self,w.session_key)
                         if not s.get_meta('held_since:'+o.id): s.set_meta('held_since:'+o.id,str(self.clock.now()))
-                        s.set_meta('not_before:'+o.id,str(self.clock.now()+60))
+                        retry_at=self.clock.now()+60
+                        # A miss says nothing about another backend's live registry.
+                        if s.backend: self._app_closed_until[o.id]=retry_at
+                        else: s.set_meta('not_before:'+o.id,str(retry_at))
                         if not is_keep_warm(w):
                             from .notifier import episode, EPISODE_PREFIX
                             if not s.get_meta(EPISODE_PREFIX+w.session_key):

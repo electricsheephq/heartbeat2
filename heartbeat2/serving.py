@@ -9,19 +9,30 @@ have admitted the home: it skips a profile that still runs its own gateway. The
 served set changes at runtime, so callers ask on every step.
 """
 import logging
+import os
 
 LOG=logging.getLogger('heartbeat2')
-SERVED,FOREIGN,UNKNOWN,NO_GATEWAY='served','foreign','unknown','no_gateway'
+SERVED,BACKEND,FOREIGN,UNKNOWN,NO_GATEWAY='served','backend','foreign','unknown','no_gateway'
 REASONS={FOREIGN:'this gateway does not serve this profile',
          UNKNOWN:'cannot tell whether this gateway serves this profile',
          NO_GATEWAY:'no gateway in this process'}
 _WARNED=set()
 
 
+def pid_alive(pid):
+    if not pid or pid <= 0: return False
+    try: os.kill(pid,0)
+    except ProcessLookupError: return False
+    except PermissionError: pass  # The process exists even if we cannot signal it.
+    return True
+
+
 def state(manager):
-    """SERVED, FOREIGN, UNKNOWN (treat as foreign) or NO_GATEWAY."""
-    if manager is None or getattr(manager,'_cli_ref',None) is not None or not getattr(manager,'has_gateway_message_injector',False):
+    """SERVED, BACKEND, FOREIGN, UNKNOWN (treat as foreign) or NO_GATEWAY."""
+    if manager is None or getattr(manager,'_cli_ref',None) is not None:
         return NO_GATEWAY
+    if not getattr(manager,'has_gateway_message_injector',False):
+        return BACKEND if getattr(manager,'has_tui_message_injector',False) else NO_GATEWAY
     injector=getattr(manager,'_gateway_message_injector',())  # Read once: shutdown clears it to None.
     if injector is None: return NO_GATEWAY
     try:

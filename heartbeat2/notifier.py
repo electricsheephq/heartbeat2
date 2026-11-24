@@ -141,8 +141,7 @@ def episode_over(engine, key, now=None):
     data = json.loads(engine.store.get_meta(EPISODE_PREFIX+key) or 'null') or {}
     if 'queued' not in data:
         # Its notice is being sent: the send's result decides, so a pause or cancel meanwhile can't lose the receipt.
-        reservation = getattr(engine.store, 'notify_reservation', None)
-        if reservation is not None and reservation[0] == key: return False
+        if engine.store.notice_reserved(key): return False
         return not stamped(engine, key)
     now = engine.clock.now() if now is None else now
     chat = engine.store.get_session(key)
@@ -263,8 +262,7 @@ class NotificationWorker:
         with s.atomic():
             if self.closed: return
             chats={chat.session_key:chat for chat in s.list_sessions() if chat.platform in LOCAL_SURFACES}
-            for row in s.connection.execute('SELECT key FROM meta WHERE key LIKE ?', (EPISODE_PREFIX+'%',)).fetchall():
-                key=row[0][len(EPISODE_PREFIX):]
+            for key in s.session_meta_keys(EPISODE_PREFIX):
                 if key not in chats or episode_over(engine,key,now):
                     end_episode(engine,key)
             for key,chat in chats.items():
@@ -297,11 +295,13 @@ class NotificationWorker:
                 if self.closed: return
                 job=self.job
             if job is None: continue
+            engine,key,_,_=job
             try: self._send(*job)
             except Exception:
                 LOG.warning('heartbeat2 notifier worker failed',exc_info=True)
             finally:
                 with self.store._lock:
+                    self.store.release_backend_notice(key,engine.epoch)
                     self.store.notify_reservation=None
                     self.job=None
                     self.idle.set()
@@ -315,10 +315,12 @@ class NotificationWorker:
             rows=held_wakes(engine,key)
             # Exclude our own reservation while rechecking the cap.
             s.notify_reservation=None
+            if s.backend and (s.notice_reserved(key) or 'queued' in data or engine.clock.now()<data.get('next',0)): return
             if (data.get('id')!=ident or not rows or chat is None or chat.platform not in LOCAL_SURFACES
                     or _gate(engine,chat,data,engine.clock.now())[0] or notifier_for(engine) is not transport): return
             now=sent_at=engine.clock.now()
             s.notify_reservation=(key,local_day(now,engine.policy.resolved_timezone()))
+            s.reserve_backend_notice(key,engine.epoch)
             data.setdefault('first',now)
             data['attempts']+=1
             data['next']=now+(300 if data['attempts']<3 else 3600)
@@ -337,6 +339,7 @@ class NotificationWorker:
             if self.closed: return
             with s.atomic():
                 s.notify_reservation=None
+                s.release_backend_notice(key,engine.epoch)
                 if result.get('ok') is True:
                     engine.ledger(wake,delivered=1)
                     # A notify event is a receipt, never an input to a watcher and never contains text.
