@@ -18,7 +18,7 @@ import uuid
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, agreed_watcher, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
-from .store import BACKEND_REINJECT_PREFIX
+from .store import BACKEND_ENDED_TURN_PREFIX, BACKEND_REINJECT_PREFIX
 from . import governor, serving
 
 LOG = logging.getLogger('heartbeat2')
@@ -185,7 +185,7 @@ class Poller:
         pid=os.getpid()
         if not epoch or not epoch.startswith(f'{pid}:'): return False
         # Hermes can evict this module during reload, losing its in-memory epoch registry.
-        return epoch in CREATED_EPOCHS or serving.backend_epoch_alive(epoch,pid=pid,create_time_tolerance=0)
+        return epoch in CREATED_EPOCHS or serving.backend_epoch_alive(epoch,pid=pid)
 
     def _own_claim(self,o):
         # A replaced delivery runner can leave a queued prompt in this process.
@@ -452,15 +452,13 @@ class Poller:
             if own_only and not self._own_claim(o): continue
             if self._foreign_backend_claim(o): continue
             if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
-            # A backend can accept a detached chat. Only refund its accept once the full
-            # acknowledgement window elapsed with no running turn it could be queued behind.
             if s.backend and (accepted:=int(s.get_meta('accepted:'+o.id) or 0)):
                 w=s.get_wake(o.wake_id)
                 session=s.get_session(w.session_key)
                 busy=session and session.busy_since is not None and (
                     not session.busy_epoch or serving.backend_epoch_alive(session.busy_epoch))
-                if not busy:
-                    self._hold_backend_app_closed(w,o,accepted=accepted)
+                if not busy or o.error=='app_closed':
+                    self._backend_ack_timeout(w,o,accepted,busy)
                     continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
                 if self.supersede_claimed(o): continue
@@ -470,23 +468,45 @@ class Poller:
                 governor.error(self,s.get_wake(o.wake_id))
             else: self.refund_claimed(o,'ack_timeout')
 
-    def _hold_backend_app_closed(self,w,o,*,accepted=0):
+    def _backend_ack_timeout(self,w,o,accepted,busy):
+        s=self.store
+        resend=s.backend_reinject_state(o.id)
+        # A True return can represent a queued prompt. Give a dropped prompt
+        # one timed resend, then require progress in this chat after acceptance.
+        if not busy:
+            if not resend.get('count'):
+                self._hold_backend_app_closed(w,o,resend=resend,accepted=accepted)
+                return
+            last_accept=resend.get('accepted_at')
+            if last_accept is None:
+                # Older claims lack the accept timestamp. Start observing now.
+                resend['accepted_at']=self.clock.now()
+                s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
+            elif (ended_start:=s.get_meta(BACKEND_ENDED_TURN_PREFIX+w.session_key)) is not None and float(ended_start)>last_accept:
+                self._hold_backend_app_closed(w,o,resend=resend,accepted=accepted)
+                return
+        self._hold_backend_app_closed(w,o,keep_claim=True)
+
+    def _hold_backend_app_closed(self,w,o,*,resend=None,accepted=0,keep_claim=False):
         from .notifier import episode, episode_over, end_episode, EPISODE_PREFIX
         s=self.store
         key=w.session_key
         with s.atomic():
-            if not self.refund_claimed(o,'app_closed'): return
+            if keep_claim:
+                if o.error!='app_closed' and not s.update_occurrence(
+                        o.wake_id,o.dedupe_key,'claimed',attempt=o.attempt,error='app_closed'): return
+            elif not self.refund_claimed(o,'app_closed'): return
             now=self.clock.now()
-            if accepted:
+            if resend is not None:
                 s.set_meta('accepted:'+o.id,str(accepted-1))
                 s.set_meta('not_before:'+o.id,str(now+1))
-                reinject_key=BACKEND_REINJECT_PREFIX+o.id
-                if s.get_meta(reinject_key) is None: s.set_meta(reinject_key,'0')
+                resend['due']=True
+                s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
                 session=s.get_session(key)
                 if session and session.busy_since is not None:
                     s.cas_session(key,{'busy_epoch':session.busy_epoch,'busy_since':session.busy_since},
                                   busy_since=None,busy_epoch=None)
-            else:
+            elif not keep_claim:
                 # A miss in this registry does not delay a successor with the chat open.
                 self._app_closed_until[o.id]=now+60
             if episode_over(self,key): end_episode(self,key)
@@ -1146,8 +1166,10 @@ class Poller:
                     from .notifier import end_episode
                     end_episode(self,session.session_key)
                 s.set_meta('held_since:'+o.id,'')
-            elif (resends:=s.get_meta(BACKEND_REINJECT_PREFIX+o.id)) is not None:
-                s.set_meta(BACKEND_REINJECT_PREFIX+o.id,str(int(resends)+1))
+            elif resend:=s.backend_reinject_state(o.id):
+                if resend.pop('due',False): resend['count']=resend.get('count',0)+1
+                resend['accepted_at']=self.clock.now()
+                s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
             s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))
             flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]
             s.set_meta('injections',json.dumps(flood+[self.clock.now()]))
@@ -1209,7 +1231,7 @@ class Poller:
                 due_at=float(o.dedupe_key[2:])
                 downtime=self.downtime_since(o.created_at,max(0,o.created_at-due_at)) if o.created_at is not None else None
             except ValueError: pass
-        backend_reinject=s.backend and s.get_meta(BACKEND_REINJECT_PREFIX+o.id) is not None
+        backend_reinject=s.backend and bool(s.backend_reinject_state(o.id).get('due'))
         reminder=owner_class(w) and one_shot(w)
         if backend_reinject:
             # The turn could not start, even though the app acknowledged the injection.

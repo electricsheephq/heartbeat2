@@ -375,8 +375,13 @@ def test_non_holder_receipts_and_status(hosts, monkeypatch, process_table):
             holder.clock.advance(61)
             holder.tick()
             assert OTHER_WINDOW in commands.handle('status', runtime).splitlines()
+            status_runtime = SimpleNamespace(ctx=peer.ctx, _runner=peer, _last_bootstrap_error=None,
+                                             _last_tick_monotonic=peer.clock.monotonic(),
+                                             _thread=SimpleNamespace(is_alive=lambda: True))
+            assert Runtime.status(status_runtime) == {'state': 'alive', 'reason': 'scheduler lock held elsewhere'}
             holder.release()
             assert OTHER_WINDOW not in commands.handle('status', runtime).splitlines()
+            assert Runtime.status(status_runtime) == {'state': 'not running', 'reason': 'lock held elsewhere'}
         finally:
             peer.close()
 
@@ -412,29 +417,142 @@ def test_backend_slow_first_hook_injects_once(hosts, monkeypatch, delay):
     assert backend.store.get_occurrence(wid, o.dedupe_key).state == 'done'
 
 
-def test_backend_detached_chat_stays_held_across_ack_windows(hosts, monkeypatch):
+def test_backend_delayed_first_hook_caps_timed_resends(hosts, monkeypatch):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
     db = backend.store
     backend.clock.advance(61)
     backend.tick()
-    first_stamp = None
-    for window in range(13):
-        if window:
-            backend.clock.advance(1)
-            backend.tick()
-        assert len(backend.ctx.calls) == window+1
+    backend.clock.advance(600)
+    backend.tick()
+    o, = db.list_occurrences(wid)
+    assert (o.state, o.error) == ('pending', 'app_closed')
+    stamp = db.get_meta('held_since:'+o.id)
+    episode = db.get_meta(EPISODE_PREFIX+CHAT)
+    assert stamp and episode
+    assert db.get_meta('accepted:'+o.id) == '0'
+    backend.clock.advance(1)
+    backend.tick()
+    for _ in range(3):
         backend.clock.advance(600)
         backend.tick()
-        o, = db.list_occurrences(wid)
-        assert (o.state, o.error) == ('pending', 'app_closed')
-        stamp = db.get_meta('held_since:'+o.id)
-        if first_stamp is None:
-            first_stamp = str(backend.clock.now())
-        assert stamp == first_stamp
-        assert db.get_meta(EPISODE_PREFIX+CHAT)
-        assert db.get_meta('accepted:'+o.id) == '0'
+        backend.clock.advance(1)
+        backend.tick()
+        assert len(backend.ctx.calls) == 2
+        assert db.get_occurrence(wid, o.dedupe_key).state == 'claimed'
+        assert db.get_meta('held_since:'+o.id) == stamp
+        assert db.get_meta(EPISODE_PREFIX+CHAT) == episode
+        assert db.get_meta('accepted:'+o.id) == '1'
         assert db.get_meta('inject_failures:'+o.id) is None
+    assert db.get_wake(wid).fires == 0
+    finish_backend_wake(backend, backend.ctx.calls[0][0])
+    assert db.get_wake(wid).fires == 0  # Hermes can still run the stale prompt.
+    backend.clock.advance(601)
+    backend.tick()
+    assert len(backend.ctx.calls) == 2  # A stale wake is not proof the retry left the queue.
+    finish_backend_wake(backend, backend.ctx.calls[1][0])
+    assert db.get_occurrence(wid, o.dedupe_key).state == 'done'
+    assert db.get_wake(wid).fires == 1
+
+
+def test_backend_only_later_completed_turn_reopens_resend(hosts, monkeypatch):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    db = backend.store
+    backend.clock.advance(61)
+    backend.tick()
+    backend.clock.advance(600)
+    backend.tick()
+    backend.clock.advance(1)
+    # Model an earlier turn winning admission as the retry is accepted. Its
+    # end stamp alone is later than acceptance, but its start is earlier.
+    inject = backend.ctx.inject_message
+
+    def accept_behind_human(text, *, session_key):
+        backend.intake.pre_llm_call(session_id=CHAT, turn_id='earlier', user_message='Earlier.')
+        backend.clock.advance(1)
+        return inject(text, session_key=session_key)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(backend.ctx, 'inject_message', accept_behind_human)
+        backend.tick()
+    backend.clock.advance(1)
+    backend.intake.on_session_end(session_id=CHAT, turn_id='earlier')
+    backend.clock.advance(600)
+    backend.tick()
+    o, = db.list_occurrences(wid)
+    assert (o.state, o.attempt) == ('claimed', 2)
+
+    backend.intake.pre_llm_call(session_id=CHAT, turn_id='later', user_message='Later.')
+    backend.clock.advance(601)
+    backend.tick()
+    assert db.get_occurrence(wid, o.dedupe_key).state == 'claimed'
+    assert len(backend.ctx.calls) == 2
+    backend.intake.on_session_end(session_id=CHAT, turn_id='later')
+    backend.tick()
+    assert db.get_occurrence(wid, o.dedupe_key).state == 'pending'
+    assert db.get_meta('accepted:'+o.id) == '0'
+    backend.clock.advance(1)
+    backend.tick()
+    assert len(backend.ctx.calls) == 3
+    backend.clock.advance(601)
+    backend.tick()
+    assert db.get_occurrence(wid, o.dedupe_key).state == 'claimed'
+    assert len(backend.ctx.calls) == 3
+    finish_backend_wake(backend, backend.ctx.calls[-1][0])
+    assert db.get_occurrence(wid, o.dedupe_key).state == 'done'
+    assert db.get_wake(wid).fires == 1
+
+
+def test_backend_detached_chat_holds_until_attach(hosts, monkeypatch):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    db = backend.store
+    backend.ctx.accept = False
+    backend.clock.advance(61)
+    backend.tick()
+    o, = db.list_occurrences(wid)
+    stamp = db.get_meta('held_since:'+o.id)
+    assert stamp
+    for _ in range(4):
+        backend.clock.advance(600)
+        backend.tick()
+        assert db.get_occurrence(wid, o.dedupe_key).state == 'pending'
+        assert db.get_meta('held_since:'+o.id) == stamp
+        assert db.get_meta(EPISODE_PREFIX+CHAT)
+        assert db.get_meta('accepted:'+o.id) is None
+    backend.ctx.accept = True
+    backend.clock.advance(60)
+    backend.tick()
+    finish_backend_wake(backend, backend.ctx.calls[-1][0])
+    calls = len(backend.ctx.calls)
+    backend.clock.advance(600)
+    backend.tick()
+    assert len(backend.ctx.calls) == calls
+    assert db.get_occurrence(wid, o.dedupe_key).state == 'done'
+    assert db.get_wake(wid).fires == 1
+
+
+def test_backend_restart_drop_resends_at_ack_timeout(hosts, monkeypatch):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    assert backend.acquire()
+    backend.release()
+    backend.clock.advance(61)
+    backend.tick()  # The restarted backend accepts before the agent is attached.
+    backend.clock.advance(599)
+    backend.tick()
+    assert len(backend.ctx.calls) == 1
+    backend.clock.advance(1)
+    backend.tick()
+    o, = backend.store.list_occurrences(wid)
+    assert (o.state, o.error) == ('pending', 'app_closed')
+    backend.clock.advance(1)
+    backend.tick()
+    assert len(backend.ctx.calls) == 2
+    finish_backend_wake(backend, backend.ctx.calls[-1][0])
+    assert backend.store.get_occurrence(wid, o.dedupe_key).state == 'done'
+    assert backend.store.get_wake(wid).fires == 1
 
 
 @pytest.mark.parametrize('asked,minutes', [(True, 16), (True, 9), (False, 16)],
@@ -528,25 +646,26 @@ def test_backend_reinjection_count_in_list_and_status(hosts, monkeypatch):
     backend.clock.advance(600)
     backend.tick()
     shown(None)
-    for count in range(1, 4):
-        backend.clock.advance(1)
-        backend.tick()
-        assert len(backend.ctx.calls) == count + 1
-        if count < 3:
-            backend.clock.advance(600)
-            backend.tick()
-    shown('re-sent 3× (app window not ready)')
+    backend.clock.advance(1)
+    backend.tick()
+    shown('re-sent 1× (app window not ready)')
     backend.clock.advance(600)
     backend.tick()
     o, = db.list_occurrences(wid)
-    assert (o.state, o.error) == ('pending', 'app_closed')
-    shown('re-sent 3× (app window not ready)')
+    assert (o.state, o.error) == ('claimed', 'app_closed')
+    shown('re-sent 1× (app window not ready)')
+    backend.intake.pre_llm_call(session_id=CHAT, turn_id='human', user_message='Hello.')
+    backend.intake.on_session_end(session_id=CHAT, turn_id='human')
+    backend.tick()
+    assert db.get_occurrence(wid, o.dedupe_key).state == 'pending'
+    shown('re-sent 1× (app window not ready)')
     backend.clock.advance(1)
     backend.tick()
+    shown('re-sent 2× (app window not ready)')
     finish_backend_wake(backend, backend.ctx.calls[-1][0])
     assert db.get_occurrence(wid, o.dedupe_key).state == 'done'
     shown(None)
-    assert db.get_meta('backend_reinject:'+o.id) == '4'
+    assert db.get_meta('backend_reinject:'+o.id)
     backend.clock.advance(2 * 86400 + 1)
     assert db.add_occurrence(wid, 'newer', state='skipped')
     db.gc(ledger_days=7, keep_occurrences=1)
@@ -582,6 +701,28 @@ def test_backend_busy_claim_keeps_ack_timeout_accounting(hosts, monkeypatch):
     assert (o.state, o.error) == ('pending', 'ack_timeout')
     assert backend.store.get_meta('accepted:'+o.id) == '1'
     assert not backend.store.get_meta('held_since:'+o.id)
+
+
+def test_backend_busy_retry_does_not_increment_resend_count(hosts, monkeypatch):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    db = backend.store
+    backend.clock.advance(61)
+    backend.tick()
+    backend.clock.advance(600)
+    backend.tick()
+    backend.clock.advance(1)
+    backend.tick()
+    backend.intake.pre_llm_call(session_id=CHAT, turn_id='human', user_message='Hello.')
+    backend.clock.advance(600)
+    backend.acks()
+    o, = db.list_occurrences(wid)
+    assert (o.state, o.error) == ('pending', 'ack_timeout')
+    backend.intake.on_session_end(session_id=CHAT, turn_id='human')
+    backend.tick()
+    assert len(backend.ctx.calls) == 3
+    assert db.get_meta('accepted:'+o.id) == '2'
+    assert tool.backend_reinject_note(db, db.get_wake(wid)) == 're-sent 1× (app window not ready)'
 
 
 def test_backend_hold_ends_on_actual_wake_start(hosts, monkeypatch):
@@ -671,7 +812,9 @@ def test_backend_reconcile_keeps_claim_from_replaced_runner(hosts, monkeypatch, 
     assert backend.store.get_occurrence(o.wake_id, o.dedupe_key).state == 'claimed'
 
 
-@pytest.mark.parametrize('created,owned', [('', True), ('invalid', True), ('30.0', True), ('29.0', False)])
+@pytest.mark.parametrize('created,owned', [
+    ('', True), ('invalid', True), ('30.0', True), ('29.0', True), ('28.0', True), ('27.0', False),
+])
 def test_backend_reload_recovers_only_reused_pid_claim(hosts, monkeypatch, process_table, created, owned):
     _, backend = hosts
     o = backend_occurrence(backend, monkeypatch, f'{os.getpid()}:{created}:evicted-module')
@@ -836,7 +979,7 @@ def test_backend_live_notice_reservation_expires_and_notice_resumes(hosts, monke
     backend.tick()
     db, zone = backend.store, backend.policy.resolved_timezone()
     db.reserve_backend_notice(CHAT, backend.epoch)
-    backend.clock.advance(600)
+    backend.clock.advance(3600)
     assert db.notice_reserved(CHAT)
     assert db.daily_counts(CHAT, zone)['delivered'] == 1
     backend.clock.advance(1)
@@ -846,6 +989,44 @@ def test_backend_live_notice_reservation_expires_and_notice_resumes(hosts, monke
     assert backend.notifications.idle.wait(2)
     assert len(sends) == 1
     assert db.get_ledger('2025-10-12', wid)['delivered'] == 1
+
+
+def test_backend_replacement_worker_respects_inflight_notice_cap(hosts, monkeypatch):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    backend.refresh_policy = None
+    backend.policy = replace(backend.policy, notify_via='fixture:owner', max_messages_per_day=1)
+    backend.ctx.accept = False
+    backend.clock.advance(61)
+    backend.tick()
+    entered, release = Event(), Event()
+    sends = []
+
+    def send(*args):
+        sends.append(args)
+        if len(sends) == 1:
+            entered.set()
+            assert release.wait(3)
+        return {'ok': True}
+
+    transport = Notifier(send)
+    backend.notifier = lambda: transport
+    backend.clock.advance(NOTIFY_AFTER_S)
+    with Store(backend.store.path, backend.clock, backend=True) as store:
+        replacement = Poller(backend.ctx, store, backend.policy, backend.clock)
+        replacement.notifier = lambda: transport
+        try:
+            backend.notifications.tick(backend)
+            assert entered.wait(1)
+            backend.clock.advance(3599)
+            replacement.notifications.tick(replacement)
+            assert replacement.notifications.idle.wait(1)
+            assert len(sends) == 1
+        finally:
+            release.set()
+            replacement.close()
+            assert backend.notifications.idle.wait(3)
+        assert store.get_ledger('2025-10-12', wid)['delivered'] == 1
 
 
 def test_backend_worker_closed_mid_send_releases_notice_reservation(hosts, monkeypatch):
@@ -926,7 +1107,7 @@ def test_backend_notice_cleanup_bounds_persistent_writer(hosts, monkeypatch, cap
             assert not worker.thread.is_alive(), 'reservation cleanup blocked shutdown'
     if not stop_early:
         assert db.notice_reserved(CHAT)
-        backend.clock.advance(601)
+        backend.clock.advance(3601)
         assert not db.notice_reserved(CHAT)
         assert db.daily_counts(CHAT, backend.policy.resolved_timezone())['delivered'] == 0
 

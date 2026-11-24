@@ -25,7 +25,8 @@ from .schedule import local_day
 from .serving import backend_epoch_alive
 
 SCHEMA_VERSION = 1
-BACKEND_NOTICE_RESERVATION_S = 600
+# Notifier v1 supplies a send callback with no end-to-end timeout.
+BACKEND_NOTICE_RESERVATION_S = 3600
 HELD_REPORT_OUTCOMES = frozenset({'progress', 'done', 'needs_attention', 'blocked'})
 # The characters str.strip() removes, so SQL trim() agrees with Python on what a blank summary is.
 _WHITESPACE = ''.join(chr(c) for c in range(0x3001) if chr(c).isspace())
@@ -149,6 +150,7 @@ def _validate_wake(wake: Wake):
 # Nor is children:<occurrence id>:<attempt>: a recovered turn can stay bound to an old occurrence after gc removes its row,
 # and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
 BACKEND_REINJECT_PREFIX = 'backend_reinject:'
+BACKEND_ENDED_TURN_PREFIX = 'backend:last_ended_turn_start:'
 OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'held_since:', 'ignored:', 'inject_failures:',
                             'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
                             'stop_hint_offered:', 'supersede_on_refund:', BACKEND_REINJECT_PREFIX)
@@ -303,6 +305,16 @@ class Store:
         with self.atomic():
             self.connection.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                     (key, str(value)))
+
+    def backend_reinject_state(self, occurrence_id):
+        if not self.backend: return {}
+        value = self.get_meta(BACKEND_REINJECT_PREFIX + occurrence_id)
+        if value is None: return {}
+        if value.isdecimal():
+            # An older store used zero to mark the first resend awaiting acceptance.
+            count = int(value)
+            return {'count': count, 'due': count == 0}
+        return json.loads(value)
 
     def stamp_backend(self, session_key: str) -> bool:
         with self.atomic():

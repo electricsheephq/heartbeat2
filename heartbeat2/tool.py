@@ -10,7 +10,6 @@ import re
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
 from .policy import BACKEND_SCHEDULE_ONLY, LOCAL_SURFACES, platform_refusal, session_platform, owner_class, holds_messages, cap_counts, is_keep_warm, agreed_watcher
 from .schedule import parse_at, parse_duration, next_every, next_cron
-from .store import BACKEND_REINJECT_PREFIX
 from . import serving
 
 
@@ -102,7 +101,7 @@ def backend_reinject_note(store, wake):
     if not store.backend: return ''
     notes = []
     for o in store.list_occurrences(wake.id):
-        if o.state in {'pending', 'claimed'} and (count := int(store.get_meta(BACKEND_REINJECT_PREFIX+o.id) or 0)):
+        if o.state in {'pending', 'claimed'} and (count := store.backend_reinject_state(o.id).get('count')):
             notes.append(f're-sent {count}× (app window not ready)')
     return ' · '.join(notes)
 

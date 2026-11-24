@@ -108,11 +108,15 @@ EPISODE_PREFIX = 'notify_episode:'
 
 
 def held_wakes(engine, key):
-    """Count only active wakes whose pending occurrence still waits on app_closed."""
+    """Count active wakes whose occurrence still waits on app_closed."""
     rows = []
     for w in engine.store.list_wakes(key):
         if w.status != 'active' or is_keep_warm(w): continue
-        for o in engine.store.list_occurrences(w.id, state='pending'):
+        store = engine.store
+        occurrences = store.list_occurrences(w.id, state='pending')
+        if store.backend:
+            occurrences += store.list_occurrences(w.id, state='claimed')
+        for o in occurrences:
             if o.error != 'app_closed': continue
             stamp = engine.store.get_meta('held_since:'+o.id)
             if stamp: rows.append((w, o, float(stamp)))

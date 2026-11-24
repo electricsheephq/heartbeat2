@@ -295,7 +295,8 @@ class Runtime:
         here=serving.state(self.ctx._manager)
         if here in (serving.FOREIGN,serving.UNKNOWN): return {'state':'not running','reason':serving.REASONS[here]}
         if self._runner is None or self._runner._lock_file is None:
-            if here==serving.BACKEND and self._runner and self._last_tick_monotonic is not None:
+            if (here==serving.BACKEND and self._runner and self._last_tick_monotonic is not None
+                    and self._runner.other_backend_delivers()):
                 return {'state':'alive','reason':'scheduler lock held elsewhere'}
             return {'state':'not running','reason':'lock held elsewhere' if self._runner else 'bootstrap starting'}
         return None
