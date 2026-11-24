@@ -2,7 +2,7 @@
 
 ## 0.4.34 — 2026-11-24
 
-- **A Desktop chat that can't receive wakes now says why.** In chats that the Desktop app's own chat backend serves (`hermes serve`), Hermes gives plugins no session platform and doesn't deliver plugin turns, so a wake armed there would be accepted and never run. HeartBeat keeps refusing `create` there, and the refusal now says why and how to arm the wake from a messaging chat instead of an empty `non_gateway`. (#233)
+- **A Desktop chat that can't receive wakes now says why.** In chats that the Desktop app's own chat backend serves (`hermes serve`), Hermes gives plugins no session platform, and HeartBeat's scheduler runs only in a messaging gateway, so a wake armed there would never run. HeartBeat keeps refusing `create` there, and the refusal now says why and how to arm the wake from a messaging chat instead of an empty `non_gateway`. (#233)
 
 ## 0.4.33 — 2026-11-23
 

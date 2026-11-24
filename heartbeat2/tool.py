@@ -87,13 +87,15 @@ def filter_text(w, limit=None):
     return text
 
 
-APP_BACKEND_REFUSAL = ("Wakes can't run in this Desktop chat yet: Hermes's Desktop chat backend doesn't deliver plugin turns "
-                       "(heartbeat2#233). Arm the wake from a messaging chat on this profile.")
+APP_BACKEND_REFUSAL = ("Wakes can't run in this Desktop chat yet: it's served by the Desktop app's own backend (hermes serve), "
+                       "where HeartBeat's scheduler doesn't run and Hermes gives plugins no session platform (heartbeat2#233). "
+                       "Arm the wake from a messaging chat on this profile.")
 
 
 def refusal_detail(detail, platform):
-    """#233: in the Desktop app's chat backend Hermes gives plugin tools no platform and no surface, only the session's source.
-    Wakes can't be delivered there yet (Hermes accepts and drops them), so the refusal stays, but it says why."""
+    """#233: in the Desktop app's own chat backend (hermes serve) Hermes gives plugin tools no platform and no surface, only the
+    session's source, and HeartBeat's scheduler only runs in a messaging gateway, so a wake armed there would never fire. The
+    refusal stays, but it says why."""
     if detail or platform not in ('', 'local'): return detail
     try:
         source = session_env('HERMES_SESSION_SOURCE')
