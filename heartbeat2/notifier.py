@@ -1,8 +1,10 @@
 """Profile-local v1 notifier registry and bounded closed-window notices."""
 from dataclasses import dataclass
 import logging
+import sqlite3
 import sys
 import threading
+import time
 from types import FunctionType
 from typing import Callable
 
@@ -301,10 +303,25 @@ class NotificationWorker:
                 LOG.warning('heartbeat2 notifier worker failed',exc_info=True)
             finally:
                 with self.store._lock:
-                    self.store.release_backend_notice(key,engine.epoch)
                     self.store.notify_reservation=None
                     self.job=None
                     self.idle.set()
+                self._release_reservation(key,engine.epoch)
+
+    def _release_reservation(self, key, epoch):
+        # Keep a transient write lock from stranding a reservation while this process is live.
+        while True:
+            try:
+                self.store.release_backend_notice(key,epoch)
+                return
+            except sqlite3.OperationalError as exc:
+                if (getattr(exc,'sqlite_errorcode',0)&0xff) not in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED):
+                    LOG.warning('heartbeat2 notice reservation cleanup failed',exc_info=True)
+                    return
+                time.sleep(.1)
+            except Exception:
+                LOG.warning('heartbeat2 notice reservation cleanup failed',exc_info=True)
+                return
 
     def _send(self, engine, key, ident, transport):
         s=self.store

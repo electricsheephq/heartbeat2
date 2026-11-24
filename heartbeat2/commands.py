@@ -57,9 +57,12 @@ STATUS_REASON_TEXT = {'missed': 'missed: too late after HeartBeat or the gateway
 
 def _activation(engine, session, wake):
     if not session.enabled: raise ValueError('this chat is off; use /pulse on')
-    if engine.store.backend and not engine.eligible():
-        from .tool import APP_BACKEND_REFUSAL
-        raise ValueError(APP_BACKEND_REFUSAL)
+    if engine.store.backend:
+        if not engine.eligible():
+            from .tool import APP_BACKEND_REFUSAL
+            raise ValueError(APP_BACKEND_REFUSAL)
+        if is_keep_warm(wake) or wake.trigger_json.get('own_time'):
+            raise ValueError('backend_schedule_only\n'+BACKEND_SCHEDULE_ONLY)
     active_count, global_active_count = cap_counts(engine.store, session.session_key, exclude_id=wake.id)
     gate = engine.policy.creation_gate(session_key=session.session_key, platform=session.platform,
         chat_type=session.chat_type, allow_gateway_injection=engine.injection_allowed(),
@@ -356,6 +359,9 @@ def handle(raw_args, runtime):
     if not key or key == 'default': return 'Error: /pulse needs the invoking gateway session.'
     try:
         engine = runtime.get_engine()
+        if engine.tool.app_backend_unavailable():
+            from .tool import APP_BACKEND_REFUSAL
+            return APP_BACKEND_REFUSAL
         engine.refresh()  # Never inside a transaction: refresh takes the policy lock before the store lock.
         action, _, rest = (raw_args or 'status').strip().partition(' ')
         rest = rest.strip()

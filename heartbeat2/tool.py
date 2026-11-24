@@ -10,6 +10,7 @@ import re
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
 from .policy import BACKEND_SCHEDULE_ONLY, LOCAL_SURFACES, platform_refusal, session_platform, owner_class, holds_messages, cap_counts, is_keep_warm, agreed_watcher
 from .schedule import parse_at, parse_duration, next_every, next_cron
+from . import serving
 
 
 def obj(properties):
@@ -110,9 +111,17 @@ class Tool:
     def __init__(self, engine, session_key_fn=current_session_key):
         self.engine, self.session_key_fn = engine, session_key_fn
 
+    def app_backend_unavailable(self, *, surface=''):
+        platform = session_env('HERMES_SESSION_PLATFORM')
+        source = session_env('HERMES_SESSION_SOURCE')
+        if session_platform(platform, self.engine.ctx, surface=surface, source=source) not in LOCAL_SURFACES:
+            return False
+        here = serving.state(getattr(self.engine.ctx, '_manager', None))
+        return here == serving.NO_GATEWAY or here == serving.BACKEND and not self.engine.store.backend
+
     def identity(self, *, surface='', key=None):
         if key is None: key = self.session_key_fn()
-        if not key or key == 'default':
+        if not key or key == 'default' or self.app_backend_unavailable(surface=surface):
             return None
         store = self.engine.store
         bound_platform = session_env('HERMES_SESSION_PLATFORM')
@@ -174,6 +183,8 @@ class Tool:
                 args = {**args, 'trigger': {'kind': 'at', 'at': at}}
             s = self.identity()
             if s is None:
+                if args.get('action') in {'create','resume','update'} and self.app_backend_unavailable():
+                    return {'error':'non_gateway', 'detail':APP_BACKEND_REFUSAL}
                 return {'error':'missing_session'}
             action = args.get('action')
             pause_seconds = None
@@ -336,7 +347,8 @@ class Tool:
                         fresh = 'trigger' in args
                         trig = args.get('trigger')
                         new_kind = trig.get('kind',w.kind) if isinstance(trig,dict) else w.kind
-                        if e.store.backend and new_kind not in TIME_KINDS:
+                        if e.store.backend and (w.kind not in TIME_KINDS or new_kind not in TIME_KINDS
+                                                or is_keep_warm(w) or w.trigger_json.get('own_time')):
                             return {'error':'backend_schedule_only', 'detail':BACKEND_SCHEDULE_ONLY}
                         # The owner's grant applies before the first feasibility pass, so a requested retime gets the reminder bound.
                         base = (replace(w,owner_requested=True) if action == 'update' and w.creator == 'agent'

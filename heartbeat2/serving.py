@@ -27,6 +27,32 @@ def pid_alive(pid):
     return True
 
 
+def _create_time(psutil, pid):
+    try: return psutil.Process(pid).create_time()
+    except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied): return None
+
+
+def backend_epoch(nonce):
+    pid=os.getpid()
+    try: import psutil
+    except ImportError: created=None
+    else: created=_create_time(psutil,pid)
+    return f'{pid}:{created if created is not None else ""}:{nonce}'
+
+
+def backend_epoch_alive(epoch, *, pid=None):
+    owner,_,identity=(epoch or '').partition(':')
+    if not owner.isdecimal(): return False
+    owner=int(owner)
+    if (pid is not None and owner!=pid) or not pid_alive(owner): return False
+    # Fall back to PID-only detection when Hermes does not provide psutil.
+    try: import psutil
+    except ImportError: return True
+    created,sep,_=identity.partition(':')
+    if not sep or not created: return False
+    return created==str(_create_time(psutil,owner))
+
+
 def state(manager):
     """SERVED, BACKEND, FOREIGN, UNKNOWN (treat as foreign) or NO_GATEWAY."""
     if manager is None or getattr(manager,'_cli_ref',None) is not None:

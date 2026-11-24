@@ -68,7 +68,7 @@ class Poller:
         self.tool=Tool(self,session_key_fn or current_session_key)
         self.probe_runner=probe_runner or self._probe
         self.epoch=uuid.uuid4().hex
-        if store.backend: self.epoch=f'{os.getpid()}:{self.epoch}'
+        if store.backend: self.epoch=serving.backend_epoch(self.epoch)
         self._app_closed_until={}
         LOCAL_EPOCHS.add(self.epoch)
         CREATED_EPOCHS.add(self.epoch)
@@ -159,13 +159,14 @@ class Poller:
         LOCAL_EPOCHS.discard(self.epoch)
         self.release()
 
-    def _foreign_backend_pid(self,pid):
-        return self.store.backend and pid!=os.getpid() and serving.pid_alive(pid)
+    def _foreign_backend_claim(self,o):
+        return (self.store.backend and o.pid is not None and o.pid!=os.getpid()
+                and serving.backend_epoch_alive(o.epoch,pid=o.pid))
 
     def _foreign_backend_busy(self,session):
-        if not self.store.backend: return False
-        pid,_,_=(session.busy_epoch or '').partition(':')
-        return pid.isdecimal() and self._foreign_backend_pid(int(pid))
+        epoch=session.busy_epoch or ''
+        return (self.store.backend and not epoch.startswith(f'{os.getpid()}:')
+                and serving.backend_epoch_alive(epoch))
 
     def reconcile(self):
         s=self.store
@@ -182,7 +183,8 @@ class Poller:
                             self.notice(w.session_key,f'A watcher ({w.id}) used an unsupported {field} and could never fire, so it was stopped. Ask me to set it up again.')
                             noticed.add(w.session_key)
             for o in s.list_occurrences() if self.process_start else []:
-                if o.state in {'claimed','started'} and self._foreign_backend_pid(o.pid): continue
+                if o.state in {'claimed','started'} and s.backend:
+                    if (o.pid==os.getpid() and o.epoch in LOCAL_EPOCHS) or self._foreign_backend_claim(o): continue
                 if o.state=='claimed':
                     self.refund_claimed(o,'restart_refund')
                     s.set_meta('recovered:'+o.id,'1')
@@ -326,7 +328,9 @@ class Poller:
         try:
             self.refresh()
             if not self.acquire():
-                if self.store.backend and self.policy.enabled and not self.paused(): self.dispatch_pending()
+                if self.store.backend and self.eligible() and self.policy.enabled and not self.paused():
+                    with self.store.atomic(): self.acks(own_only=True)
+                    self.dispatch_pending()
                 return
             s,now=self.store,self.clock.now()
             self._tick_started_wall=now
@@ -389,15 +393,20 @@ class Poller:
             cache_line=self.cache_line(w)  # Pricing may fetch metadata; never hold the write lock.
             self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
 
-    def acks(self):
+    def acks(self, *, own_only=False):
         s=self.store
         try: timeout=float(os.environ.get('HERMES_AGENT_TIMEOUT','1800'))
         except (TypeError,ValueError): timeout=1800
         provider_limit=timeout if math.isfinite(timeout) and timeout>0 else None
         ttl=max((provider_limit or 0)*10,7200)
         now=self.clock.now()
+        # A replaced delivery runner can leave a queued prompt in this same process.
+        def own_claim(o):
+            return o.pid==os.getpid() and o.epoch in CREATED_EPOCHS
+
         for o in s.list_occurrences(state='started'):
-            if self._foreign_backend_pid(o.pid): continue
+            if own_only and not own_claim(o): continue
+            if self._foreign_backend_claim(o): continue
             w=s.get_wake(o.wake_id)
             session=s.get_session(w.session_key)
             activity=max(o.started_at if o.started_at is not None else now,session.last_activity_at or 0 if session else 0)
@@ -405,11 +414,13 @@ class Poller:
             if now-activity<limit: continue
             self.interrupt(o,'no_session_end')
         for session in s.list_sessions():
+            if own_only and session.busy_epoch not in LOCAL_EPOCHS: continue
             if (session.busy_since is not None and now-max(session.busy_since,session.last_activity_at or 0)>=ttl
                     and not self._foreign_backend_busy(session)):
                 s.cas_session(session.session_key,{'busy_since':session.busy_since,'last_activity_at':session.last_activity_at},busy_since=None,busy_epoch=None)
         for o in s.list_occurrences(state='claimed'):
-            if self._foreign_backend_pid(o.pid): continue
+            if own_only and not own_claim(o): continue
+            if self._foreign_backend_claim(o): continue
             if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
                 if self.supersede_claimed(o): continue
@@ -1173,8 +1184,14 @@ class Poller:
             self.end_max_fires(s.get_wake(w.id))
             if provider and not s.get_meta('provider_health'): self.provider_failure(provider)
             session=s.get_session(w.session_key)
-            if session and not (cause=='restart' and session.busy_epoch in LOCAL_EPOCHS):
-                s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
+            if session:
+                if s.backend:
+                    # The dead occurrence can coexist with a newer turn owned by a live peer.
+                    may_clear=session.busy_epoch==o.epoch or session.busy_epoch in LOCAL_EPOCHS
+                else:
+                    may_clear=not (cause=='restart' and session.busy_epoch in LOCAL_EPOCHS)
+                if may_clear:
+                    s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             return True
 
     @staticmethod

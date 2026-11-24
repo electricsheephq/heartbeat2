@@ -22,7 +22,7 @@ from .clock import Clock
 from .model import (Wake, Occurrence, Session, KINDS, WAKE_STATUSES,
                     TERMINAL_OCCURRENCE_STATES)
 from .schedule import local_day
-from .serving import pid_alive
+from .serving import backend_epoch_alive
 
 SCHEMA_VERSION = 1
 HELD_REPORT_OUTCOMES = frozenset({'progress', 'done', 'needs_attention', 'blocked'})
@@ -462,8 +462,7 @@ class Store:
         reservation = self.notify_reservation
         if reservation is not None and reservation[0] == key: return True
         if not self.backend: return False
-        pid, _, _ = (self.get_meta('backend:notice_in_flight:' + key) or '').partition(':')
-        return pid.isdecimal() and pid_alive(int(pid))
+        return backend_epoch_alive(self.get_meta('backend:notice_in_flight:' + key))
 
     def reserve_backend_notice(self, key, epoch):
         if self.backend: self.set_meta('backend:notice_in_flight:' + key, epoch)
@@ -685,7 +684,6 @@ class Store:
         # Keep exactly the rows held_reports can still return (#146).
         held = sorted(HELD_REPORT_OUTCOMES)
         held_outcomes = ",".join("?" for _ in held)
-        wake_ids = f"SELECT id FROM wakes WHERE {self._host_filter('wakes.session_key')}"
         with self.atomic():
             # Live rows and recent dispatches survive history pruning.
             self.connection.execute(f"""WITH ranked AS (
@@ -693,7 +691,7 @@ class Store:
                 ROW_NUMBER() OVER (PARTITION BY wake_id,state IN ({placeholders})
                     ORDER BY ended_at DESC,rowid DESC) AS rank,
                 SUM(CASE WHEN state IN ({placeholders}) THEN 0 ELSE 1 END)
-                    OVER (PARTITION BY wake_id) AS live FROM occurrences WHERE wake_id IN ({wake_ids}))
+                    OVER (PARTITION BY wake_id) AS live FROM occurrences)
                 DELETE FROM occurrences WHERE rowid IN (SELECT rid FROM ranked
                     WHERE state IN ({placeholders}) AND rank>MAX(0,?-live)
                       AND (claimed_at IS NULL OR claimed_at<?)
@@ -702,22 +700,16 @@ class Store:
                           AND ended_at IS NOT NULL AND outcome IN ({held_outcomes})
                           AND trim(summary, ?) <> ''))""",
                 terminal * 3 + [keep_occurrences, now - 2 * 86400] + held + [_WHITESPACE])
-            self.connection.execute(f"DELETE FROM events WHERE consumed_at<? AND {self._host_filter('events.session_key')}",
-                                    (now - 7 * 86400,))
-            self.connection.execute(f"DELETE FROM ledger WHERE day<? AND wake_id IN ({wake_ids})", (ledger_cutoff,))
-            spend_session = 'substr(meta.key,13,length(meta.key)-23)'
-            self.connection.execute("DELETE FROM meta WHERE key LIKE 'agent_spend:%' AND substr(key,-10)<? AND "
-                                    + self._host_filter(spend_session), (ledger_cutoff,))
+            self.connection.execute("DELETE FROM events WHERE consumed_at IS NOT NULL AND consumed_at<?", (now - 7 * 86400,))
+            self.connection.execute("DELETE FROM ledger WHERE day<?", (ledger_cutoff,))
+            self.connection.execute("DELETE FROM meta WHERE key LIKE 'agent_spend:%' AND substr(key,-10)<?", (ledger_cutoff,))
             # Per-occurrence markers go with their occurrence (#54). Split '<prefix><wake_id>/<dedupe_key>' (wake ids never
             # contain '/') so the lookup uses the primary key. Prefixes match exactly: '_' is a LIKE wildcard. A key with no
             # '/' after its prefix isn't an occurrence marker and stays.
             for prefix in OCCURRENCE_META_PREFIXES:
                 n = len(prefix)
-                wid = f"substr(meta.key,{n+1},instr(substr(meta.key,{n+1}),'/')-1)"
-                session = f"SELECT session_key FROM wakes WHERE id={wid}"
                 self.connection.execute(f"""DELETE FROM meta WHERE substr(key,1,{n})=? AND instr(substr(key,{n+1}),'/')>0
-                    AND {self._host_filter(session)}
                     AND NOT EXISTS (SELECT 1 FROM occurrences o
-                     WHERE o.wake_id={wid}
+                     WHERE o.wake_id=substr(meta.key,{n+1},instr(substr(meta.key,{n+1}),'/')-1)
                        AND o.dedupe_key=substr(meta.key,{n+1}+instr(substr(meta.key,{n+1}),'/')))""", (prefix,))
             self.set_meta("last_gc_at", str(now))

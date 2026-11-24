@@ -18,6 +18,7 @@ from heartbeat2.model import Session
 from heartbeat2.registration import Runtime, register
 from heartbeat2.store import Store
 from heartbeat2.poller import Poller
+from test_backend_wakes import ARM, CHAT, bind as bind_chat
 from test_engine import GatewayCtx, KEY, arm, engine, pending, session  # noqa: F401 (fixture)
 from test_v014a import bind
 
@@ -334,5 +335,45 @@ def test_engine_opened_before_the_injector_does_not_count_as_served(tmp_path, cl
         ctx.runner.served = False
         assert rt.hook('kanban_task_completed', task_id='t2', board='main') is None
         assert len(rt.get_engine().store.pending_events()) == 1
+    finally:
+        rt.close()
+
+
+@pytest.mark.parametrize('injector_first', [False, True])
+def test_backend_role_follows_tui_injector(tmp_path, clock, monkeypatch, injector_first):
+    ctx = GatewayCtx(tmp_path, settings=SETTINGS)
+    manager = ctx._manager
+    manager.has_gateway_message_injector = False
+    manager.has_tui_message_injector = injector_first
+    ctx.session_surface = lambda: 'desktop'
+    monkeypatch.setattr('heartbeat2.policy.local_injection_supported', lambda: True)
+    rt = Runtime(ctx, clock=clock, bootstrap_interval=.01)
+    try:
+        e = rt.get_engine()
+        bind_chat(monkeypatch, e, CHAT, platform='local')
+        monkeypatch.setattr('heartbeat2.tool.current_session_key', lambda: CHAT)
+        turn = dict(session_id=CHAT, turn_id='owner', user_message='hello', platform='desktop',
+                    conversation_history=[{'role': 'user', 'content': 'hello', 'platform_message_id': 'fixture'}])
+        rt.hook('pre_llm_call', **turn)
+        if not injector_first:
+            refusal = json.loads(rt.tool(ARM))
+            assert refusal['error'] == 'non_gateway'
+            assert 'own backend' in refusal['detail']
+            assert 'own backend' in rt.command('add in 1m Check the task.')
+            assert e.store.list_sessions() == []
+            assert not e.store.get_meta('host:' + CHAT)
+            manager.has_tui_message_injector = True
+        rt.start()
+        assert until(lambda: holds(rt), timeout=2)
+        assert rt._runner.store.backend
+        rt.hook('pre_llm_call', **turn)
+        assert rt.get_engine().store.get_session(CHAT).last_human_at == clock.now()
+        assert json.loads(rt.tool(ARM))['armed']
+        assert rt.get_engine().store.get_meta('host:' + CHAT) == 'backend'
+        manager.has_tui_message_injector = False
+        assert until(lambda: not holds(rt), timeout=2)
+        assert json.loads(rt.tool(ARM))['error'] == 'non_gateway'
+        assert not rt.get_engine().store.backend
+        assert rt.get_engine().store.list_sessions() == []
     finally:
         rt.close()

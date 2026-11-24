@@ -212,6 +212,63 @@ def test_takeover_preserves_live_backend_claim(cluster, started):
         assert cluster.rows('SELECT state,attempt FROM occurrences') == [('done', 1)]
 
 
+@pytest.mark.parametrize('started', [False, True])
+def test_non_holder_takeover_preserves_own_turn(cluster, started):
+    with cluster.serve(True) as holder, cluster.serve(True) as owner:
+        assert holder('acquire') and not owner('acquire')
+        assert owner('arm', CHAT, '')['armed']
+        owner('open', CHAT)
+        assert holder('tick', 61) == []
+        assert owner('tick', 61) == [CHAT]
+        if started:
+            owner('start', CHAT, '')
+        holder('release')
+        assert owner('acquire')
+        state = 'started' if started else 'claimed'
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [(state, 2)]
+        if started:
+            assert cluster.rows('SELECT busy_since IS NOT NULL FROM sessions') == [(1,)]
+        else:
+            owner('start', CHAT, '')
+        assert owner('finish', CHAT, '')['ok']
+        assert owner('tick', 601) == [CHAT]
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('done', 2)]
+
+
+def test_non_holder_recovers_dropped_prompt(cluster):
+    with cluster.serve(True) as holder, cluster.serve(True) as owner:
+        assert holder('acquire') and not owner('acquire')
+        assert owner('arm', CHAT, '')['armed']
+        owner('open', CHAT)
+        assert holder('tick', 61) == []
+        assert owner('tick', 61) == [CHAT]
+        # Hermes drops the queued prompt without running the start hook.
+        assert holder('tick', 599) == []
+        assert owner('tick', 599) == [CHAT]
+        assert cluster.rows('SELECT state FROM occurrences') == [('claimed',)]
+        assert holder('tick', 2) == []
+        assert cluster.rows('SELECT state FROM occurrences') == [('claimed',)]
+        assert owner('tick', 2) == [CHAT, CHAT]
+        owner('start', CHAT, '')
+        assert owner('finish', CHAT, '')['ok']
+        assert cluster.rows('SELECT state FROM occurrences') == [('done',)]
+
+
+def test_non_holder_recovers_own_started_turn_at_ttl(cluster):
+    with cluster.serve(True) as holder, cluster.serve(True) as owner:
+        assert holder('acquire') and not owner('acquire')
+        assert owner('arm', CHAT, '')['armed']
+        owner('open', CHAT)
+        assert holder('tick', 61) == []
+        assert owner('tick', 61) == [CHAT]
+        owner('start', CHAT, '')
+        assert holder('tick', 20000) == []
+        assert cluster.rows('SELECT state FROM occurrences') == [('started',)]
+        assert owner('tick', 20000) == [CHAT]
+        assert cluster.rows('SELECT state,error FROM occurrences') == [('interrupted', 'no_session_end')]
+        assert cluster.rows('SELECT busy_since FROM sessions') == [(None,)]
+
+
 def test_backend_absence_and_recurring_catch_up(cluster):
     with cluster.serve(False) as gateway:
         assert gateway('acquire')
