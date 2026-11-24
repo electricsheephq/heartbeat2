@@ -123,11 +123,14 @@ def stamped(engine, key):
     """Whether any wake in the chat still carries a closed-window stamp, whatever holds it right now.
 
     A held wake can be deferred for another reason meanwhile (quiet hours overnight, a provider outage, a pause). Its
-    episode, and the notice already sent for it, last until the stamp clears on an accepted injection or the wake ends.
+    episode, and the notice already sent for it, last until the stamp clears on delivery or the wake ends.
     """
     for w in engine.store.list_wakes(key):
         if w.status not in {'active', 'paused'} or is_keep_warm(w): continue
         if any(engine.store.get_meta('held_since:'+o.id) for o in engine.store.list_occurrences(w.id, state='pending')):
+            return True
+        if engine.store.backend and any(engine.store.get_meta('held_since:'+o.id)
+               for o in engine.store.list_occurrences(w.id, state='claimed')):
             return True
     return False
 
@@ -136,7 +139,7 @@ def episode_over(engine, key, now=None):
     """Whether a chat's closed-window wait has ended, so a later hold may start a new one with its own notice.
 
     Before a notice is queued, the wait lasts while any wake still carries a closed-window stamp. Once a notice is queued it
-    lasts, stamps or not, until the window is known to have reopened (an accepted injection ends it in end_episode, or the
+    lasts, stamps or not, until the window is known to have reopened (a gateway accept or backend wake start ends it, or the
     owner writes in that chat) or a day has passed since the notice. Ending it clears the stamps (end_episode), so a wake
     still waiting starts a fresh wait: at most one notice per wait, and at most one a day.
     """
@@ -151,7 +154,7 @@ def episode_over(engine, key, now=None):
 
 
 def end_episode(engine, key):
-    # Accepted injection ends the whole chat episode, even if sibling wakes still wait. Keep-warm pings are never part of
+    # Delivery ends the whole chat episode, even if sibling wakes still wait. Keep-warm pings are never part of
     # an episode (held_wakes and stamped skip them), so their stamps keep the time they started waiting.
     with engine.store.atomic():
         engine.store.connection.execute('DELETE FROM meta WHERE key=?', (EPISODE_PREFIX+key,))
@@ -311,7 +314,7 @@ class NotificationWorker:
     def _release_reservation(self, key, epoch):
         # Keep a transient write lock from stranding a reservation while this process is live.
         for attempt in range(10):
-            if self.closed: return
+            if self.closed and (not self.store.backend or attempt): return
             try:
                 self.store.release_backend_notice(key,epoch)
                 return
@@ -338,7 +341,7 @@ class NotificationWorker:
             if (data.get('id')!=ident or not rows or chat is None or chat.platform not in LOCAL_SURFACES
                     or _gate(engine,chat,data,engine.clock.now())[0] or notifier_for(engine) is not transport): return
             now=sent_at=engine.clock.now()
-            s.notify_reservation=(key,local_day(now,engine.policy.resolved_timezone()))
+            if not s.backend: s.notify_reservation=(key,local_day(now,engine.policy.resolved_timezone()))
             s.reserve_backend_notice(key,engine.epoch)
             data.setdefault('first',now)
             data['attempts']+=1
@@ -355,7 +358,9 @@ class NotificationWorker:
         if not isinstance(result,dict): result={'ok':False,'error':'invalid notifier result'}
         now=engine.clock.now()
         with s._lock:
-            if self.closed: return
+            if self.closed:
+                if s.backend: s.release_backend_notice(key,engine.epoch)
+                return
             with s.atomic():
                 s.notify_reservation=None
                 s.release_backend_notice(key,engine.epoch)

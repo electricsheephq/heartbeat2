@@ -632,6 +632,9 @@ class Intake:
                 if o.state=='claimed' and s.start(wid,dedupe,attempt=attempt):
                     # A backend transport can accept without ever starting a wake turn.
                     if s.backend and not is_keep_warm(w):
+                        from .notifier import end_episode
+                        end_episode(e,key)
+                        s.set_meta('held_since:'+o.id,'')
                         s.cas_session(key,{'busy_epoch':e.epoch},last_wake_turn_at=now)
                     s.cas_wake(w.id,w.status,expected_version=w.version,fires=w.fires+1,model_turns=w.model_turns+1,last_fired_at=now)
                     e.ledger(w,fires=1,model_turns=1)

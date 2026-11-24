@@ -50,20 +50,20 @@ def backend_epoch(nonce):
     return f'{pid}:{created if created is not None else ""}:{nonce}'
 
 
-def backend_epoch_alive(epoch, *, pid=None, require_create_time=False):
+def backend_epoch_alive(epoch, *, pid=None, create_time_tolerance=CREATE_TIME_TOLERANCE_S):
     owner,_,identity=(epoch or '').partition(':')
     if not owner.isdecimal(): return False
     owner=int(owner)
     if (pid is not None and owner!=pid) or not pid_alive(owner): return False
-    # Legacy epochs and failed inspection can prove liveness, but not ownership across reloads.
+    # Preserve live work when a legacy epoch or failed inspection cannot disprove ownership.
     created,sep,_=identity.partition(':')
     recorded=_start_timestamp(created) if sep else None
-    if recorded is None: return not require_create_time
+    if recorded is None: return True
     try: import psutil
-    except ImportError: return not require_create_time
+    except ImportError: return True
     current=_create_time(psutil,owner)
-    if current is None: return not require_create_time and pid_alive(owner)
-    return abs(recorded-current)<=CREATE_TIME_TOLERANCE_S
+    if current is None: return pid_alive(owner)
+    return abs(recorded-current)<=create_time_tolerance
 
 
 def state(manager):

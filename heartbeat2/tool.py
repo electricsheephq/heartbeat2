@@ -10,6 +10,7 @@ import re
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
 from .policy import BACKEND_SCHEDULE_ONLY, LOCAL_SURFACES, platform_refusal, session_platform, owner_class, holds_messages, cap_counts, is_keep_warm, agreed_watcher
 from .schedule import parse_at, parse_duration, next_every, next_cron
+from .store import BACKEND_REINJECT_PREFIX
 from . import serving
 
 
@@ -93,6 +94,17 @@ APP_BACKEND_REFUSAL = ("Wakes can't run in this Desktop chat yet: it's served by
                        "Arm the wake from a messaging chat on this profile.")
 APP_BACKEND_RECEIPT = ('Fires while the app has this chat open; if it is closed when due, '
                        'it fires once when the chat is open again.')
+OTHER_BACKEND_WINDOW = ('Another Hermes app window on this profile delivers wakes right now; '
+                        'this wake waits until that one closes.')
+
+
+def backend_reinject_note(store, wake):
+    if not store.backend: return ''
+    notes = []
+    for o in store.list_occurrences(wake.id):
+        if o.state in {'pending', 'claimed'} and (count := int(store.get_meta(BACKEND_REINJECT_PREFIX+o.id) or 0)):
+            notes.append(f're-sent {count}× (app window not ready)')
+    return ' · '.join(notes)
 
 
 def refusal_detail(detail, platform):
@@ -228,6 +240,7 @@ class Tool:
                     return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w),
                         **({'no_ping_reason':no_ping_reason(e.store,s,e.policy,e.clock.now())}
                            if is_keep_warm(w) and w.status=='active' and w.next_due_at is None else {}),
+                        **({'delivery_note':note} if (note := backend_reinject_note(e.store,w)) else {}),
                         **({'handoff_to':target} if w.role and (target := e.store.get_meta('handoff_to:'+w.id)) else {})}
                         for w in e.store.list_wakes(s.session_key)]}
                 if action == 'desk':
@@ -579,7 +592,9 @@ class Tool:
             boundary=text.rfind('. ')
             text=(text[:boundary+1] if boundary>=0 else text)+'…'
         if w.role: text+=f' · role: runs until you or the agent end it (/pulse cancel {w.id})'
-        if e.store.backend and w.status == 'active': text+=' '+APP_BACKEND_RECEIPT
+        if e.store.backend and w.status == 'active':
+            text+=' '+APP_BACKEND_RECEIPT
+            if e.other_backend_delivers(): text+='\n'+OTHER_BACKEND_WINDOW
         return text
 
     def reschedule(self,w):

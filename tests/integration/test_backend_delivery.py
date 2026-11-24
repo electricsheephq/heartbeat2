@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import FakeClock
-from test_backend_wakes import ARM, CHAT
+from test_backend_wakes import ARM, CHAT, OTHER_WINDOW
 from test_engine import KEY, Runner
 
 
@@ -207,19 +207,29 @@ def test_gateway_and_backend_share_home(cluster, backend_first):
         assert backend('finish', CHAT, '')['ok']
 
 
-def test_non_holder_delivers_after_foreign_host_miss(cluster):
-    with cluster.serve(True) as holder, cluster.serve(True) as owner:
-        assert holder('acquire') and not owner('acquire')
-        assert owner('arm', CHAT, '')['armed']
-        owner('open', CHAT)
-        assert holder('tick', 61) == []
-        assert cluster.rows('SELECT state,error FROM occurrences') == [('pending', 'app_closed')]
-        calls, status = owner('bootstrap_tick', 61)
-        assert calls == [CHAT]
-        assert status == {'state': 'alive', 'reason': 'delivery only; scheduler lock held elsewhere'}
-        assert holder('tick', 5) == []
-        assert owner('tick', 5) == [CHAT]
-        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('claimed', 2)]
+def test_backend_holder_delivers_until_it_closes(cluster):
+    holder_chat = 'holder-chat'
+    with cluster.serve(True) as peer:
+        with cluster.serve(True) as holder:
+            assert holder('acquire') and not peer('acquire')
+            holder('open', holder_chat)
+            peer('open', CHAT)
+            assert OTHER_WINDOW not in holder('arm', holder_chat, '')['receipt']
+            assert OTHER_WINDOW in peer('arm', CHAT, '')['receipt'].splitlines()
+            assert holder('tick', 61) == [holder_chat]
+            assert cluster.rows('SELECT state,error FROM occurrences JOIN wakes ON wakes.id=wake_id '
+                                'WHERE session_key=?', CHAT) == [('pending', 'app_closed')]
+            calls, status = peer('bootstrap_tick', 61)
+            assert not calls
+            assert status == {'state': 'alive', 'reason': 'scheduler lock held elsewhere'}
+            assert OTHER_WINDOW in peer('command', CHAT, '', 'status').splitlines()
+            holder('start', holder_chat, '')
+            assert holder('finish', holder_chat, '')['ok']
+        assert peer('tick', 5) == [CHAT]
+        peer('start', CHAT, '')
+        assert peer('finish', CHAT, '')['ok']
+        assert peer('tick', 600) == [CHAT]
+        assert cluster.rows('SELECT state FROM occurrences') == [('done',), ('done',)]
 
 
 @pytest.mark.parametrize('started', [False, True])
@@ -243,44 +253,46 @@ def test_takeover_preserves_live_backend_claim(cluster, started):
 
 
 @pytest.mark.parametrize('started', [False, True])
-def test_non_holder_takeover_preserves_own_turn(cluster, started):
-    with cluster.serve(True) as holder, cluster.serve(True) as owner:
-        assert holder('acquire') and not owner('acquire')
+def test_backend_reacquires_and_preserves_own_turn(cluster, started):
+    with cluster.serve(True) as owner, cluster.serve(True) as holder:
+        assert owner('acquire')
         assert owner('arm', CHAT, '')['armed']
         owner('open', CHAT)
-        assert holder('tick', 61) == []
         assert owner('tick', 61) == [CHAT]
         if started:
             owner('start', CHAT, '')
+        owner('release')
+        assert holder('acquire')
         holder('release')
         assert owner('acquire')
         state = 'started' if started else 'claimed'
-        assert cluster.rows('SELECT state,attempt FROM occurrences') == [(state, 2)]
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [(state, 1)]
         if started:
             assert cluster.rows('SELECT busy_since IS NOT NULL FROM sessions') == [(1,)]
         else:
             owner('start', CHAT, '')
         assert owner('finish', CHAT, '')['ok']
         assert owner('tick', 601) == [CHAT]
-        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('done', 2)]
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('done', 1)]
 
 
 def test_non_holder_recovers_dropped_prompt(cluster):
-    with cluster.serve(True) as holder, cluster.serve(True) as owner:
-        assert holder('acquire') and not owner('acquire')
+    with cluster.serve(True) as owner, cluster.serve(True) as holder:
+        assert owner('acquire')
         assert owner('arm', CHAT, '')['armed']
         owner('open', CHAT)
-        assert holder('tick', 61) == []
         assert owner('tick', 61) == [CHAT]
-        # Hermes drops the queued prompt behind a running turn without running its start hook.
-        owner('start_human', CHAT, '')
         owner('drop', CHAT)
-        assert holder('tick', 599) == []
+        owner('release')
+        assert holder('acquire')
+        assert holder('tick', 660) == []
         assert owner('tick', 599) == [CHAT]
         assert cluster.rows('SELECT state FROM occurrences') == [('claimed',)]
         assert holder('tick', 2) == []
         assert cluster.rows('SELECT state FROM occurrences') == [('claimed',)]
-        owner('end_human', CHAT, '')
+        assert owner('tick', 2) == [CHAT]
+        assert cluster.rows('SELECT state,error FROM occurrences') == [('pending', 'app_closed')]
+        holder('release')
         assert owner('tick', 2) == [CHAT, CHAT]
         owner('start', CHAT, '')
         assert owner('finish', CHAT, '')['ok']
@@ -288,13 +300,14 @@ def test_non_holder_recovers_dropped_prompt(cluster):
 
 
 def test_non_holder_recovers_own_started_turn_at_ttl(cluster):
-    with cluster.serve(True) as holder, cluster.serve(True) as owner:
-        assert holder('acquire') and not owner('acquire')
+    with cluster.serve(True) as owner, cluster.serve(True) as holder:
+        assert owner('acquire')
         assert owner('arm', CHAT, '')['armed']
         owner('open', CHAT)
-        assert holder('tick', 61) == []
         assert owner('tick', 61) == [CHAT]
         owner('start', CHAT, '')
+        owner('release')
+        assert holder('acquire')
         assert holder('tick', 20000) == []
         assert cluster.rows('SELECT state FROM occurrences') == [('started',)]
         assert owner('tick', 20000) == [CHAT]
@@ -312,7 +325,7 @@ def test_backend_restart_refunds_false_accept(cluster):
         assert restarted('tick', 0) == [CHAT]
         assert cluster.rows("SELECT value FROM meta WHERE key LIKE 'accepted:%'") == [('1',)]
         restarted('open', CHAT)
-        assert restarted('tick', 59) == [CHAT]
+        assert restarted('tick', 599) == [CHAT]
         assert cluster.rows('SELECT state,attempt FROM occurrences') == [('claimed', 1)]
         assert restarted('tick', 1) == [CHAT]
         assert cluster.rows('SELECT state,error,attempt FROM occurrences') == [('pending', 'app_closed', 1)]
@@ -335,10 +348,9 @@ def test_backend_keeps_wake_queued_behind_busy_turn(cluster):
         # A human turn won the admission race after the dispatch check.
         owner('start_human', CHAT, '')
         assert cluster.rows('SELECT busy_since IS NOT NULL FROM sessions') == [(1,)]
-        assert owner('tick', 65) == [CHAT]
+        assert owner('tick', 599) == [CHAT]
         assert cluster.rows('SELECT state,attempt FROM occurrences') == [('claimed', 1)]
         owner('end_human', CHAT, '')
-        assert owner('tick', 5) == [CHAT]  # Queue handoff before the wake's start hook.
         owner('start', CHAT, '')
         assert owner('finish', CHAT, '')['ok']
         assert owner('tick', 601) == [CHAT]
@@ -363,8 +375,10 @@ def test_non_holder_recovers_retired_busy_epoch(cluster, reload_module):
         assert cluster.rows('SELECT busy_epoch FROM sessions') == [busy]
         assert holder('tick', 1) == []
         assert cluster.rows('SELECT busy_epoch FROM sessions') == [busy]
-        assert owner('tick', 1) == [CHAT]
+        assert owner('tick', 1) == []
         assert cluster.rows('SELECT busy_epoch FROM sessions') == [(None,)]
+        holder('release')
+        assert owner('tick', 1) == [CHAT]
         owner('start', CHAT, '')
         assert owner('finish', CHAT, '')['ok']
         assert cluster.rows('SELECT state FROM occurrences') == [('done',)]

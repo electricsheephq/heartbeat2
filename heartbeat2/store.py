@@ -25,6 +25,7 @@ from .schedule import local_day
 from .serving import backend_epoch_alive
 
 SCHEMA_VERSION = 1
+BACKEND_NOTICE_RESERVATION_S = 600
 HELD_REPORT_OUTCOMES = frozenset({'progress', 'done', 'needs_attention', 'blocked'})
 # The characters str.strip() removes, so SQL trim() agrees with Python on what a blank summary is.
 _WHITESPACE = ''.join(chr(c) for c in range(0x3001) if chr(c).isspace())
@@ -147,9 +148,10 @@ def _validate_wake(wake: Wake):
 # Keys that guard owner input against replay (human:, nonhuman:), and keys per wake, session or day, are never pruned here.
 # Nor is children:<occurrence id>:<attempt>: a recovered turn can stay bound to an old occurrence after gc removes its row,
 # and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
+BACKEND_REINJECT_PREFIX = 'backend_reinject:'
 OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'held_since:', 'ignored:', 'inject_failures:',
                             'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
-                            'stop_hint_offered:', 'supersede_on_refund:')
+                            'stop_hint_offered:', 'supersede_on_refund:', BACKEND_REINJECT_PREFIX)
 POLLER_META = frozenset({'epoch', 'poller_pid', 'poller_started_at', 'last_tick_at', 'last_tick_monotonic',
                          'probing_since', 'probing_epoch', 'probing_until', 'last_gc_at', 'last_error',
                          'outages', 'off_since', 'provider_health', 'stop_hint_shown'})
@@ -477,10 +479,16 @@ class Store:
         reservation = self.notify_reservation
         if reservation is not None and reservation[0] == key: return True
         if not self.backend: return False
-        return backend_epoch_alive(self.get_meta('backend:notice_in_flight:' + key))
+        value = self.get_meta('backend:notice_in_flight:' + key) or ''
+        epoch, _, reserved_at = value.partition('|')
+        try:
+            return (self.clock.now() - float(reserved_at) <= BACKEND_NOTICE_RESERVATION_S
+                    and backend_epoch_alive(epoch))
+        except ValueError:
+            return False  # Old epoch-only reservations have no usable deadline.
 
     def reserve_backend_notice(self, key, epoch):
-        if self.backend: self.set_meta('backend:notice_in_flight:' + key, epoch)
+        if self.backend: self.set_meta('backend:notice_in_flight:' + key, f'{epoch}|{self.clock.now()}')
 
     def release_backend_notice(self, key, epoch):
         if not self.backend: return
@@ -491,8 +499,9 @@ class Store:
                 timeout=self.connection.execute('PRAGMA busy_timeout').fetchone()[0]
                 self.connection.execute('PRAGMA busy_timeout=0')
             try:
-                self.connection.execute('DELETE FROM meta WHERE key=? AND value=?',
-                                        ('backend:notice_in_flight:' + key, epoch))
+                self.connection.execute("DELETE FROM meta WHERE key=? AND "
+                                        "(value=? OR substr(value,1,instr(value,'|')-1)=?)",
+                                        ('backend:notice_in_flight:' + key, epoch, epoch))
             finally:
                 if timeout is not None: self.connection.execute(f'PRAGMA busy_timeout={timeout}')
 

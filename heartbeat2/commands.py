@@ -1,4 +1,5 @@
 """Compact /pulse controls; gateway-bound session is the only authority."""
+from copy import copy
 from dataclasses import replace
 from datetime import datetime, timedelta
 import json
@@ -9,7 +10,7 @@ from . import governor
 from . import cache
 from .policy import BACKEND_SCHEDULE_ONLY, INJECTION_CONFIG, LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, platform_refusal, session_platform, owner_requested, agreed_watcher, cap_counts, is_keep_warm, is_watcher, sleeps
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
-from .tool import session_env, Infeasible, filter_text
+from .tool import session_env, Infeasible, filter_text, OTHER_BACKEND_WINDOW, backend_reinject_note
 
 DURATIONS = _DURATION.pattern+r'(?:\s*(?:,\s*)?(?:and\s*)?'+_DURATION.pattern+r')*'  # one way to split whitespace: linear
 LIST_RECENT_FINISHED = 10
@@ -160,6 +161,8 @@ def _item(engine, wake, today_budget=None):
     kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
     held = app_closed_hold(engine, wake)
     if not held and _sleeping(engine, wake): held = 'asleep until you write'
+    if note := backend_reinject_note(engine.store, wake):
+        held = ' · '.join(filter(None, (held, note)))
     return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) or agreed_watcher(wake) else '') + (f' · {STATUS_REASON_TEXT.get(wake.status_reason, wake.status_reason)}' if wake.status_reason else '') + (' · '+held if held else '')
 
 
@@ -357,6 +360,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
 def handle(raw_args, runtime):
     key = session_env('HERMES_SESSION_KEY')
     if not key or key == 'default': return 'Error: /pulse needs the invoking gateway session.'
+    gateway_view = None
     try:
         action, _, rest = (raw_args or 'status').strip().partition(' ')
         rest = rest.strip()
@@ -366,17 +370,29 @@ def handle(raw_args, runtime):
             from .tool import APP_BACKEND_REFUSAL
             return APP_BACKEND_REFUSAL
         engine.refresh()  # Never inside a transaction: refresh takes the policy lock before the store lock.
-        preview=engine.store.get_wake(rest) if action=='test' else None
-        cache_line=engine.tool.cache_result(preview) if preview and preview.session_key==key else ''
-        wake_cache=engine.cache_line(preview) if preview and preview.session_key==key else ''
         if engine.store.backend:
             session = engine.tool.identity(key=key)
             if session is None and arms and engine.tool.app_backend_unavailable(key=key):
                 from .tool import APP_BACKEND_REFUSAL
                 return APP_BACKEND_REFUSAL
-            if session is None or not engine.deliverable(session.platform):
+            if session is None and not arms and engine.store.get_meta('host:'+key) != 'backend':
+                from .store import Store
+                gateway_view = Store(engine.store.path, engine.clock, backend=False)
+                session = gateway_view.get_session(key)
+                if session is not None and session.platform in LOCAL_SURFACES:
+                    # Reuse the command handlers with a scoped view, without switching the live engine.
+                    engine = copy(engine)
+                    engine.store = gateway_view
+                    engine.tool = copy(engine.tool)
+                    engine.tool.engine = engine
+                else:
+                    return 'Error: /pulse needs a known app session.'
+            elif session is None or not engine.deliverable(session.platform):
                 return 'Error: /pulse needs a known app session.'
-        else:
+        preview=engine.store.get_wake(rest) if action=='test' else None
+        cache_line=engine.tool.cache_result(preview) if preview and preview.session_key==key else ''
+        wake_cache=engine.cache_line(preview) if preview and preview.session_key==key else ''
+        if not engine.store.backend and gateway_view is None:
             with engine.store.atomic():
                 session=engine.store.get_session(key)
                 bound={name:session_env('HERMES_SESSION_'+name.upper()) for name in ('platform','chat_type','chat_id')}
@@ -490,6 +506,8 @@ def handle(raw_args, runtime):
                 if engine.policy.own_time_hours or engine.store.get_meta('own_time_off:'+key)=='1' or engine.store.get_meta('own_time_on:'+key)=='1':
                     lines.append('Own time: '+own_time_label(engine,key))
                 if held: lines.append(f'Held items: {held}')
+                if engine.store.backend and held and engine.other_backend_delivers():
+                    lines.append(OTHER_BACKEND_WINDOW)
                 if engine.settings_notice(): lines.append(engine.settings_notice())
                 if cache.ttl_for_session(engine.store,session)==(300,'hermes'):
                     lines.append('your Claude cache lasts 5 min, so every wake is cold; set `prompt_caching: {cache_ttl: auto}` (1h for chat) in config.yaml')
@@ -582,6 +600,8 @@ def handle(raw_args, runtime):
         return 'Error: '+str(exc)
     except Exception:
         return 'Error: HeartBeat 2.0 is unavailable.'
+    finally:
+        if gateway_view is not None: gateway_view.close()
 
 
 def _transition(engine,session,wake,action,seconds):

@@ -24,15 +24,15 @@ HOLD_LABELS = {
 # A late owner reminder says so once it is this late (#230); smaller delays are normal scheduling.
 LATE_NOTE_S = 15 * 60
 
-def _age(seconds: float) -> str:
+def _age(seconds: float, *, minute_suffix: str = 'm') -> str:
     minutes = max(0, int(seconds // 60))
     days, minutes = divmod(minutes, 1440)
     hours, minutes = divmod(minutes, 60)
     if days:
         return f"{days}d" + (f" {hours:02d}h" if hours else "")
     if hours:
-        return f"{hours}h" + (f" {minutes:02d}m" if minutes else "")
-    return f"{minutes}m"
+        return f"{hours}h" + (f" {minutes:02d}{minute_suffix}" if minutes else "")
+    return f"{minutes}{minute_suffix}"
 
 
 def escape_text(text: str) -> str:
@@ -65,7 +65,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
                 held_by: str = "", message_held: str = "", cache_line: str = "", marker_tag: str | None = None,
                 desk: str = "", handoffs: str = "", held_reports: str = "", late_window_s: float | None = None,
                 downtime_s: float | None = None, stop_hint: str = 'once', stop_hint_shown: bool | None = None,
-                stop_hint_chat_shown: bool | None = None) -> str:
+                stop_hint_chat_shown: bool | None = None, backend_reinject: bool = False) -> str:
     now = clock.now()
     local = datetime.fromtimestamp(now, zone(timezone))
     label = ("role" if wake.role else "check-in" if wake.kind == "owner_silent"
@@ -76,7 +76,8 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
     if held_by in HOLD_LABELS:
         why += f" (held by {HOLD_LABELS[held_by]}" + (" after restart" if after_restart else "") + ")"
     if (held_by not in HOLD_LABELS or held_by == 'app_closed') and late_by_s is not None and late_by_s >= 60:
-        why += f" (late by {_age(late_by_s)}" + (" after restart" if after_restart else "") + ")"
+        late_age = _age(late_by_s, minute_suffix=' min' if backend_reinject else 'm')
+        why += f" (late by {late_age}" + (" after restart" if after_restart else "") + ")"
     owner_clause = f" · owner last wrote {owner_age} ago" if session.last_human_at is not None else ""
     fire_limit = 1 if wake.kind == "at" else wake.max_fires if wake.max_fires is not None else "∞"
     tz_name = getattr(local.tzinfo, "key", None) or local.tzname()
@@ -88,7 +89,7 @@ def render_wake(wake: Wake, occurrence: Occurrence, session: Session, *, clock: 
         f"Why: {escape_text(why)}", f"Your note: {escape_text(wake.note)}",
     ]
     # The owner's own one-time reminder after downtime (#230): late, it says so; past the late window it reports the miss.
-    # Only downtime counts (how late it was when it came due again); deliberate holds after that keep their own label.
+    # For a backend resend, the wait to start counts like downtime. Other holds keep their own label.
     missed = False
     if late_window_s is not None and late_by_s is not None and downtime_s is not None and downtime_s > LATE_NOTE_S:
         due_local = datetime.fromtimestamp(now - late_by_s, zone(timezone))

@@ -432,5 +432,7 @@ def test_backend_role_loss_keeps_own_ack_recovery(backend_runtime):
     assert until(lambda: not holds(rt), timeout=2)
     rt.clock.advance(601)
     assert until(lambda: e.store.get_occurrence(o.wake_id, o.dedupe_key).state == 'pending', timeout=2)
-    assert e.store.get_occurrence(o.wake_id, o.dedupe_key).error == 'ack_timeout'
+    assert e.store.get_occurrence(o.wake_id, o.dedupe_key).error == 'app_closed'
+    assert e.store.get_meta('accepted:'+o.id) == '0'
+    assert e.store.get_meta('held_since:'+o.id)
     assert len(e.ctx.calls) == 1
