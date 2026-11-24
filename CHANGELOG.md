@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.34 — 2026-11-24
+
+- **A Desktop chat that can't receive wakes now says why.** In chats that the Desktop app's own chat backend serves (`hermes serve`), Hermes gives plugins no session platform and doesn't deliver plugin turns, so a wake armed there would be accepted and never run. HeartBeat keeps refusing `create` there, and the refusal now says why and how to arm the wake from a messaging chat instead of an empty `non_gateway`. (#233)
+
 ## 0.4.33 — 2026-11-23
 
 - **The keep-warm notice comes only with a message you send.** In 0.4.32 a reaction could let the next turn the agent started on its own pick up the "keep-warm can't ping" line, and role turns saw it on their desk. Now the agent gets it only on a message you send, and the desk no longer lists it; `/pulse warm`, `/pulse status` and `/pulse list` still say why no ping is due. After a model switch the new model's route gets its own two hours, and a line about the old route that you hadn't seen yet is dropped. (#234)

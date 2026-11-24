@@ -380,3 +380,18 @@ def test_command_in_stored_cli_or_api_chat_gives_its_refusal(engine, monkeypatch
     session(engine, platform=stored)
     bind(monkeypatch, 'local')
     assert commands.handle(action, SimpleNamespace(get_engine=lambda:engine)) == expected
+
+
+@pytest.mark.parametrize('source,expected', [('desktop', tool.APP_BACKEND_REFUSAL), ('tui', tool.APP_BACKEND_REFUSAL), ('', '')])
+def test_desktop_chat_backend_refusal_says_why(engine, monkeypatch, source, expected):
+    """#233: Hermes's Desktop chat backend gives plugin tools an empty platform and surface, only the source. Wakes
+    can't be delivered there yet, so create stays refused, now with a reason and the workaround."""
+    key = '20261124_120000_abcd'
+    engine.tool.session_key_fn = lambda: key
+    values = {'KEY': key, 'PLATFORM': '', 'SOURCE': source, 'CHAT_TYPE': '', 'CHAT_ID': '', 'ID': 'sid'}
+    env = lambda name: values.get(name.removeprefix('HERMES_SESSION_'), '')
+    monkeypatch.setattr(tool, 'session_env', env)
+    monkeypatch.setattr(commands, 'session_env', env)
+    monkeypatch.setattr(engine.ctx, 'session_surface', lambda: '', raising=False)
+    result = engine.tool.handle(CREATE)
+    assert result['error'] == 'non_gateway' and result.get('detail', '') == expected
