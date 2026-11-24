@@ -276,7 +276,7 @@ def test_backend_reacquires_and_preserves_own_turn(cluster, started):
         assert cluster.rows('SELECT state,attempt FROM occurrences') == [('done', 1)]
 
 
-def test_non_holder_recovers_dropped_prompt(cluster):
+def test_non_holder_holds_dropped_prompt_until_completed_turn(cluster):
     with cluster.serve(True) as owner, cluster.serve(True) as holder:
         assert owner('acquire')
         assert owner('arm', CHAT, '')['armed']
@@ -291,8 +291,11 @@ def test_non_holder_recovers_dropped_prompt(cluster):
         assert holder('tick', 2) == []
         assert cluster.rows('SELECT state FROM occurrences') == [('claimed',)]
         assert owner('tick', 2) == [CHAT]
-        assert cluster.rows('SELECT state,error FROM occurrences') == [('pending', 'app_closed')]
+        assert cluster.rows('SELECT state,error FROM occurrences') == [('claimed', 'app_closed')]
         holder('release')
+        assert owner('tick', 2) == [CHAT]
+        owner('start_human', CHAT, '')
+        owner('end_human', CHAT, '')
         assert owner('tick', 2) == [CHAT, CHAT]
         owner('start', CHAT, '')
         assert owner('finish', CHAT, '')['ok']
@@ -315,7 +318,7 @@ def test_non_holder_recovers_own_started_turn_at_ttl(cluster):
         assert cluster.rows('SELECT busy_since FROM sessions') == [(None,)]
 
 
-def test_backend_restart_refunds_false_accept(cluster):
+def test_backend_restart_retries_false_accept_after_completed_turn(cluster):
     with cluster.serve(True) as original:
         assert original('acquire')
         assert original('arm', CHAT, '')['armed']
@@ -328,8 +331,10 @@ def test_backend_restart_refunds_false_accept(cluster):
         assert restarted('tick', 599) == [CHAT]
         assert cluster.rows('SELECT state,attempt FROM occurrences') == [('claimed', 1)]
         assert restarted('tick', 1) == [CHAT]
-        assert cluster.rows('SELECT state,error,attempt FROM occurrences') == [('pending', 'app_closed', 1)]
-        assert cluster.rows("SELECT value FROM meta WHERE key LIKE 'accepted:%'") == [('0',)]
+        assert cluster.rows('SELECT state,error,attempt FROM occurrences') == [('claimed', 'app_closed', 1)]
+        assert restarted('tick', 601) == [CHAT]
+        restarted('start_human', CHAT, '')
+        restarted('end_human', CHAT, '')
         assert restarted('tick', 5) == [CHAT, CHAT]
         restarted('start', CHAT, '')
         assert restarted('finish', CHAT, '')['ok']

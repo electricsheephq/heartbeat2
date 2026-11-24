@@ -18,7 +18,7 @@ import uuid
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, agreed_watcher, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
-from .store import BACKEND_ENDED_TURN_PREFIX, BACKEND_REINJECT_PREFIX
+from .store import BACKEND_COMPLETED_TURN_PREFIX, BACKEND_REINJECT_PREFIX
 from . import governor, serving
 
 LOG = logging.getLogger('heartbeat2')
@@ -217,6 +217,9 @@ class Poller:
             for o in s.list_occurrences() if self.process_start else []:
                 if o.state in {'claimed','started'} and s.backend:
                     if self._own_claim(o) or self._foreign_backend_claim(o): continue
+                    if o.state=='claimed':
+                        self._resend_backend_claim(o,'restart_refund')
+                        continue
                 if o.state=='claimed':
                     self.refund_claimed(o,'restart_refund')
                     s.set_meta('recovered:'+o.id,'1')
@@ -450,16 +453,20 @@ class Poller:
                 s.cas_session(session.session_key,{'busy_since':session.busy_since,'last_activity_at':session.last_activity_at},busy_since=None,busy_epoch=None)
         for o in s.list_occurrences(state='claimed'):
             if own_only and not self._own_claim(o): continue
-            if self._foreign_backend_claim(o): continue
-            if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
-            if s.backend and (accepted:=int(s.get_meta('accepted:'+o.id) or 0)):
+            if s.backend:
                 w=s.get_wake(o.wake_id)
-                session=s.get_session(w.session_key)
-                busy=session and session.busy_since is not None and (
-                    not session.busy_epoch or serving.backend_epoch_alive(session.busy_epoch))
-                if not busy or o.error=='app_closed':
-                    self._backend_ack_timeout(w,o,accepted,busy)
-                    continue
+                if not own_only and not (self._own_claim(o) or self._foreign_backend_claim(o)):
+                    self._resend_backend_claim(o,'restart_refund')
+                    session=s.get_session(w.session_key)
+                    busy_epoch=session.busy_epoch if session else None
+                    if (busy_epoch and busy_epoch.startswith(f'{o.pid}:')
+                            and not serving.backend_epoch_alive(busy_epoch)):
+                        s.cas_session(w.session_key,{'busy_since':session.busy_since,'busy_epoch':busy_epoch},
+                                      busy_since=None,busy_epoch=None)
+                else:
+                    self._backend_ack(w,o,now)
+                continue
+            if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
                 if self.supersede_claimed(o): continue
                 s.cas_occurrence(o.wake_id,o.dedupe_key,'claimed','dead',attempt=o.attempt,error='ack_timeout')
@@ -468,49 +475,52 @@ class Poller:
                 governor.error(self,s.get_wake(o.wake_id))
             else: self.refund_claimed(o,'ack_timeout')
 
-    def _backend_ack_timeout(self,w,o,accepted,busy):
+    def _backend_ack(self,w,o,now):
         s=self.store
         resend=s.backend_reinject_state(o.id)
-        # A True return can represent a queued prompt. Give a dropped prompt
-        # one timed resend, then require progress in this chat after acceptance.
-        if not busy:
-            if not resend.get('count'):
-                self._hold_backend_app_closed(w,o,resend=resend,accepted=accepted)
-                return
-            last_accept=resend.get('accepted_at')
-            if last_accept is None:
-                # Older claims lack the accept timestamp. Start observing now.
-                resend['accepted_at']=self.clock.now()
+        accepted_at=resend.get('accepted_at')
+        if accepted_at is None:
+            if o.claimed_at is None or now-o.claimed_at<600: return
+            if int(s.get_meta('accepted:'+o.id) or 0):
+                # Older claims may lack the accept time. Only new turn evidence is safe.
+                resend['accepted_at']=now
                 s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
-            elif (ended_start:=s.get_meta(BACKEND_ENDED_TURN_PREFIX+w.session_key)) is not None and float(ended_start)>last_accept:
-                self._hold_backend_app_closed(w,o,resend=resend,accepted=accepted)
+        else:
+            if now-accepted_at<600 and o.error!='app_closed': return
+            completed_start=s.get_meta(BACKEND_COMPLETED_TURN_PREFIX+w.session_key)
+            if completed_start is not None and float(completed_start)>accepted_at:
+                self._resend_backend_claim(o,'app_closed')
                 return
+        # An accepted prompt may still be queued. The clock alone cannot retire it.
         self._hold_backend_app_closed(w,o,keep_claim=True)
 
-    def _hold_backend_app_closed(self,w,o,*,resend=None,accepted=0,keep_claim=False):
+    def _resend_backend_claim(self,o,error):
+        s=self.store
+        with s.atomic():
+            if self.supersede_claimed(o) or not s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error=error): return
+            resend=s.backend_reinject_state(o.id)
+            resend.pop('accepted_at',None)
+            resend['due']=True
+            s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
+            s.set_meta('accepted:'+o.id,'0')
+
+    def _hold_backend_app_closed(self,w,o,*,keep_claim=False):
         from .notifier import episode, episode_over, end_episode, EPISODE_PREFIX
         s=self.store
         key=w.session_key
         with s.atomic():
+            new_accepted_hold=keep_claim and o.error!='app_closed'
             if keep_claim:
-                if o.error!='app_closed' and not s.update_occurrence(
+                if new_accepted_hold and not s.update_occurrence(
                         o.wake_id,o.dedupe_key,'claimed',attempt=o.attempt,error='app_closed'): return
             elif not self.refund_claimed(o,'app_closed'): return
             now=self.clock.now()
-            if resend is not None:
-                s.set_meta('accepted:'+o.id,str(accepted-1))
-                s.set_meta('not_before:'+o.id,str(now+1))
-                resend['due']=True
-                s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
-                session=s.get_session(key)
-                if session and session.busy_since is not None:
-                    s.cas_session(key,{'busy_epoch':session.busy_epoch,'busy_since':session.busy_since},
-                                  busy_since=None,busy_epoch=None)
-            elif not keep_claim:
+            if not keep_claim:
                 # A miss in this registry does not delay a successor with the chat open.
                 self._app_closed_until[o.id]=now+60
             if episode_over(self,key): end_episode(self,key)
-            if not s.get_meta('held_since:'+o.id): s.set_meta('held_since:'+o.id,str(now))
+            if new_accepted_hold or not s.get_meta('held_since:'+o.id):
+                s.set_meta('held_since:'+o.id,str(now))
             if not is_keep_warm(w) and not s.get_meta(EPISODE_PREFIX+key):
                 s.set_meta(EPISODE_PREFIX+key,json.dumps(episode(self,key)))
 
@@ -1082,7 +1092,7 @@ class Poller:
             return
         # Check again at the claim barrier, not just at tick entry.
         if self.paused() or not self.policy.enabled: return
-        if int(s.get_meta('accepted:'+o.id) or 0)>=3:
+        if not s.backend and int(s.get_meta('accepted:'+o.id) or 0)>=3:
             s.cas_occurrence(w.id,o.dedupe_key,'pending','dead',error='ack_timeout')
             self.notice(w.session_key,'A wake was not acknowledged after three attempts.')
             self.terminal_one_shot(s.get_wake(w.id))
@@ -1166,11 +1176,14 @@ class Poller:
                     from .notifier import end_episode
                     end_episode(self,session.session_key)
                 s.set_meta('held_since:'+o.id,'')
-            elif resend:=s.backend_reinject_state(o.id):
-                if resend.pop('due',False): resend['count']=resend.get('count',0)+1
-                resend['accepted_at']=self.clock.now()
-                s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
-            s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))
+                s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))
+            else:
+                with s.atomic():
+                    resend=s.backend_reinject_state(o.id)
+                    if resend.pop('due',False): resend['count']=resend.get('count',0)+1
+                    resend['accepted_at']=self.clock.now()
+                    s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
+                    s.set_meta('accepted:'+o.id,'1')
             flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]
             s.set_meta('injections',json.dumps(flood+[self.clock.now()]))
             # A silent ping isn't a wake turn: it must not push the chat's real wakes back by wake spacing.
@@ -1238,13 +1251,13 @@ class Poller:
             held_by='app_closed'
             reminder=reminder or agreed_watcher(w)
             matched_at=o.matched_at if o.matched_at is not None else o.created_at
-            if late is None and matched_at: late=max(0,self.clock.now()-matched_at)
+            if late is None and matched_at is not None: late=max(0,self.clock.now()-matched_at)
             if late is not None: downtime=late
         return render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              stop_hint=self.policy.stop_hint,stop_hint_shown=shown=='1',stop_hint_chat_shown=chat_shown=='1',
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-int(not o.force_silent and o.state in {'claimed','started'}),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
-             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
+             after_restart=not backend_reinject and bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
              late_window_s=self.policy.late_window_s() if reminder else None,downtime_s=downtime,
              backend_reinject=backend_reinject,
              cache_line=cache_line,marker_tag=tag,handoffs=handoffs,held_reports=held_reports,

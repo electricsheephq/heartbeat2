@@ -150,7 +150,8 @@ def _validate_wake(wake: Wake):
 # Nor is children:<occurrence id>:<attempt>: a recovered turn can stay bound to an old occurrence after gc removes its row,
 # and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
 BACKEND_REINJECT_PREFIX = 'backend_reinject:'
-BACKEND_ENDED_TURN_PREFIX = 'backend:last_ended_turn_start:'
+# Older end stamps included failed turns and cannot authorize a resend.
+BACKEND_COMPLETED_TURN_PREFIX = 'backend:last_completed_turn_start:'
 OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'held_since:', 'ignored:', 'inject_failures:',
                             'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
                             'stop_hint_offered:', 'supersede_on_refund:', BACKEND_REINJECT_PREFIX)

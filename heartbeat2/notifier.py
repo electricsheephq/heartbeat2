@@ -100,11 +100,13 @@ def notifier_for(engine):
 import json
 import uuid
 from datetime import datetime, timedelta
-from .policy import LOCAL_SURFACES, is_keep_warm
+from .policy import LOCAL_SURFACES, agreed_watcher, is_keep_warm, owner_requested
 from .schedule import local_day
 
 NOTIFY_AFTER_S = 600
+ACCEPTED_NOTIFY_AFTER_S = 900
 EPISODE_PREFIX = 'notify_episode:'
+ACCEPTED_HOLD_TEXT = 'Runs after the next message in that chat, or retries if the app restarts.'
 
 
 def held_wakes(engine, key):
@@ -121,6 +123,23 @@ def held_wakes(engine, key):
             stamp = engine.store.get_meta('held_since:'+o.id)
             if stamp: rows.append((w, o, float(stamp)))
     return rows
+
+
+def _backend_notice_deadlines(rows):
+    for row in rows:
+        wake, occurrence, since = row
+        if occurrence.state == 'pending':
+            yield row, since + NOTIFY_AFTER_S
+        elif owner_requested(wake) or agreed_watcher(wake) or wake.urgent:
+            yield row, since + ACCEPTED_NOTIFY_AFTER_S
+
+
+def _ready_backend_notices(rows, now):
+    ready = [row for row, deadline in _backend_notice_deadlines(rows) if now >= deadline]
+    # A due closed-window notice keeps its existing text and grouping for injector refusals.
+    if any(o.state == 'pending' for _, o, _ in ready):
+        return [row for row in rows if row[1].state == 'pending']
+    return ready
 
 
 def stamped(engine, key):
@@ -200,17 +219,23 @@ def _gate(engine, chat, data, now):
 def notice_state(engine, key):
     chat=engine.store.get_session(key)
     if chat is None or chat.platform not in LOCAL_SURFACES: return ''
-    data=episode(engine,key)
+    rows=held_wakes(engine,key)
+    data=episode(engine,key,rows)
     if data is None: return ''
     error=' · '+data['error'][:80] if data.get('error') else ''
     if 'queued' in data: return 'queued at '+_time(engine,data['queued'])
+    if engine.store.backend:
+        ready_at=min((deadline for _,deadline in _backend_notice_deadlines(rows)),default=None)
+        if ready_at is None: return ''
+    else:
+        ready_at=data['since']+NOTIFY_AFTER_S
     if data.get('failed') or data.get('first') is not None and engine.clock.now()-data['first'] >= 86400:
         return 'notify failed'+error
     reason,until=_gate(engine,chat,data,engine.clock.now())
     if reason and until is None: return reason
     if until is not None: return 'waiting until '+_time(engine,until)+' ('+reason+')'+error
     if data.get('state') in {'may repeat','notifier not ready'}: return data['state']+error
-    return 'waiting until '+_time(engine,max(data['since']+NOTIFY_AFTER_S,data.get('next',0)))+error
+    return 'waiting until '+_time(engine,max(ready_at,data.get('next',0)))+error
 
 
 def notifier_line(engine, key=None):
@@ -226,6 +251,16 @@ def notifier_line(engine, key=None):
 
 
 def notice_text(engine, chat, rows, since):
+    surface='Desktop' if chat.platform=='desktop' else 'TUI'
+    if engine.store.backend and rows[0][1].state=='claimed':
+        from .commands import _clip, _oneline
+        wakes={w.id: w for w,_,_ in rows}
+        if len(wakes)>1:
+            return (f"{len(wakes)} wakes are due but their {surface} chat isn't ready; "
+                    "they'll run on your next message there.")
+        wake=next(iter(wakes.values()))
+        title=_oneline(wake.title) or _clip(_oneline(wake.note),60)
+        return f"{title} is due but its {surface} chat isn't ready; it'll run on your next message there."
     try:
         from hermes_constants import profile_name_for_home
         profile=profile_name_for_home(engine.ctx._manager.home_path) or 'default'
@@ -233,7 +268,6 @@ def notice_text(engine, chat, rows, since):
     # Profile names are local metadata, never wake-provided text. Bound even malformed host metadata.
     profile=' '.join(str(profile).split())[:64]
     when=datetime.fromtimestamp(since,engine.policy.resolved_timezone()).strftime('%H:%M %Z')[:32]
-    surface='Desktop' if chat.platform=='desktop' else 'TUI'
     prefix=f"HeartBeat: {len({w.id for w,_,_ in rows})} wake(s) in "
     suffix=(f"'s {surface} chat have been waiting since {when} because the app window is closed. "
             'Open that chat to let them run.')
@@ -283,7 +317,10 @@ class NotificationWorker:
                 if data.get('first') is not None and now-data['first']>=86400 and 'queued' not in data:
                     data['failed']=True
                 s.set_meta(EPISODE_PREFIX+key,json.dumps(data))
-                if 'queued' in data or data.get('failed') or now<data['since']+NOTIFY_AFTER_S or now<data.get('next',0): continue
+                if 'queued' in data or data.get('failed') or now<data.get('next',0): continue
+                if s.backend:
+                    if not _ready_backend_notices(rows,now): continue
+                elif now<data['since']+NOTIFY_AFTER_S: continue
                 if self.job is not None or _gate(engine,chat,data,now)[0]: continue
                 transport=notifier_for(engine)
                 if transport is None: continue
@@ -339,6 +376,10 @@ class NotificationWorker:
             data=json.loads(s.get_meta(EPISODE_PREFIX+key) or '{}')
             chat=s.get_session(key)
             rows=held_wakes(engine,key)
+            since=data.get('since')
+            if s.backend:
+                rows=_ready_backend_notices(rows,engine.clock.now())
+                if rows: since=min(row[2] for row in rows)
             # Exclude our own reservation while rechecking the cap.
             s.notify_reservation=None
             if s.backend and (s.notice_reserved(key) or 'queued' in data or engine.clock.now()<data.get('next',0)): return
@@ -352,7 +393,7 @@ class NotificationWorker:
             data['next']=now+(300 if data['attempts']<3 else 3600)
             s.set_meta(EPISODE_PREFIX+key,json.dumps(data))
             target=engine.policy.notify_via.split(':',1)[1]
-            text=notice_text(engine,chat,rows,data['since'])
+            text=notice_text(engine,chat,rows,since)
             wake=rows[0][0]
         try:
             from .registration import home_scope

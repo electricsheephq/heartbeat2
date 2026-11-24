@@ -106,6 +106,16 @@ def backend_reinject_note(store, wake):
     return ' · '.join(notes)
 
 
+def backend_delivery_note(store, wake):
+    if not store.backend: return ''
+    from .notifier import ACCEPTED_HOLD_TEXT
+    resend = backend_reinject_note(store, wake)
+    if wake.status == 'active' and any(o.error == 'app_closed' and store.get_meta('held_since:'+o.id)
+            for o in store.list_occurrences(wake.id, state='claimed')):
+        return ' · '.join(filter(None, (ACCEPTED_HOLD_TEXT, resend)))
+    return resend
+
+
 def refusal_detail(detail, platform):
     """#233: in the Desktop app's own chat backend (hermes serve) Hermes gives plugin tools no platform and no surface, only the
     session's source, and HeartBeat's scheduler only runs in a messaging gateway, so a wake armed there would never fire. The
@@ -239,7 +249,7 @@ class Tool:
                     return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w),
                         **({'no_ping_reason':no_ping_reason(e.store,s,e.policy,e.clock.now())}
                            if is_keep_warm(w) and w.status=='active' and w.next_due_at is None else {}),
-                        **({'delivery_note':note} if (note := backend_reinject_note(e.store,w)) else {}),
+                        **({'delivery_note':note} if (note := backend_delivery_note(e.store,w)) else {}),
                         **({'handoff_to':target} if w.role and (target := e.store.get_meta('handoff_to:'+w.id)) else {})}
                         for w in e.store.list_wakes(s.session_key)]}
                 if action == 'desk':

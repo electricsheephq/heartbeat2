@@ -424,15 +424,15 @@ def test_backend_role_loss_silences_and_settles_wake(backend_runtime, flip_befor
     assert not rt.get_engine().store.backend
 
 
-def test_backend_role_loss_keeps_own_ack_recovery(backend_runtime):
+def test_backend_role_loss_keeps_own_accepted_claim_held(backend_runtime):
     rt, e = backend_runtime
     o, = e.store.list_occurrences()
     assert o.state == 'claimed'
     e.ctx._manager.has_tui_message_injector = False
     assert until(lambda: not holds(rt), timeout=2)
     rt.clock.advance(601)
-    assert until(lambda: e.store.get_occurrence(o.wake_id, o.dedupe_key).state == 'pending', timeout=2)
-    assert e.store.get_occurrence(o.wake_id, o.dedupe_key).error == 'app_closed'
-    assert e.store.get_meta('accepted:'+o.id) == '0'
+    assert until(lambda: e.store.get_occurrence(o.wake_id, o.dedupe_key).error == 'app_closed', timeout=2)
+    assert e.store.get_occurrence(o.wake_id, o.dedupe_key).state == 'claimed'
+    assert e.store.get_meta('accepted:'+o.id) == '1'
     assert e.store.get_meta('held_since:'+o.id)
     assert len(e.ctx.calls) == 1

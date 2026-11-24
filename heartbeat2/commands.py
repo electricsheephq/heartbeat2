@@ -170,6 +170,12 @@ def app_closed_hold(engine, wake):
     if wake.platform not in LOCAL_SURFACES or wake.status != 'active' or is_keep_warm(wake): return ''
     since = [float(stamp) for o in engine.store.list_occurrences(wake.id, state='pending')
              if o.error == 'app_closed' and (stamp := engine.store.get_meta('held_since:'+o.id))]
+    if engine.store.backend:
+        from .notifier import ACCEPTED_HOLD_TEXT
+        accepted = [float(stamp) for o in engine.store.list_occurrences(wake.id, state='claimed')
+                    if o.error == 'app_closed' and (stamp := engine.store.get_meta('held_since:'+o.id))]
+        if accepted:
+            return 'held since '+_time(engine,min(accepted))+' · '+ACCEPTED_HOLD_TEXT
     return 'held: app window is closed · since '+_time(engine,min(since)) if since else ''
 
 
@@ -283,7 +289,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             off=(('plugin_off',True,None) if not engine.policy.enabled else ('paused_all',True,None) if engine.paused() else None)
             # Dispatch walks waiting occurrences in order and sends the first that passes; if none passes, the first one's reason applies.
             # One accepted three times without an acknowledgement passes the gate but is dropped at the claim, and the walk goes on.
-            unacknowledged=lambda c:int(engine.store.get_meta('accepted:'+c.id) or 0)>=3
+            unacknowledged=lambda c:not engine.store.backend and int(engine.store.get_meta('accepted:'+c.id) or 0)>=3
             dies=lambda c:bool(waiting) and unacknowledged(c)
             # Each drop counts as an error, and enough in a row pause the wake before its next turn is sent; the
             # report-back is never paused (governor.error).
