@@ -126,9 +126,11 @@ def rearm_failed_wake(engine, key, sid):
     w,o,data=latest
     if data.get('rearmed'): return
     s.create_wake(Wake(key,w.note,'at',platform=w.platform,chat_type=w.chat_type,chat_id=w.chat_id,
-                       armed_session_id=sid,creator='user',title=w.title,reason=w.reason,urgent=w.urgent,
+                       armed_session_id=sid,creator=w.creator,owner_requested=w.owner_requested,
+                       title=w.title,reason=w.reason,urgent=w.urgent,
                        cancel_on_reply=w.cancel_on_reply,next_due_at=now))
     s.set_meta(FAILURE_NOTICE_PREFIX+o.id,json.dumps({**data,'rearmed':True}))
+    return ' '.join(w.title.split()) or 'Your wake'
 
 
 def held_wakes(engine, key, *, include_paused=False):
@@ -314,10 +316,10 @@ def notifier_line(engine, key=None):
 
 
 def notice_text(engine, chat, rows, since):
+    surface='Desktop' if chat.platform=='desktop' else 'TUI'
     if rows[0][0].status=='failed':
         title=' '.join(rows[0][0].title.split()) or 'Your wake'
-        return f"{title} didn't run; reply 'again' to retry"
-    surface='Desktop' if chat.platform=='desktop' else 'TUI'
+        return f"{title} didn't run; say 'again' in its {surface} chat to retry"
     if engine.store.backend and rows[0][1].state=='claimed':
         from .commands import _clip, _oneline
         wakes={w.id: w for w,_,_ in rows}

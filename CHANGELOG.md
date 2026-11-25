@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- A one-time app wake cut by Hermes' watchdog before any model call is re-sent once. (#241)
-- Failed one-time owner and urgent app wakes send a notice through the configured notifier, including after a failed retry. (#241)
-- Reply `again` in the original app chat within 24 hours of the failure notice to arm a fresh one-time wake. (#241)
+- A one-time app wake cut by Hermes' watchdog before any model call is re-sent once if HeartBeat recorded no provider error. (#241)
+- If a one-time owner or urgent app wake fails to start or is interrupted unexpectedly, its notice names the Desktop or TUI chat where you can retry. (#241)
+- Say `again` in the original app chat within 24 hours of the failure notice. The agent acknowledges the request and the re-queued wake runs in its own turn. (#241)
+- If the app crashes or its backend exits while a wake's turn runs, Hermes reports it like Stop, so HeartBeat can't tell the owner it didn't run. (#241)
 - Accepted Desktop and TUI wakes send a heads-up 15 minutes after they were due, or after acceptance if it came earlier. (#241)
 - Reminders you set with `/pulse add` now qualify for the accepted-wake heads-up. (#241)
 - If you write in the chat and the wake is still held, a repeat heads-up waits 15 minutes into the new wait. (#241)

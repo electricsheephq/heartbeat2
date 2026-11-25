@@ -1311,7 +1311,8 @@ class Poller:
                 return
             ended=self.store.cas_wake(w.id,w.status,expected_version=w.version,
                 status='failed',status_reason=o.state+(':'+o.error if o.error else ''))
-            if ended and self.store.backend and o.error!='app_invalidation' and (owner_class(w) or w.urgent):
+            if (ended and self.store.backend and (owner_class(w) or w.urgent)
+                    and (o.state=='dead' or o.state=='interrupted' and o.error!='app_invalidation')):
                 self.store.set_meta(FAILURE_NOTICE_PREFIX+o.id,json.dumps({'id':'failed:'+o.id,'attempts':0}))
 
     def interrupt(self,o,cause,*,count_error=True):
@@ -1319,7 +1320,8 @@ class Poller:
         s=self.store
         with s.atomic():
             provider=s.get_meta('provider_error:'+o.id)
-            if (s.backend and cause=='watchdog' and not o.api_calls and one_shot(w:=s.get_wake(o.wake_id)) and w.status=='active'
+            if (s.backend and cause=='watchdog' and not o.api_calls and not provider
+                    and one_shot(w:=s.get_wake(o.wake_id)) and w.status=='active'
                     and not s.backend_reinject_state(o.id).get('watchdog_attempt') and self._resend_backend_claim(o,cause)):
                 self.refund_model_count(o)
                 s.cas_wake(w.id,w.status,fires=max(0,w.fires-1))

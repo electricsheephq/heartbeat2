@@ -711,13 +711,14 @@ class Intake:
             # Human turn context never turns a model call into a wake.
             flight=self.flights.pop(session_id,None)
             self._drop_children(flight)
+            lines=[]
             if (s.backend and isinstance(user_message,str) and user_message.strip().casefold()=='again'
                     and not (isinstance(row,dict) and row.get('display_kind'))):
                 from .notifier import rearm_failed_wake
-                rearm_failed_wake(e,key,session_id)
-            if not s.get_meta('human_context:'+key): return None
+                if title:=rearm_failed_wake(e,key,session_id):
+                    lines.append(f"HeartBeat re-queued '{title}'; it runs as its own turn next, so only acknowledge.")
+            if not s.get_meta('human_context:'+key): return {'context':lines[0]} if lines else None
             s.set_meta('human_context:'+key,'')
-            lines=[]
             from .desk import held_report_lines
             owner_session=s.get_session(key)
             # While HeartBeat may not speak into this chat (off, estop, no injection consent, dm_only, not a gateway chat),
