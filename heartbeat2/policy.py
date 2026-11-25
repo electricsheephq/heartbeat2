@@ -11,7 +11,7 @@ from typing import Mapping, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .clock import Clock, SystemClock
-from .model import Wake, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, KINDS, agent_authored
+from .model import Wake, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, KINDS, agent_authored
 from .schedule import parse_duration, quiet_end
 
 
@@ -69,6 +69,7 @@ MESSAGING_PLATFORMS = frozenset({"telegram", "discord", "whatsapp", "whatsapp_cl
     "slack", "signal", "mattermost", "matrix", "email", "sms", "dingtalk", "feishu",
     "wecom", "wecom_callback", "weixin", "bluebubbles", "qqbot", "yuanbao", "relay"})
 LOCAL_SURFACES = frozenset({"desktop", "tui"})
+BACKEND_SCHEDULE_ONLY = "This app chat supports one-time and recurring schedules. Watchers, keep-warm and own time need a messaging chat."
 NON_GATEWAY_PLATFORMS = frozenset({"cli", "api_server", "cron", "local"})
 INJECTION_CONFIG = "plugins:\n  entries:\n    heartbeat2:\n      allow_gateway_injection: true"
 # A wake turn that isn't a role may arm this many follow-ups per turn, never more than a role turn may (#200).
@@ -86,16 +87,17 @@ def local_injection_supported() -> bool:
         return False
 
 
-def session_platform(platform, ctx=None, *, surface=''):
+def session_platform(platform, ctx=None, *, surface='', source=''):
     """Only local routes need resolving; never reinterpret a messaging platform."""
-    if platform != 'local': return platform
+    if platform not in ('', 'local'): return platform
     if not surface:
         try:
             resolve = getattr(ctx, 'session_surface', None)
             surface = resolve() if callable(resolve) else ''
         except Exception:
             surface = ''
-    return surface if isinstance(surface, str) and surface in LOCAL_SURFACES | {'cli'} else 'local'
+    if isinstance(surface, str) and surface in LOCAL_SURFACES | {'cli'}: return surface
+    return source if source in LOCAL_SURFACES else platform
 
 
 def platform_refusal(platform) -> str:
@@ -108,8 +110,8 @@ def platform_refusal(platform) -> str:
     return ''
 
 
-def deliverable_platform(platform) -> bool:
-    return platform in MESSAGING_PLATFORMS or platform in LOCAL_SURFACES and local_injection_supported()
+def deliverable_platform(platform, *, backend=False) -> bool:
+    return platform in MESSAGING_PLATFORMS or platform in LOCAL_SURFACES and (backend or local_injection_supported())
 
 
 # Platforms whose Hermes adapter reports 'dm' only for a one-to-one chat (checked at Hermes 04eb00cef7). Matrix can report a
@@ -150,9 +152,7 @@ def zone_name(tz, now=0.0, *, localtime=False) -> str:
 
 def cap_counts(store, session_key, exclude_id=None) -> tuple[int, int]:
     """Settings-owned built-ins never consume user wake slots."""
-    wakes = [w for w in store.list_wakes() if w.id != exclude_id
-             and w.status in {'active', 'proposed'} and not (isinstance(w.trigger_json, dict) and w.trigger_json.get('builtin'))]
-    return sum(w.session_key == session_key for w in wakes), len(wakes)
+    return store.active_wake_counts(session_key, exclude_id)
 
 
 def unknown_kind(kind):
@@ -412,12 +412,12 @@ class Policy:
                       active_count: int = 0, global_active_count: int = 0,
                       created_in: str = "human_turn", depth: int = 0,
                       children_created: int = 0, untrusted_payload: bool = False,
-                      registered_gateway: bool = False, parent_role: bool = False) -> Gate:
+                      registered_gateway: bool = False, parent_role: bool = False, backend: bool = False) -> Gate:
         if not session_key or session_key == "default":
             return Gate(False, "missing_session")
         if (not platform or platform in NON_GATEWAY_PLATFORMS
-                or platform in LOCAL_SURFACES and not local_injection_supported()
-                or not deliverable_platform(platform) and not registered_gateway):
+                or platform in LOCAL_SURFACES and not deliverable_platform(platform, backend=backend)
+                or not deliverable_platform(platform, backend=backend) and not registered_gateway):
             return Gate(False, "non_gateway", platform_refusal(platform))
         if self.dm_only and chat_type != "dm":
             return Gate(False, "dm_only")
@@ -429,6 +429,8 @@ class Policy:
             return Gate(False, "injection_disabled", INJECTION_CONFIG)
         if kind not in KINDS:
             return unknown_kind(kind)
+        if backend and kind not in TIME_KINDS:
+            return Gate(False, 'backend_schedule_only', BACKEND_SCHEDULE_ONLY)
         family = ("silence" if kind == "owner_silent" else "events" if kind in EVENT_KINDS
                   else kind if kind in PROBE_KINDS else None)
         if family and not getattr(self, f"source_{family}"):

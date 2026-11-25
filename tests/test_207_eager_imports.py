@@ -18,6 +18,14 @@ def test_module_list_covers_every_module():
     assert set(registration.MODULES) == on_disk
 
 
+def test_gateway_load_never_resolves_hermes_tui_server():
+    subprocess.run([sys.executable, '-B', '-c',
+                    'from heartbeat2.registration import load_all; import sys; load_all(); '
+                    'assert "heartbeat2.tui_probe" in sys.modules; '
+                    'assert "tui_gateway.server" not in sys.modules'],
+                   cwd=ROOT, check=True, timeout=60)
+
+
 SWAP = r'''
 import sys
 sys.path.insert(0, sys.argv[1])

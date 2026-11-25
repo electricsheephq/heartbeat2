@@ -1,8 +1,10 @@
 """Profile-local v1 notifier registry and bounded closed-window notices."""
 from dataclasses import dataclass
 import logging
+import sqlite3
 import sys
 import threading
+import time
 from types import FunctionType
 from typing import Callable
 
@@ -98,34 +100,60 @@ def notifier_for(engine):
 import json
 import uuid
 from datetime import datetime, timedelta
-from .policy import LOCAL_SURFACES, is_keep_warm
+from .policy import LOCAL_SURFACES, agreed_watcher, is_keep_warm, owner_requested
 from .schedule import local_day
 
 NOTIFY_AFTER_S = 600
+ACCEPTED_NOTIFY_AFTER_S = 900
 EPISODE_PREFIX = 'notify_episode:'
+ACCEPTED_HOLD_TEXT = 'Still queued in the app. Runs when the chat gets to it, or retries once if it was dropped.'
 
 
 def held_wakes(engine, key):
-    """Count only active wakes whose pending occurrence still waits on app_closed."""
+    """Count active wakes whose occurrence still waits on app_closed."""
     rows = []
     for w in engine.store.list_wakes(key):
         if w.status != 'active' or is_keep_warm(w): continue
-        for o in engine.store.list_occurrences(w.id, state='pending'):
+        store = engine.store
+        occurrences = store.list_occurrences(w.id, state='pending')
+        if store.backend:
+            occurrences += store.list_occurrences(w.id, state='claimed')
+        for o in occurrences:
             if o.error != 'app_closed': continue
             stamp = engine.store.get_meta('held_since:'+o.id)
             if stamp: rows.append((w, o, float(stamp)))
     return rows
 
 
+def _backend_notice_deadlines(rows):
+    for row in rows:
+        wake, occurrence, since = row
+        if occurrence.state == 'pending':
+            yield row, since + NOTIFY_AFTER_S
+        elif owner_requested(wake) or agreed_watcher(wake) or wake.urgent:
+            yield row, since + ACCEPTED_NOTIFY_AFTER_S
+
+
+def _ready_backend_notices(rows, now):
+    ready = [row for row, deadline in _backend_notice_deadlines(rows) if now >= deadline]
+    # A due closed-window notice keeps its existing text and grouping for injector refusals.
+    if any(o.state == 'pending' for _, o, _ in ready):
+        return [row for row in rows if row[1].state == 'pending']
+    return ready
+
+
 def stamped(engine, key):
     """Whether any wake in the chat still carries a closed-window stamp, whatever holds it right now.
 
     A held wake can be deferred for another reason meanwhile (quiet hours overnight, a provider outage, a pause). Its
-    episode, and the notice already sent for it, last until the stamp clears on an accepted injection or the wake ends.
+    episode, and the notice already sent for it, last until the stamp clears on delivery or the wake ends.
     """
     for w in engine.store.list_wakes(key):
         if w.status not in {'active', 'paused'} or is_keep_warm(w): continue
         if any(engine.store.get_meta('held_since:'+o.id) for o in engine.store.list_occurrences(w.id, state='pending')):
+            return True
+        if engine.store.backend and any(engine.store.get_meta('held_since:'+o.id)
+               for o in engine.store.list_occurrences(w.id, state='claimed')):
             return True
     return False
 
@@ -134,15 +162,14 @@ def episode_over(engine, key, now=None):
     """Whether a chat's closed-window wait has ended, so a later hold may start a new one with its own notice.
 
     Before a notice is queued, the wait lasts while any wake still carries a closed-window stamp. Once a notice is queued it
-    lasts, stamps or not, until the window is known to have reopened (an accepted injection ends it in end_episode, or the
+    lasts, stamps or not, until the window is known to have reopened (a gateway accept or backend wake start ends it, or the
     owner writes in that chat) or a day has passed since the notice. Ending it clears the stamps (end_episode), so a wake
     still waiting starts a fresh wait: at most one notice per wait, and at most one a day.
     """
     data = json.loads(engine.store.get_meta(EPISODE_PREFIX+key) or 'null') or {}
     if 'queued' not in data:
         # Its notice is being sent: the send's result decides, so a pause or cancel meanwhile can't lose the receipt.
-        reservation = getattr(engine.store, 'notify_reservation', None)
-        if reservation is not None and reservation[0] == key: return False
+        if engine.store.notice_reserved(key): return False
         return not stamped(engine, key)
     now = engine.clock.now() if now is None else now
     chat = engine.store.get_session(key)
@@ -150,7 +177,7 @@ def episode_over(engine, key, now=None):
 
 
 def end_episode(engine, key):
-    # Accepted injection ends the whole chat episode, even if sibling wakes still wait. Keep-warm pings are never part of
+    # Delivery ends the whole chat episode, even if sibling wakes still wait. Keep-warm pings are never part of
     # an episode (held_wakes and stamped skip them), so their stamps keep the time they started waiting.
     with engine.store.atomic():
         engine.store.connection.execute('DELETE FROM meta WHERE key=?', (EPISODE_PREFIX+key,))
@@ -192,17 +219,23 @@ def _gate(engine, chat, data, now):
 def notice_state(engine, key):
     chat=engine.store.get_session(key)
     if chat is None or chat.platform not in LOCAL_SURFACES: return ''
-    data=episode(engine,key)
+    rows=held_wakes(engine,key)
+    data=episode(engine,key,rows)
     if data is None: return ''
     error=' · '+data['error'][:80] if data.get('error') else ''
     if 'queued' in data: return 'queued at '+_time(engine,data['queued'])
+    if engine.store.backend:
+        ready_at=min((deadline for _,deadline in _backend_notice_deadlines(rows)),default=None)
+        if ready_at is None: return ''
+    else:
+        ready_at=data['since']+NOTIFY_AFTER_S
     if data.get('failed') or data.get('first') is not None and engine.clock.now()-data['first'] >= 86400:
         return 'notify failed'+error
     reason,until=_gate(engine,chat,data,engine.clock.now())
     if reason and until is None: return reason
     if until is not None: return 'waiting until '+_time(engine,until)+' ('+reason+')'+error
     if data.get('state') in {'may repeat','notifier not ready'}: return data['state']+error
-    return 'waiting until '+_time(engine,max(data['since']+NOTIFY_AFTER_S,data.get('next',0)))+error
+    return 'waiting until '+_time(engine,max(ready_at,data.get('next',0)))+error
 
 
 def notifier_line(engine, key=None):
@@ -218,6 +251,16 @@ def notifier_line(engine, key=None):
 
 
 def notice_text(engine, chat, rows, since):
+    surface='Desktop' if chat.platform=='desktop' else 'TUI'
+    if engine.store.backend and rows[0][1].state=='claimed':
+        from .commands import _clip, _oneline
+        wakes={w.id: w for w,_,_ in rows}
+        if len(wakes)>1:
+            return (f"{len(wakes)} wakes are due but their {surface} chat isn't ready; "
+                    "they'll run on your next message there.")
+        wake=next(iter(wakes.values()))
+        title=_oneline(wake.title) or _clip(_oneline(wake.note),60)
+        return f"{title} is due but its {surface} chat isn't ready; it'll run on your next message there."
     try:
         from hermes_constants import profile_name_for_home
         profile=profile_name_for_home(engine.ctx._manager.home_path) or 'default'
@@ -225,7 +268,6 @@ def notice_text(engine, chat, rows, since):
     # Profile names are local metadata, never wake-provided text. Bound even malformed host metadata.
     profile=' '.join(str(profile).split())[:64]
     when=datetime.fromtimestamp(since,engine.policy.resolved_timezone()).strftime('%H:%M %Z')[:32]
-    surface='Desktop' if chat.platform=='desktop' else 'TUI'
     prefix=f"HeartBeat: {len({w.id for w,_,_ in rows})} wake(s) in "
     suffix=(f"'s {surface} chat have been waiting since {when} because the app window is closed. "
             'Open that chat to let them run.')
@@ -263,8 +305,7 @@ class NotificationWorker:
         with s.atomic():
             if self.closed: return
             chats={chat.session_key:chat for chat in s.list_sessions() if chat.platform in LOCAL_SURFACES}
-            for row in s.connection.execute('SELECT key FROM meta WHERE key LIKE ?', (EPISODE_PREFIX+'%',)).fetchall():
-                key=row[0][len(EPISODE_PREFIX):]
+            for key in s.session_meta_keys(EPISODE_PREFIX):
                 if key not in chats or episode_over(engine,key,now):
                     end_episode(engine,key)
             for key,chat in chats.items():
@@ -276,7 +317,10 @@ class NotificationWorker:
                 if data.get('first') is not None and now-data['first']>=86400 and 'queued' not in data:
                     data['failed']=True
                 s.set_meta(EPISODE_PREFIX+key,json.dumps(data))
-                if 'queued' in data or data.get('failed') or now<data['since']+NOTIFY_AFTER_S or now<data.get('next',0): continue
+                if 'queued' in data or data.get('failed') or now<data.get('next',0): continue
+                if s.backend:
+                    if not _ready_backend_notices(rows,now): continue
+                elif now<data['since']+NOTIFY_AFTER_S: continue
                 if self.job is not None or _gate(engine,chat,data,now)[0]: continue
                 transport=notifier_for(engine)
                 if transport is None: continue
@@ -297,6 +341,7 @@ class NotificationWorker:
                 if self.closed: return
                 job=self.job
             if job is None: continue
+            engine,key,_,_=job
             try: self._send(*job)
             except Exception:
                 LOG.warning('heartbeat2 notifier worker failed',exc_info=True)
@@ -305,6 +350,24 @@ class NotificationWorker:
                     self.store.notify_reservation=None
                     self.job=None
                     self.idle.set()
+                self._release_reservation(key,engine.epoch)
+
+    def _release_reservation(self, key, epoch):
+        # Keep a transient write lock from stranding a reservation while this process is live.
+        for attempt in range(10):
+            if self.closed and (not self.store.backend or attempt): return
+            try:
+                self.store.release_backend_notice(key,epoch)
+                return
+            except sqlite3.OperationalError as exc:
+                if (getattr(exc,'sqlite_errorcode',0)&0xff) not in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED):
+                    LOG.warning('heartbeat2 notice reservation cleanup failed',exc_info=True)
+                    return
+                if attempt<9: time.sleep(.1)
+            except Exception:
+                LOG.warning('heartbeat2 notice reservation cleanup failed',exc_info=True)
+                return
+        LOG.warning('heartbeat2 notice reservation cleanup exhausted SQLite retries')
 
     def _send(self, engine, key, ident, transport):
         s=self.store
@@ -313,18 +376,24 @@ class NotificationWorker:
             data=json.loads(s.get_meta(EPISODE_PREFIX+key) or '{}')
             chat=s.get_session(key)
             rows=held_wakes(engine,key)
+            since=data.get('since')
+            if s.backend:
+                rows=_ready_backend_notices(rows,engine.clock.now())
+                if rows: since=min(row[2] for row in rows)
             # Exclude our own reservation while rechecking the cap.
             s.notify_reservation=None
+            if s.backend and (s.notice_reserved(key) or 'queued' in data or engine.clock.now()<data.get('next',0)): return
             if (data.get('id')!=ident or not rows or chat is None or chat.platform not in LOCAL_SURFACES
                     or _gate(engine,chat,data,engine.clock.now())[0] or notifier_for(engine) is not transport): return
             now=sent_at=engine.clock.now()
-            s.notify_reservation=(key,local_day(now,engine.policy.resolved_timezone()))
+            if not s.backend: s.notify_reservation=(key,local_day(now,engine.policy.resolved_timezone()))
+            s.reserve_backend_notice(key,engine.epoch)
             data.setdefault('first',now)
             data['attempts']+=1
             data['next']=now+(300 if data['attempts']<3 else 3600)
             s.set_meta(EPISODE_PREFIX+key,json.dumps(data))
             target=engine.policy.notify_via.split(':',1)[1]
-            text=notice_text(engine,chat,rows,data['since'])
+            text=notice_text(engine,chat,rows,since)
             wake=rows[0][0]
         try:
             from .registration import home_scope
@@ -334,9 +403,12 @@ class NotificationWorker:
         if not isinstance(result,dict): result={'ok':False,'error':'invalid notifier result'}
         now=engine.clock.now()
         with s._lock:
-            if self.closed: return
+            if self.closed:
+                if s.backend: s.release_backend_notice(key,engine.epoch)
+                return
             with s.atomic():
                 s.notify_reservation=None
+                s.release_backend_notice(key,engine.epoch)
                 if result.get('ok') is True:
                     engine.ledger(wake,delivered=1)
                     # A notify event is a receipt, never an input to a watcher and never contains text.

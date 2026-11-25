@@ -18,6 +18,7 @@ from heartbeat2.model import Session
 from heartbeat2.registration import Runtime, register
 from heartbeat2.store import Store
 from heartbeat2.poller import Poller
+from test_backend_wakes import ARM, CHAT, bind as bind_chat
 from test_engine import GatewayCtx, KEY, arm, engine, pending, session  # noqa: F401 (fixture)
 from test_v014a import bind
 
@@ -336,3 +337,102 @@ def test_engine_opened_before_the_injector_does_not_count_as_served(tmp_path, cl
         assert len(rt.get_engine().store.pending_events()) == 1
     finally:
         rt.close()
+
+
+@pytest.mark.parametrize('injector_first', [False, True])
+def test_backend_role_follows_tui_injector(tmp_path, clock, monkeypatch, injector_first):
+    ctx = GatewayCtx(tmp_path, settings=SETTINGS)
+    manager = ctx._manager
+    manager.has_gateway_message_injector = False
+    manager.has_tui_message_injector = injector_first
+    ctx.session_surface = lambda: 'desktop'
+    monkeypatch.setattr('heartbeat2.policy.local_injection_supported', lambda: True)
+    rt = Runtime(ctx, clock=clock, bootstrap_interval=.01)
+    try:
+        e = rt.get_engine()
+        bind_chat(monkeypatch, e, CHAT, platform='local')
+        monkeypatch.setattr('heartbeat2.tool.current_session_key', lambda: CHAT)
+        turn = dict(session_id=CHAT, turn_id='owner', user_message='hello', platform='desktop',
+                    conversation_history=[{'role': 'user', 'content': 'hello', 'platform_message_id': 'fixture'}])
+        rt.hook('pre_llm_call', **turn)
+        if not injector_first:
+            refusal = json.loads(rt.tool(ARM))
+            assert refusal['error'] == 'non_gateway'
+            assert 'own backend' in refusal['detail']
+            assert 'own backend' in rt.command('add in 1m Check the task.')
+            assert e.store.list_sessions() == []
+            assert not e.store.get_meta('host:' + CHAT)
+            manager.has_tui_message_injector = True
+        rt.start()
+        assert until(lambda: holds(rt), timeout=2)
+        assert rt._runner.store.backend
+        rt.hook('pre_llm_call', **turn)
+        assert rt.get_engine().store.get_session(CHAT).last_human_at == clock.now()
+        assert json.loads(rt.tool(ARM))['armed']
+        assert rt.get_engine().store.get_meta('host:' + CHAT) == 'backend'
+        manager.has_tui_message_injector = False
+        assert until(lambda: not holds(rt), timeout=2)
+        assert json.loads(rt.tool(ARM))['error'] == 'non_gateway'
+        assert not rt.get_engine().store.backend
+        assert rt.get_engine().store.list_sessions() == []
+    finally:
+        rt.close()
+
+
+@pytest.fixture
+def backend_runtime(tmp_path, clock, monkeypatch):
+    ctx = GatewayCtx(tmp_path, settings=SETTINGS)
+    ctx._manager.has_gateway_message_injector = False
+    ctx._manager.has_tui_message_injector = True
+    ctx.session_surface = lambda: 'desktop'
+    rt = Runtime(ctx, clock=clock, bootstrap_interval=.01, tick_interval=1)
+    try:
+        e = rt.get_engine()
+        bind_chat(monkeypatch, e, CHAT, platform='local')
+        assert json.loads(rt.tool(ARM))['armed']
+        rt.start()
+        assert until(lambda: holds(rt), timeout=2)
+        clock.advance(61)
+        assert ctx.injected.wait(2)
+        yield rt, e
+    finally:
+        rt.close()
+
+
+@pytest.mark.parametrize('flip_before_start', [False, True], ids=['started', 'claimed'])
+def test_backend_role_loss_silences_and_settles_wake(backend_runtime, flip_before_start):
+    rt, e = backend_runtime
+    db = e.store
+    o, = db.list_occurrences()
+    assert o.state == 'claimed'
+    assert db.update_occurrence(o.wake_id, o.dedupe_key, 'claimed', attempt=o.attempt, force_silent=True)
+    tags = dict(session_id=CHAT, turn_id='wake')
+    manager = e.ctx._manager
+    if flip_before_start:
+        manager.has_tui_message_injector = False
+    rt.hook('pre_llm_call', **tags, user_message=e.ctx.calls[0][0], platform='desktop')
+    assert db.get_occurrence(o.wake_id, o.dedupe_key).state == 'started'
+    manager.has_tui_message_injector = False
+    assert rt.hook('transform_llm_output', **tags, response_text='Chatty output') == '[SILENT]'
+    rt.hook('on_session_end', **tags, completed=True)
+    settled = db.get_occurrence(o.wake_id, o.dedupe_key)
+    assert (settled.state, settled.delivered) == ('done', False)
+    rt.hook('on_session_end', **tags, completed=True)
+    assert db.get_occurrence(o.wake_id, o.dedupe_key) == settled
+    assert db.get_wake(o.wake_id).fires == len(e.ctx.calls) == 1
+    assert db.get_session(CHAT).busy_since is None
+    assert not rt.get_engine().store.backend
+
+
+def test_backend_role_loss_keeps_own_accepted_claim_held(backend_runtime):
+    rt, e = backend_runtime
+    o, = e.store.list_occurrences()
+    assert o.state == 'claimed'
+    e.ctx._manager.has_tui_message_injector = False
+    assert until(lambda: not holds(rt), timeout=2)
+    rt.clock.advance(601)
+    assert until(lambda: e.store.get_occurrence(o.wake_id, o.dedupe_key).error == 'app_closed', timeout=2)
+    assert e.store.get_occurrence(o.wake_id, o.dedupe_key).state == 'claimed'
+    assert e.store.get_meta('accepted:'+o.id) == '1'
+    assert e.store.get_meta('held_since:'+o.id)
+    assert len(e.ctx.calls) == 1

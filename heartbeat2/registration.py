@@ -1,7 +1,7 @@
 """Import-light registration; profile-bound work starts only in the bootstrap.
 
-One daemon per immutable manager scope, plus a cross-process flock. Hooks in
-non-gateway processes may still write inbox events; they never run the poller.
+One daemon per immutable manager scope, with cross-process flocks for gateway
+and standalone backend scheduling. Other hosts may still write inbox events.
 A gateway that does not serve the profile (Hermes loads every profile's plugins
 at boot) opens nothing, holds no lock and delivers nothing for it.
 """
@@ -17,7 +17,7 @@ PLUGIN_ROOT=Path(__file__).resolve().parents[1]
 # Every module of the plugin. A runtime imports them all up front, so plugin files replaced under a running process (an
 # upgrade without a reload) stay inert until the restart instead of mixing old and new modules (#207).
 MODULES=('cache','clock','commands','desk','governor','intake','model','notifier','policy','poller','probes','schedule',
-         'serving','store','tool','voice_bridge','wake_text')
+         'serving','store','tool','tui_probe','voice_bridge','wake_text')
 
 
 def installed_version():
@@ -83,12 +83,13 @@ class Runtime:
         self._policy_lock=threading.Lock()
         self.bootstrap_interval,self.tick_interval=bootstrap_interval,tick_interval
         self._engine=None
+        self._other_engine=None
         self._engine_lock=threading.RLock()
         self._wake=threading.Event()
         self._stop=threading.Event()
         self._thread=None
         self._threads=[]
-        self._reconciled=False
+        self._reconciled=set()
         self._served_once=False
         self._runner=None
         self._last_tick_monotonic=None
@@ -180,34 +181,56 @@ class Runtime:
             self._last_good=policy
             self.settings_error=json.dumps([{'key':key,'reason':reason,'effective':getattr(policy,key)}
                                             for key,reason in errors.items()]) if errors else ''
-            if self._engine is not None and self._engine.store.get_meta('settings_error')!=self.settings_error:
-                self._engine.store.set_meta('settings_error',self.settings_error)
+            engine=self._engine
+            if engine is not None and engine.store.get_meta('settings_error')!=self.settings_error:
+                engine.store.set_meta('settings_error',self.settings_error)
             return policy
+
+    def _backend_engine(self):
+        # A tool or command may have parked this view. Release the engine lock before reading its store.
+        with self._engine_lock:
+            if self.closed: return None
+            return next((engine for engine in (self._engine,self._other_engine)
+                         if engine is not None and engine.store.backend),None)
+
+    def _hook_engine(self, session_id):
+        if serving.state(self.ctx._manager)==serving.NO_GATEWAY:
+            retained=self._backend_engine()
+            if retained and (session_id in retained.intake.flights or retained.has_own_work()):
+                return retained
+        return self.get_engine()
 
     def get_engine(self):
         with self._engine_lock:
             if self.closed: raise RuntimeError('heartbeat2 runtime unloaded')
-            if self._engine is None:
+            backend=serving.state(self.ctx._manager)==serving.BACKEND
+            active=self._engine
+            if active is not None and active.store.backend==backend: return active
+            engine=self._other_engine
+            if engine is None or engine.store.backend!=backend:
                 from .store import Store
                 from .poller import Poller
                 with home_scope(self.home):
-                    store=Store(self.home/'plugin-data/heartbeat2/pulse.db',self.clock)
+                    store=Store(self.home/'plugin-data/heartbeat2/pulse.db',self.clock,backend=backend)
                     try:
-                        self._engine=Poller(self.ctx,store,self.policy(),self.clock,boot_at=self.boot_at)
+                        engine=Poller(self.ctx,store,self.policy(),self.clock,boot_at=self.boot_at)
                         if store.get_meta('settings_error')!=self.settings_error:
                             store.set_meta('settings_error',self.settings_error)
                     except BaseException:
                         store.close()
                         raise
-                self._engine.refresh_policy=self.policy
-                self._engine.restart=self.restart
-                self._engine.signal=self._wake.set
-                self._engine.needs_restart=self.needs_restart
-                self._engine.runtime_status=self.status
-                self._engine.voice_bridge=self.voice_bridge
-                self._engine.notifier=self.notifier
-                self._engine.notify_via_invalid=self.notify_via_invalid
-            return self._engine
+                engine.refresh_policy=self.policy
+                engine.restart=self.restart
+                engine.signal=self._wake.set
+                engine.needs_restart=self.needs_restart
+                engine.runtime_status=self.status
+                engine.voice_bridge=self.voice_bridge
+                engine.notifier=self.notifier
+                engine.notify_via_invalid=self.notify_via_invalid
+            # Keep each view fixed for hooks and workers already using it.
+            self._other_engine=active
+            self._engine=engine
+            return engine
 
     def inactive(self):
         """Why this runtime must not act here, or ''. A gateway that never served this home touches
@@ -215,7 +238,7 @@ class Runtime:
         poller stays off either way."""
         if self._served_once: return ''
         here=serving.state(self.ctx._manager)
-        if here==serving.SERVED: self._served_once=True
+        if here in (serving.SERVED,serving.BACKEND): self._served_once=True
         return serving.REASONS[here] if here in (serving.FOREIGN,serving.UNKNOWN) else ''
 
     def hook(self,name,**kwargs):
@@ -226,7 +249,7 @@ class Runtime:
                     from .intake import delegated_child
                     if not delegated_child(kwargs.get('platform','')) and (self._thread is None or not self._thread.is_alive()):
                         self.restart()
-                intake=self.get_engine().intake
+                intake=self._hook_engine(kwargs.get('session_id','')).intake
                 if name=='api_request_error': return intake.api_request_error(**kwargs)
                 if name in EVENTS: return intake.event(EVENTS[name],**kwargs)
                 return getattr(intake,name)(**kwargs)
@@ -272,6 +295,9 @@ class Runtime:
         here=serving.state(self.ctx._manager)
         if here in (serving.FOREIGN,serving.UNKNOWN): return {'state':'not running','reason':serving.REASONS[here]}
         if self._runner is None or self._runner._lock_file is None:
+            if (here==serving.BACKEND and self._runner and self._last_tick_monotonic is not None
+                    and self._runner.other_backend_delivers()):
+                return {'state':'alive','reason':'scheduler lock held elsewhere'}
             return {'state':'not running','reason':'lock held elsewhere' if self._runner else 'bootstrap starting'}
         return None
 
@@ -292,14 +318,22 @@ class Runtime:
             with home_scope(self.home):
                 while not stop.is_set():
                     # Hermes stamps its injector on managers it does not serve; ask every step.
-                    if serving.state(self.ctx._manager)!=serving.SERVED:
+                    here=serving.state(self.ctx._manager)
+                    if here not in (serving.SERVED,serving.BACKEND):
                         if runner: runner.release()
+                        if here==serving.NO_GATEWAY and self.clock.monotonic()>=next_tick:
+                            retained=self._backend_engine()
+                            if retained and retained.has_own_work():
+                                # The injector is gone. Settle only our claims; leave dispatch to a serving process.
+                                with retained.store.atomic(): retained.acks(own_only=True)
+                                next_tick=self.clock.monotonic()+self.tick_interval
                         stop.wait(self.bootstrap_interval)
                         continue
                     self._served_once=True
-                    if runner is None:
+                    e=self.get_engine()
+                    if runner is None or runner.store is not e.store:
+                        if runner: runner.close()
                         from .poller import Poller
-                        e=self.get_engine()
                         runner=Poller(self.ctx,e.store,e.policy,self.clock,boot_at=self.boot_at)
                         runner.voice_bridge=self.voice_bridge
                         runner.notifier=self.notifier
@@ -307,18 +341,19 @@ class Runtime:
                         runner._owns_notifications=False
                         runner.notify_via_invalid=self.notify_via_invalid
                         runner.refresh_policy=self.policy
-                        runner.process_start=not self._reconciled
+                        runner.process_start=runner.store.backend not in self._reconciled
                         self._runner=runner
-                    if not runner.acquire():
+                    if not runner.store.backend and not runner.acquire():
                         stop.wait(30)
                         continue
-                    self._reconciled=True
+                    if not runner.store.backend: self._reconciled.add(False)
                     remaining=next_tick-self.clock.monotonic()
                     if remaining>0:
                         self._wake.wait(min(remaining,self.bootstrap_interval))
                         self._wake.clear()
                         continue
                     runner.tick()
+                    if runner.store.backend and runner._lock_file is not None: self._reconciled.add(True)
                     self._last_tick_monotonic=self.clock.monotonic()
                     self._last_bootstrap_error=''
                     next_tick=self.clock.monotonic()+self.tick_interval
@@ -336,22 +371,23 @@ class Runtime:
             self.closed=True
             self._stop.set()
             self._wake.set()
-            if self._engine: self._engine.notifications.stop()
+            engines=tuple(engine for engine in (self._engine,self._other_engine) if engine is not None)
+            for engine in engines: engine.notifications.stop()
         self._voice_bridge.close()
         self._notifier.close()
         # No engine, store or global registration lock is held while joining.
-        if self._engine: self._engine.notifications.close()
+        for engine in engines: engine.notifications.close()
         for thread in self._threads:
             if thread is not threading.current_thread(): thread.join(timeout=.5)
-        if self._engine:
+        for engine in engines:
             from .poller import LOCAL_EPOCHS
-            LOCAL_EPOCHS.discard(self._engine.epoch)
-            worker=self._engine.notifications.thread
+            LOCAL_EPOCHS.discard(engine.epoch)
+            worker=engine.notifications.thread
             threads=self._threads+([worker] if worker is not None else [])
             # A live tick or transport still owns this connection.
             if all(not t.is_alive() for t in threads):
-                self._engine.close()
-                self._engine.store.close()
+                engine.close()
+                engine.store.close()
         with _GUARD:
             if _RUNTIMES.get(self.scope) is self: _RUNTIMES.pop(self.scope,None)
 

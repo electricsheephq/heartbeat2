@@ -66,6 +66,30 @@ def marker(text, *, secret=None, require_tag=False):
     return None
 
 
+def backend_markers(text, *, secret, require_tag):
+    # Hermes appends text-only arrivals to the queued owner prompt. Signed
+    # markers can start a wake there. Older DM wakes still work at line one.
+    candidates=[(parsed,index) for index,line in enumerate(text.split('\n'))
+                if (parsed:=marker(line,secret=secret,require_tag=True))]
+    if not require_tag and (not candidates or candidates[0][1]>0):
+        if legacy:=marker(text,secret=secret):
+            candidates.append((legacy,0))
+    return candidates
+
+
+def backend_owner_suffix(text, state, attempt, *, has_parts):
+    # A hash and size identify the exact injected prefix without storing the
+    # prompt. Blank lines inside the wake's own note are part of that prefix.
+    size=state.get('prompt_size',0)
+    if state.get('prompt_attempt')==attempt and hashlib.sha256(text[:size].encode(errors='surrogatepass')).hexdigest()==state.get('prompt_digest'):
+        return any(line.strip() and not (has_parts and line.startswith('@image:'))
+                   for line in text[size:].split('\n'))
+    # Hermes joins queued text with a blank line. For pre-upgrade or rewritten
+    # prompts, look after the generated contract, beyond the multiline note.
+    contract=text.partition('\nContract: ')[2]
+    return bool((contract or text).partition('\n\n')[2].strip())
+
+
 def fail_open(fn):
     @wraps(fn)
     def call(self,*args,**kwargs):
@@ -109,11 +133,11 @@ def origin_ids(text):
     for _,mid in origin_headers(text): yield mid
 
 
-def row_text(content):
+def row_text(content, kinds=('text',)):
     if isinstance(content,str): return content
     if isinstance(content,list):
         return '\n'.join(part['text'] for part in content if isinstance(part,dict)
-                         and part.get('type')=='text' and isinstance(part.get('text'),str))
+                         and part.get('type') in kinds and isinstance(part.get('text'),str))
     return ''
 
 
@@ -520,6 +544,9 @@ class Intake:
         key=self._key(session_id)
         if not key: return None
         identity=e.tool.identity(surface=platform)
+        if identity is None and s.backend:
+            # A queued turn can reach its first hook after the injector shuts down.
+            identity=s.get_session(key)
         if identity is None: return None
         key=identity.session_key
         owner_seen=key in self.inbounds or self.owner_turns.get(session_id)==turn_id
@@ -534,7 +561,26 @@ class Intake:
                 if 0<=e.clock.now()-pending['at']<=3600:
                     self.count(key,pending.get('mid'),identity.platform)
                 s.set_meta(stamp,'')
-        parsed=marker(user_message,secret=s.get_meta('marker_secret'),require_tag=(identity.chat_type != 'dm'))
+        secret=s.get_meta('marker_secret')
+        require_tag=identity.chat_type!='dm'
+        previous=self.flights.get(session_id)
+        owner_folded=False
+        if s.backend:
+            text=row_text(user_message,('text','input_text'))
+            parsed=None
+            for candidate,index in backend_markers(text,secret=secret,require_tag=require_tag):
+                wid,dedupe,attempt=candidate
+                w,o=s.get_wake(wid),s.get_occurrence(wid,dedupe)
+                if w is None or w.session_key!=key or o is None or o.attempt!=attempt: continue
+                same_turn=(previous and previous.turn_id==turn_id and
+                           (previous.wake_id,previous.dedupe_key,previous.attempt)==candidate)
+                if o.state!='claimed' and not (o.state=='started' and same_turn): continue
+                parsed=candidate
+                owner_folded=index>0 or backend_owner_suffix(text,s.backend_reinject_state(o.id),attempt,
+                                                            has_parts=isinstance(user_message,list))
+                break  # Dispatch permits one claimed/started occurrence per chat.
+        else:
+            parsed=marker(user_message,secret=secret,require_tag=require_tag)
         if not parsed:
             row=conversation_history[-1] if conversation_history else None
             if isinstance(row,dict) and row.get('role')=='user' and not row.get('display_kind'):
@@ -547,7 +593,6 @@ class Intake:
                         owner_seen=True
                         self.count(key,row['platform_message_id'],platform)
         if owner_seen: self.owner_turns[session_id]=turn_id
-        previous=self.flights.get(session_id)
         if previous and turn_id and previous.turn_id and previous.turn_id!=turn_id:
             # Apply the new owner row before terminal cleanup of a prior flight.
             self.on_session_end(session_id=session_id,turn_id=previous.turn_id,failed=True)
@@ -620,13 +665,21 @@ class Intake:
                 flight=Flight(key,session_id,turn_id,wid,dedupe,attempt,untrusted,invalid)
                 existing=self.flights.get(session_id)
                 if existing and existing.wake_id==wid and existing.dedupe_key==dedupe and existing.attempt==attempt:
+                    if owner_folded: mark_fold(existing)
                     return None
+                if owner_folded: mark_fold(flight)
                 self.flights[session_id]=flight
                 if invalid:
                     if o.attempt==attempt and o.state in {'claimed','started'}:
                         s.cas_occurrence(wid,dedupe,o.state,'superseded',attempt=o.attempt,force_silent=True,error='stale_turn')
                     return None
                 if o.state=='claimed' and s.start(wid,dedupe,attempt=attempt):
+                    # A backend transport can accept without ever starting a wake turn.
+                    if s.backend and not is_keep_warm(w):
+                        from .notifier import end_episode
+                        end_episode(e,key)
+                        s.set_meta('held_since:'+o.id,'')
+                        s.cas_session(key,{'busy_epoch':e.epoch},last_wake_turn_at=now)
                     s.cas_wake(w.id,w.status,expected_version=w.version,fires=w.fires+1,model_turns=w.model_turns+1,last_fired_at=now)
                     e.ledger(w,fires=1,model_turns=1)
                 return None
@@ -974,7 +1027,8 @@ class Intake:
             # Clear only this engine's busy mark: a late end in a gateway that lost the profile
             # must not free a turn its successor is running.
             if session and session.busy_epoch in (None,'',e.epoch):
-                s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
+                activity={'last_activity_at':e.clock.now()} if s.backend else {}
+                s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None,**activity)
             self.flights.pop(session_id,None)
             self._drop_children(f)
             shown=s.get_meta('owner_report:'+session_id)

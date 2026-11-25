@@ -8,8 +8,9 @@ import logging
 import re
 
 from .model import Wake, Session, TIME_KINDS, RECURRING_KINDS, PROBE_KINDS, EVENT_KINDS, FINISHED_WAKE_STATUSES
-from .policy import LOCAL_SURFACES, deliverable_platform, platform_refusal, session_platform, owner_class, holds_messages, cap_counts, is_keep_warm, agreed_watcher
+from .policy import BACKEND_SCHEDULE_ONLY, LOCAL_SURFACES, platform_refusal, session_platform, owner_class, holds_messages, cap_counts, is_keep_warm, agreed_watcher
 from .schedule import parse_at, parse_duration, next_every, next_cron
+from . import serving
 
 
 def obj(properties):
@@ -90,6 +91,29 @@ def filter_text(w, limit=None):
 APP_BACKEND_REFUSAL = ("Wakes can't run in this Desktop chat yet: it's served by the Desktop app's own backend (hermes serve), "
                        "where HeartBeat's scheduler doesn't run and Hermes gives plugins no session platform (heartbeat2#233). "
                        "Arm the wake from a messaging chat on this profile.")
+APP_BACKEND_RECEIPT = ('Fires while the app has this chat open; if it is closed when due, '
+                       'it fires once when the chat is open again.')
+OTHER_BACKEND_WINDOW = ('Another Hermes app window on this profile delivers wakes right now; '
+                        'this wake waits until that one closes.')
+
+
+def backend_reinject_note(store, wake):
+    if not store.backend: return ''
+    notes = []
+    for o in store.list_occurrences(wake.id):
+        if o.state in {'pending', 'claimed'} and (count := store.backend_reinject_state(o.id).get('count')):
+            notes.append(f're-sent {count}× (app window not ready)')
+    return ' · '.join(notes)
+
+
+def backend_delivery_note(store, wake):
+    if not store.backend: return ''
+    from .notifier import ACCEPTED_HOLD_TEXT
+    resend = backend_reinject_note(store, wake)
+    if wake.status == 'active' and any(o.error == 'app_closed' and store.get_meta('held_since:'+o.id)
+            for o in store.list_occurrences(wake.id, state='claimed')):
+        return ' · '.join(filter(None, (ACCEPTED_HOLD_TEXT, resend)))
+    return resend
 
 
 def refusal_detail(detail, platform):
@@ -108,24 +132,46 @@ class Tool:
     def __init__(self, engine, session_key_fn=current_session_key):
         self.engine, self.session_key_fn = engine, session_key_fn
 
-    def identity(self, *, surface=''):
-        key = self.session_key_fn()
-        if not key or key == 'default':
+    def app_backend_unavailable(self, *, surface='', key=None):
+        platform = session_env('HERMES_SESSION_PLATFORM')
+        source = session_env('HERMES_SESSION_SOURCE')
+        if session_platform(platform, self.engine.ctx, surface=surface, source=source) not in LOCAL_SURFACES:
+            return False
+        here = serving.state(getattr(self.engine.ctx, '_manager', None))
+        store = self.engine.store
+        return here == serving.NO_GATEWAY or here == serving.BACKEND and (
+            not store.backend or key not in (None, '', 'default') and store.get_meta('host:' + key) != 'backend')
+
+    def identity(self, *, surface='', key=None):
+        if key is None: key = self.session_key_fn()
+        if not key or key == 'default' or self.app_backend_unavailable(surface=surface):
             return None
-        s = self.engine.store.get_session(key)
+        store = self.engine.store
         bound_platform = session_env('HERMES_SESSION_PLATFORM')
-        platform = session_platform(bound_platform, self.engine.ctx, surface=surface)
-        if s is None:
-            s = Session(key, platform=platform,
-                        chat_type=session_env('HERMES_SESSION_CHAT_TYPE'),
-                        chat_id=session_env('HERMES_SESSION_CHAT_ID'),
-                        current_session_id=session_env('HERMES_SESSION_ID'))
-            self.engine.store.upsert_session(s)
-        elif (bound_platform == 'local' and s.platform != platform
-              and not (platform == 'local' and s.platform in LOCAL_SURFACES)):
-            self.engine.store.cas_session(key, {'platform':s.platform}, platform=platform)
-            s = self.engine.store.get_session(key)
-        return s
+        chat_type = session_env('HERMES_SESSION_CHAT_TYPE')
+        platform = bound_platform
+        if store.backend or bound_platform:
+            source = session_env('HERMES_SESSION_SOURCE') if store.backend else ''
+            platform = session_platform(bound_platform, self.engine.ctx, surface=surface, source=source)
+        with store.atomic():
+            if store.backend and platform in LOCAL_SURFACES and self.engine.eligible():
+                if not store.stamp_backend(key): return None
+                chat_type = chat_type or 'dm'
+            s = store.get_session(key)
+            if s is None:
+                if store.backend and store.get_meta('host:' + key) != 'backend': return None
+                store.upsert_session(Session(key, platform=platform, chat_type=chat_type,
+                    chat_id=session_env('HERMES_SESSION_CHAT_ID'), current_session_id=session_env('HERMES_SESSION_ID')))
+            else:
+                updates = {}
+                if bound_platform == 'local' and s.platform != platform and not (platform == 'local' and s.platform in LOCAL_SURFACES):
+                    updates['platform'] = platform
+                if store.backend and platform in LOCAL_SURFACES:
+                    if s.platform in ('', 'local'): updates['platform'] = platform
+                    if not s.chat_type: updates['chat_type'] = chat_type
+                if updates:
+                    store.cas_session(key, {'platform':s.platform, 'chat_type':s.chat_type}, **updates)
+            return store.get_session(key)
 
     def handle(self, args, *, session_id='', **kwargs):
         result=self._handle(args,session_id=session_id,**kwargs)
@@ -158,8 +204,11 @@ class Tool:
                 value = trigger['after'].strip()
                 at = value if value.startswith('+') or value.lower().startswith('in ') else 'in ' + value
                 args = {**args, 'trigger': {'kind': 'at', 'at': at}}
-            s = self.identity()
+            key = self.session_key_fn()
+            s = self.identity(key=key)
             if s is None:
+                if args.get('action') in {'create','resume','update'} and self.app_backend_unavailable(key=key):
+                    return {'error':'non_gateway', 'detail':APP_BACKEND_REFUSAL}
                 return {'error':'missing_session'}
             action = args.get('action')
             pause_seconds = None
@@ -200,6 +249,7 @@ class Tool:
                     return {'ok':True,'wakes':[{**asdict(w),'cache':self.cache_result(w),
                         **({'no_ping_reason':no_ping_reason(e.store,s,e.policy,e.clock.now())}
                            if is_keep_warm(w) and w.status=='active' and w.next_due_at is None else {}),
+                        **({'delivery_note':note} if (note := backend_delivery_note(e.store,w)) else {}),
                         **({'handoff_to':target} if w.role and (target := e.store.get_meta('handoff_to:'+w.id)) else {})}
                         for w in e.store.list_wakes(s.session_key)]}
                 if action == 'desk':
@@ -212,6 +262,8 @@ class Tool:
                     e.store.cas_session(s.session_key, {'enabled':s.enabled}, enabled=False)
                     return {'ok':True,'enabled':False}
                 if action == 'create':
+                    if e.store.backend and not e.eligible():
+                        return {'error':'non_gateway', 'detail':APP_BACKEND_REFUSAL}
                     if 'handoff_to' in args:
                         error = self.handoff_target(args['handoff_to'], s.session_key)
                         if error: return error
@@ -233,7 +285,7 @@ class Tool:
                         kind=(args.get('trigger') or {}).get('kind',''), created_in=created_in,
                         depth=depth, parent_role=parent_role, children_created=children,
                         untrusted_payload=bool(retained and retained.untrusted),
-                        active_count=active_count, global_active_count=global_active_count)
+                        active_count=active_count, global_active_count=global_active_count, backend=e.store.backend)
                     if not gate.allowed:
                         if gate.reason in {'max_active', 'global_max_active'}:
                             logging.getLogger('heartbeat2').warning('pulse create refused: %s session=%s',
@@ -301,7 +353,9 @@ class Tool:
                     if action in {'resume','update'}:
                         if not s.enabled:
                             return {'error':'session_off'}
-                        if not deliverable_platform(s.platform):
+                        if e.store.backend and not e.eligible():
+                            return {'error':'non_gateway', 'detail':APP_BACKEND_REFUSAL}
+                        if not e.deliverable(s.platform):
                             return {'error':'non_gateway', 'detail':refusal_detail(platform_refusal(s.platform), s.platform)}
                         if e.policy.dm_only and s.chat_type != 'dm':
                             return {'error':'dm_only'}
@@ -318,6 +372,9 @@ class Tool:
                         fresh = 'trigger' in args
                         trig = args.get('trigger')
                         new_kind = trig.get('kind',w.kind) if isinstance(trig,dict) else w.kind
+                        if e.store.backend and (w.kind not in TIME_KINDS or new_kind not in TIME_KINDS
+                                                or is_keep_warm(w) or w.trigger_json.get('own_time')):
+                            return {'error':'backend_schedule_only', 'detail':BACKEND_SCHEDULE_ONLY}
                         # The owner's grant applies before the first feasibility pass, so a requested retime gets the reminder bound.
                         base = (replace(w,owner_requested=True) if action == 'update' and w.creator == 'agent'
                                 and not w.trigger_json.get('builtin') and w.parent_wake_id is None
@@ -544,6 +601,9 @@ class Tool:
             boundary=text.rfind('. ')
             text=(text[:boundary+1] if boundary>=0 else text)+'…'
         if w.role: text+=f' · role: runs until you or the agent end it (/pulse cancel {w.id})'
+        if e.store.backend and w.status == 'active':
+            text+=' '+APP_BACKEND_RECEIPT
+            if e.other_backend_delivers(): text+='\n'+OTHER_BACKEND_WINDOW
         return text
 
     def reschedule(self,w):

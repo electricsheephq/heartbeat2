@@ -19,11 +19,14 @@ import time
 from typing import Any
 
 from .clock import Clock
-from .model import (Wake, Occurrence, Session, KINDS, WAKE_STATUSES,
+from .model import (Wake, Occurrence, Session, KINDS, WAKE_STATUSES, FINISHED_WAKE_STATUSES,
                     TERMINAL_OCCURRENCE_STATES)
 from .schedule import local_day
+from .serving import backend_epoch_alive
 
 SCHEMA_VERSION = 1
+# Notifier v1 supplies a send callback with no end-to-end timeout.
+BACKEND_NOTICE_RESERVATION_S = 3600
 HELD_REPORT_OUTCOMES = frozenset({'progress', 'done', 'needs_attention', 'blocked'})
 # The characters str.strip() removes, so SQL trim() agrees with Python on what a blank summary is.
 _WHITESPACE = ''.join(chr(c) for c in range(0x3001) if chr(c).isspace())
@@ -146,14 +149,19 @@ def _validate_wake(wake: Wake):
 # Keys that guard owner input against replay (human:, nonhuman:), and keys per wake, session or day, are never pruned here.
 # Nor is children:<occurrence id>:<attempt>: a recovered turn can stay bound to an old occurrence after gc removes its row,
 # and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
+BACKEND_REINJECT_PREFIX = 'backend_reinject:'
 OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'held_since:', 'ignored:', 'inject_failures:',
                             'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
-                            'stop_hint_offered:', 'supersede_on_refund:')
+                            'stop_hint_offered:', 'supersede_on_refund:', BACKEND_REINJECT_PREFIX)
+POLLER_META = frozenset({'epoch', 'poller_pid', 'poller_started_at', 'last_tick_at', 'last_tick_monotonic',
+                         'probing_since', 'probing_epoch', 'probing_until', 'last_gc_at', 'last_error',
+                         'outages', 'off_since', 'provider_health', 'stop_hint_shown'})
 
 
 class Store:
-    def __init__(self, path: str | Path, clock: Clock):
+    def __init__(self, path: str | Path, clock: Clock, *, backend=False):
         self.path, self.clock = Path(path), clock
+        self.backend = backend
         self._lock = threading.RLock()
         self._savepoint = 0
         self.notify_reservation = None
@@ -284,14 +292,66 @@ class Store:
             [_encode(k, v) for k, v in data.items()])
 
     def get_meta(self, key: str) -> str | None:
+        if self.backend and key in POLLER_META:
+            key = 'backend:' + key
         with self._lock:
             row = self.connection.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
             return row[0] if row else None
 
     def set_meta(self, key: str, value: str):
+        if self.backend and key in POLLER_META:
+            key = 'backend:' + key
         with self.atomic():
             self.connection.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                     (key, str(value)))
+
+    def backend_reinject_state(self, occurrence_id):
+        if not self.backend: return {}
+        value = self.get_meta(BACKEND_REINJECT_PREFIX + occurrence_id)
+        if value is None: return {}
+        if value.isdecimal():
+            # An older store used zero to mark the first resend awaiting acceptance.
+            count = int(value)
+            return {'count': count, 'due': count == 0}
+        state = json.loads(value)
+        state.pop('accepted_seq', None)  # Obsolete evidence from a pre-probe claim.
+        return state
+
+    def remove_backend_turn_order(self):
+        """Remove obsolete backend evidence during scheduler reconciliation."""
+        with self.atomic():
+            self.connection.execute("""DELETE FROM meta WHERE key GLOB 'backend:turn_seq:*'
+                OR key GLOB 'backend:busy_turn_order:*' OR key GLOB 'backend:completed_turn_order:*'""")
+
+    def stamp_backend(self, session_key: str) -> bool:
+        with self.atomic():
+            if self.get_meta('host:' + session_key) == 'backend':
+                return True
+            # Stamping changes which poller can see the key. Keep gateway work with its owner.
+            done_wakes = sorted(FINISHED_WAKE_STATUSES)
+            done_occurrences = sorted(TERMINAL_OCCURRENCE_STATES)
+            wake_params = ','.join('?' for _ in done_wakes)
+            occurrence_params = ','.join('?' for _ in done_occurrences)
+            work = self.connection.execute(
+                f"SELECT 1 FROM wakes WHERE session_key=? AND status NOT IN ({wake_params}) "
+                "UNION ALL SELECT 1 FROM occurrences o JOIN wakes w ON w.id=o.wake_id "
+                f"WHERE w.session_key=? AND o.state NOT IN ({occurrence_params}) LIMIT 1",
+                (session_key, *done_wakes, session_key, *done_occurrences)).fetchone()
+            if work:
+                return False
+            self.connection.execute("INSERT OR IGNORE INTO meta(key,value) VALUES (?, 'backend')",
+                                    ('host:' + session_key,))
+            return self.get_meta('host:' + session_key) == 'backend'
+
+    def _host_filter(self, session_key):
+        match = f"EXISTS (SELECT 1 FROM meta host WHERE host.key='host:' || ({session_key}) AND host.value='backend')"
+        return match if self.backend else 'NOT ' + match
+
+    def session_meta_keys(self, prefix):
+        with self._lock:
+            return [row[0] for row in self.connection.execute(
+                f"SELECT substr(key, ?) FROM meta WHERE key LIKE ? AND {self._host_filter('substr(meta.key, ?)')}",
+                (len(prefix) + 1, prefix + '%', len(prefix) + 1))]
 
     def mark_reported(self, items: list[tuple[str, str]]):
         with self.atomic():
@@ -337,10 +397,11 @@ class Store:
 
     def get_wake(self, wake_id: str) -> Wake | None:
         with self._lock:
-            return _record(Wake, self.connection.execute("SELECT * FROM wakes WHERE id=?", (wake_id,)).fetchone())
+            return _record(Wake, self.connection.execute(
+                f"SELECT * FROM wakes WHERE id=? AND {self._host_filter('wakes.session_key')}", (wake_id,)).fetchone())
 
     def list_wakes(self, session_key: str | None = None, *, status: str | None = None) -> list[Wake]:
-        clauses, values = [], []
+        clauses, values = [self._host_filter('wakes.session_key')], []
         if session_key is not None:
             clauses.append("session_key=?")
             values.append(session_key)
@@ -349,7 +410,20 @@ class Store:
             values.append(status)
         with self._lock:
             return [_record(Wake, row) for row in self.connection.execute(
-                "SELECT * FROM wakes" + (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY created_at,id", values)]
+                "SELECT * FROM wakes WHERE " + " AND ".join(clauses) + " ORDER BY created_at,id", values)]
+
+    def active_wake_counts(self, session_key, exclude_id=None):
+        """Count slots across the profile while keeping wake records private to their host."""
+        local, total = 0, 0
+        with self._lock:
+            for key, trigger in self.connection.execute(
+                    "SELECT session_key,trigger_json FROM wakes WHERE status IN ('active','proposed') AND id IS NOT ?",
+                    (exclude_id,)):
+                trigger = json.loads(trigger)
+                if isinstance(trigger, dict) and trigger.get('builtin'): continue
+                total += 1
+                local += key == session_key
+        return local, total
 
     def cas_wake(self, wake_id: str, expected_status: str, *, expected_version: int | None = None,
                  **updates) -> bool:
@@ -392,19 +466,20 @@ class Store:
     def get_occurrence(self, wake_id: str, dedupe_key: str) -> Occurrence | None:
         with self._lock:
             return _record(Occurrence, self.connection.execute(
-                "SELECT * FROM occurrences WHERE wake_id=? AND dedupe_key=?", (wake_id, dedupe_key)).fetchone())
+                "SELECT o.* FROM occurrences o JOIN wakes w ON w.id=o.wake_id WHERE wake_id=? AND dedupe_key=? AND "
+                + self._host_filter('w.session_key'), (wake_id, dedupe_key)).fetchone())
 
     def list_occurrences(self, wake_id: str | None = None, *, state: str | None = None,
                          session_key: str | None = None) -> list[Occurrence]:
-        clauses, values = [], []
+        clauses, values = [self._host_filter('w.session_key')], []
         for column, value in (("o.wake_id", wake_id), ("o.state", state), ("w.session_key", session_key)):
             if value is not None:
                 clauses.append(f"{column}=?")
                 values.append(value)
         with self._lock:
             return [_record(Occurrence, row) for row in self.connection.execute(
-                "SELECT o.* FROM occurrences o JOIN wakes w ON w.id=o.wake_id" +
-                (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY o.rowid", values)]
+                "SELECT o.* FROM occurrences o JOIN wakes w ON w.id=o.wake_id WHERE " +
+                " AND ".join(clauses) + " ORDER BY o.rowid", values)]
 
     def dispatches_today(self, wake_id, timezone):
         """Count claimed/dispatched occurrences; refunded unsent claims don't spend."""
@@ -418,6 +493,36 @@ class Store:
         """Wake turns still running that hold a message slot: daily_counts counts them as delivered until they finish."""
         return sum(1 for o in self.list_occurrences(session_key=key)
                    if o.state in {'claimed', 'started'} and not o.force_silent)
+
+    def notice_reserved(self, key):
+        reservation = self.notify_reservation
+        if reservation is not None and reservation[0] == key: return True
+        if not self.backend: return False
+        value = self.get_meta('backend:notice_in_flight:' + key) or ''
+        epoch, _, reserved_at = value.partition('|')
+        try:
+            return (self.clock.now() - float(reserved_at) <= BACKEND_NOTICE_RESERVATION_S
+                    and backend_epoch_alive(epoch))
+        except ValueError:
+            return False  # Old epoch-only reservations have no usable deadline.
+
+    def reserve_backend_notice(self, key, epoch):
+        if self.backend: self.set_meta('backend:notice_in_flight:' + key, f'{epoch}|{self.clock.now()}')
+
+    def release_backend_notice(self, key, epoch):
+        if not self.backend: return
+        with self._lock:
+            # A finalizer outside a transaction retries without the connection lock held.
+            timeout=None
+            if not self.connection.in_transaction:
+                timeout=self.connection.execute('PRAGMA busy_timeout').fetchone()[0]
+                self.connection.execute('PRAGMA busy_timeout=0')
+            try:
+                self.connection.execute("DELETE FROM meta WHERE key=? AND "
+                                        "(value=? OR substr(value,1,instr(value,'|')-1)=?)",
+                                        ('backend:notice_in_flight:' + key, epoch, epoch))
+            finally:
+                if timeout is not None: self.connection.execute(f'PRAGMA busy_timeout={timeout}')
 
     def daily_counts(self, key, timezone):
         totals = {'model_turns': 0, 'delivered': 0}
@@ -437,9 +542,7 @@ class Store:
                 if o.state == 'claimed': totals['model_turns'] += 1
                 if not o.force_silent: totals['delivered'] += 1
         # A send that crosses midnight is charged on completion, so reserve its slot on the current day too.
-        # The notifier sets and clears this under the store lock, but this read may run outside it: read it once.
-        reservation = self.notify_reservation
-        if reservation is not None and reservation[0] == key:
+        if self.notice_reserved(key):
             totals['delivered'] += 1
         return totals
 
@@ -553,7 +656,9 @@ class Store:
 
     def get_session(self, session_key: str) -> Session | None:
         with self._lock:
-            return _record(Session, self.connection.execute("SELECT * FROM sessions WHERE session_key=?", (session_key,)).fetchone())
+            return _record(Session, self.connection.execute(
+                f"SELECT * FROM sessions WHERE session_key=? AND {self._host_filter('sessions.session_key')}",
+                (session_key,)).fetchone())
 
     def upsert_session(self, session: Session) -> bool:
         """Create if absent; all updates go through cas_session."""
@@ -578,7 +683,8 @@ class Store:
 
     def list_sessions(self) -> list[Session]:
         with self._lock:
-            return [_record(Session, row) for row in self.connection.execute("SELECT * FROM sessions ORDER BY session_key")]
+            return [_record(Session, row) for row in self.connection.execute(
+                f"SELECT * FROM sessions WHERE {self._host_filter('sessions.session_key')} ORDER BY session_key")]
 
     def add_event(self, kind: str, dedupe_key: str, payload: Any, *,
                   session_key: str | None = None, chat_id: str | None = None) -> bool:
@@ -592,7 +698,8 @@ class Store:
     def pending_events(self, *, limit: int = 100) -> list[dict]:
         with self._lock:
             result = [dict(row) for row in self.connection.execute(
-                "SELECT * FROM events WHERE consumed_at IS NULL ORDER BY seq LIMIT ?", (limit,))]
+                f"SELECT * FROM events WHERE consumed_at IS NULL AND {self._host_filter('events.session_key')} "
+                "ORDER BY seq LIMIT ?", (limit,))]
         for row in result:
             row["payload_json"] = json.loads(row["payload_json"])
         return result

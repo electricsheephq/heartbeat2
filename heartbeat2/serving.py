@@ -9,19 +9,69 @@ have admitted the home: it skips a profile that still runs its own gateway. The
 served set changes at runtime, so callers ask on every step.
 """
 import logging
+import math
+import os
 
 LOG=logging.getLogger('heartbeat2')
-SERVED,FOREIGN,UNKNOWN,NO_GATEWAY='served','foreign','unknown','no_gateway'
+SERVED,BACKEND,FOREIGN,UNKNOWN,NO_GATEWAY='served','backend','foreign','unknown','no_gateway'
 REASONS={FOREIGN:'this gateway does not serve this profile',
          UNKNOWN:'cannot tell whether this gateway serves this profile',
          NO_GATEWAY:'no gateway in this process'}
 _WARNED=set()
+# On Linux psutil derives the start timestamp from the wall-clock boot time.
+CREATE_TIME_TOLERANCE_S=2
+
+
+def pid_alive(pid):
+    if not pid or pid <= 0: return False
+    try: os.kill(pid,0)
+    except ProcessLookupError: return False
+    except PermissionError: pass  # The process exists even if we cannot signal it.
+    return True
+
+
+def _start_timestamp(value):
+    try: value=float(value)
+    except (TypeError, ValueError, OverflowError): return None
+    return value if math.isfinite(value) else None
+
+
+def _create_time(psutil, pid):
+    try: return _start_timestamp(psutil.Process(pid).create_time())
+    except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied, OSError, RuntimeError):
+        return None
+
+
+def backend_epoch(nonce):
+    pid=os.getpid()
+    try: import psutil
+    except ImportError: created=None
+    else: created=_create_time(psutil,pid)
+    return f'{pid}:{created if created is not None else ""}:{nonce}'
+
+
+def backend_epoch_alive(epoch, *, pid=None, create_time_tolerance=CREATE_TIME_TOLERANCE_S):
+    owner,_,identity=(epoch or '').partition(':')
+    if not owner.isdecimal(): return False
+    owner=int(owner)
+    if (pid is not None and owner!=pid) or not pid_alive(owner): return False
+    # Preserve live work when a legacy epoch or failed inspection cannot disprove ownership.
+    created,sep,_=identity.partition(':')
+    recorded=_start_timestamp(created) if sep else None
+    if recorded is None: return True
+    try: import psutil
+    except ImportError: return True
+    current=_create_time(psutil,owner)
+    if current is None: return pid_alive(owner)
+    return abs(recorded-current)<=create_time_tolerance
 
 
 def state(manager):
-    """SERVED, FOREIGN, UNKNOWN (treat as foreign) or NO_GATEWAY."""
-    if manager is None or getattr(manager,'_cli_ref',None) is not None or not getattr(manager,'has_gateway_message_injector',False):
+    """SERVED, BACKEND, FOREIGN, UNKNOWN (treat as foreign) or NO_GATEWAY."""
+    if manager is None or getattr(manager,'_cli_ref',None) is not None:
         return NO_GATEWAY
+    if not getattr(manager,'has_gateway_message_injector',False):
+        return BACKEND if getattr(manager,'has_tui_message_injector',False) else NO_GATEWAY
     injector=getattr(manager,'_gateway_message_injector',())  # Read once: shutdown clears it to None.
     if injector is None: return NO_GATEWAY
     try:

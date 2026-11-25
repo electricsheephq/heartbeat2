@@ -1,4 +1,5 @@
 """Compact /pulse controls; gateway-bound session is the only authority."""
+from copy import copy
 from dataclasses import replace
 from datetime import datetime, timedelta
 import json
@@ -7,9 +8,9 @@ import re
 from .model import Wake, Session, Occurrence, TIME_KINDS, EVENT_KINDS, PROBE_KINDS, FINISHED_WAKE_STATUSES, RUN_KEY_PREFIX, RUN_PAYLOAD
 from . import governor
 from . import cache
-from .policy import INJECTION_CONFIG, LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, platform_refusal, session_platform, owner_requested, agreed_watcher, cap_counts, is_keep_warm, is_watcher, sleeps
+from .policy import BACKEND_SCHEDULE_ONLY, INJECTION_CONFIG, LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, platform_refusal, session_platform, owner_requested, agreed_watcher, cap_counts, is_keep_warm, is_watcher, sleeps
 from .schedule import parse_duration, quiet_end, local_day, _DURATION
-from .tool import session_env, Infeasible, filter_text
+from .tool import session_env, Infeasible, filter_text, OTHER_BACKEND_WINDOW, backend_reinject_note
 
 DURATIONS = _DURATION.pattern+r'(?:\s*(?:,\s*)?(?:and\s*)?'+_DURATION.pattern+r')*'  # one way to split whitespace: linear
 LIST_RECENT_FINISHED = 10
@@ -57,11 +58,17 @@ STATUS_REASON_TEXT = {'missed': 'missed: too late after HeartBeat or the gateway
 
 def _activation(engine, session, wake):
     if not session.enabled: raise ValueError('this chat is off; use /pulse on')
+    if engine.store.backend:
+        if not engine.eligible():
+            from .tool import APP_BACKEND_REFUSAL
+            raise ValueError(APP_BACKEND_REFUSAL)
+        if is_keep_warm(wake) or wake.trigger_json.get('own_time'):
+            raise ValueError('backend_schedule_only\n'+BACKEND_SCHEDULE_ONLY)
     active_count, global_active_count = cap_counts(engine.store, session.session_key, exclude_id=wake.id)
     gate = engine.policy.creation_gate(session_key=session.session_key, platform=session.platform,
         chat_type=session.chat_type, allow_gateway_injection=engine.injection_allowed(),
         creator='user', kind=wake.kind,
-        active_count=active_count, global_active_count=global_active_count)
+        active_count=active_count, global_active_count=global_active_count, backend=engine.store.backend)
     if not gate.allowed: raise ValueError(gate.reason + ('\n'+gate.detail if gate.detail else ''))
 
 
@@ -154,6 +161,8 @@ def _item(engine, wake, today_budget=None):
     kind = 'keep-warm' if is_keep_warm(wake) else wake.kind
     held = app_closed_hold(engine, wake)
     if not held and _sleeping(engine, wake): held = 'asleep until you write'
+    if note := backend_reinject_note(engine.store, wake):
+        held = ' · '.join(filter(None, (held, note)))
     return f'{wake.id} {wake.status} · {_oneline(wake.title) or _clip(_oneline(wake.note),60)} · ' + ('role · ' if wake.role else '') + kind + filter_text(wake, limit=24) + (f' · {due}' if due else '') + role + (' · you asked' if owner_requested(wake) or agreed_watcher(wake) else '') + (f' · {STATUS_REASON_TEXT.get(wake.status_reason, wake.status_reason)}' if wake.status_reason else '') + (' · '+held if held else '')
 
 
@@ -161,6 +170,12 @@ def app_closed_hold(engine, wake):
     if wake.platform not in LOCAL_SURFACES or wake.status != 'active' or is_keep_warm(wake): return ''
     since = [float(stamp) for o in engine.store.list_occurrences(wake.id, state='pending')
              if o.error == 'app_closed' and (stamp := engine.store.get_meta('held_since:'+o.id))]
+    if engine.store.backend:
+        from .notifier import ACCEPTED_HOLD_TEXT
+        accepted = [float(stamp) for o in engine.store.list_occurrences(wake.id, state='claimed')
+                    if o.error == 'app_closed' and (stamp := engine.store.get_meta('held_since:'+o.id))]
+        if accepted:
+            return 'held since '+_time(engine,min(accepted))+' · '+ACCEPTED_HOLD_TEXT
     return 'held: app window is closed · since '+_time(engine,min(since)) if since else ''
 
 
@@ -274,7 +289,7 @@ def _test(engine,w,session,cache_line,wake_cache=''):
             off=(('plugin_off',True,None) if not engine.policy.enabled else ('paused_all',True,None) if engine.paused() else None)
             # Dispatch walks waiting occurrences in order and sends the first that passes; if none passes, the first one's reason applies.
             # One accepted three times without an acknowledgement passes the gate but is dropped at the claim, and the walk goes on.
-            unacknowledged=lambda c:int(engine.store.get_meta('accepted:'+c.id) or 0)>=3
+            unacknowledged=lambda c:not engine.store.backend and int(engine.store.get_meta('accepted:'+c.id) or 0)>=3
             dies=lambda c:bool(waiting) and unacknowledged(c)
             # Each drop counts as an error, and enough in a row pause the wake before its next turn is sent; the
             # report-back is never paused (governor.error).
@@ -351,38 +366,64 @@ def _test(engine,w,session,cache_line,wake_cache=''):
 def handle(raw_args, runtime):
     key = session_env('HERMES_SESSION_KEY')
     if not key or key == 'default': return 'Error: /pulse needs the invoking gateway session.'
+    gateway_view = None
     try:
-        engine = runtime.get_engine()
-        engine.refresh()  # Never inside a transaction: refresh takes the policy lock before the store lock.
         action, _, rest = (raw_args or 'status').strip().partition(' ')
         rest = rest.strip()
+        engine = runtime.get_engine()
+        arms = action in {'add','role','run','resume','ok','keep','slow'} or action in {'warm','owntime'} and rest=='on'
+        if arms and engine.tool.app_backend_unavailable():
+            from .tool import APP_BACKEND_REFUSAL
+            return APP_BACKEND_REFUSAL
+        engine.refresh()  # Never inside a transaction: refresh takes the policy lock before the store lock.
+        if engine.store.backend:
+            session = engine.tool.identity(key=key)
+            if session is None and arms and engine.tool.app_backend_unavailable(key=key):
+                from .tool import APP_BACKEND_REFUSAL
+                return APP_BACKEND_REFUSAL
+            if session is None and not arms and engine.store.get_meta('host:'+key) != 'backend':
+                from .store import Store
+                gateway_view = Store(engine.store.path, engine.clock, backend=False)
+                session = gateway_view.get_session(key)
+                if session is not None and session.platform in LOCAL_SURFACES:
+                    # Reuse the command handlers with a scoped view, without switching the live engine.
+                    engine = copy(engine)
+                    engine.store = gateway_view
+                    engine.tool = copy(engine.tool)
+                    engine.tool.engine = engine
+                else:
+                    return 'Error: /pulse needs a known app session.'
+            elif session is None or not engine.deliverable(session.platform):
+                return 'Error: /pulse needs a known app session.'
         preview=engine.store.get_wake(rest) if action=='test' else None
         cache_line=engine.tool.cache_result(preview) if preview and preview.session_key==key else ''
         wake_cache=engine.cache_line(preview) if preview and preview.session_key==key else ''
-        with engine.store.atomic():
-            session = engine.store.get_session(key)
-            bound={name:session_env('HERMES_SESSION_'+name.upper()) for name in ('platform','chat_type','chat_id')}
-            bound['platform']=session_platform(bound['platform'],engine.ctx)
-            # Hermes commands bind platform=local outside the model turn's surface scope. Only a known
-            # app surface in this same chat is a valid fallback; local itself never establishes delivery.
-            if bound['platform']=='local':
-                if session and session.platform in LOCAL_SURFACES:
-                    bound['platform']=session.platform
-                elif session is None:
-                    return 'Send a message in this chat first, then try /pulse again.'
-                elif action not in {'run','test'} and platform_refusal(session.platform):
-                    return platform_refusal(session.platform)  # a CLI chat gets the CLI's own refusal
-            app_off=action=='off' and session is not None and session.platform in LOCAL_SURFACES
-            if action not in {'run','test'} and not app_off and bound['platform'] and not deliverable_platform(bound['platform']):
-                return platform_refusal(bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
-            if action not in {'run','test'} and deliverable_platform(bound['platform']):
-                engine.store.upsert_session(Session(key,**bound,current_session_id=session_env('HERMES_SESSION_ID')))
+        if not engine.store.backend and gateway_view is None:
+            with engine.store.atomic():
                 session=engine.store.get_session(key)
-                engine.store.cas_session(key,{'platform':session.platform,'chat_type':session.chat_type,'chat_id':session.chat_id},**bound)
-                session=engine.store.get_session(key)
-            if session is None or not (app_off or deliverable_platform(session.platform)):
-                return platform_refusal(session.platform if session else bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
-            if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
+                bound={name:session_env('HERMES_SESSION_'+name.upper()) for name in ('platform','chat_type','chat_id')}
+                if bound['platform']: bound['platform']=session_platform(bound['platform'],engine.ctx)
+                # Hermes commands bind platform=local outside the model turn's surface scope. Only a known
+                # app surface in this same chat is a valid fallback; local itself never establishes delivery.
+                if bound['platform']=='local':
+                    if session and session.platform in LOCAL_SURFACES:
+                        bound['platform']=session.platform
+                    elif session is None:
+                        return 'Send a message in this chat first, then try /pulse again.'
+                    elif action not in {'run','test'} and platform_refusal(session.platform):
+                        return platform_refusal(session.platform)  # a CLI chat gets the CLI's own refusal
+                app_off=action=='off' and session is not None and session.platform in LOCAL_SURFACES
+                if action not in {'run','test'} and not app_off and bound['platform'] and not deliverable_platform(bound['platform']):
+                    return platform_refusal(bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
+                if action not in {'run','test'} and deliverable_platform(bound['platform']):
+                    engine.store.upsert_session(Session(key,**bound,current_session_id=session_env('HERMES_SESSION_ID')))
+                    session=engine.store.get_session(key)
+                    if session is not None:
+                        engine.store.cas_session(key,{'platform':session.platform,'chat_type':session.chat_type,'chat_id':session.chat_id},**bound)
+                        session=engine.store.get_session(key)
+                if session is None or not (app_off or deliverable_platform(session.platform)):
+                    return platform_refusal(session.platform if session else bound['platform']) or 'Error: /pulse needs a known messaging-gateway or app session.'
+        if engine.policy.dm_only and session.chat_type != 'dm': return 'Error: /pulse requires a DM.'
         if action in {'add','role'}: return _add(engine,session,rest,role=action=='role')
         if action == 'warm' and rest in {'','on','off'}: return _warm(engine,key,rest)
         if action == 'owntime' and rest in {'','on','off'}: return _owntime(engine,key,rest)
@@ -471,6 +512,8 @@ def handle(raw_args, runtime):
                 if engine.policy.own_time_hours or engine.store.get_meta('own_time_off:'+key)=='1' or engine.store.get_meta('own_time_on:'+key)=='1':
                     lines.append('Own time: '+own_time_label(engine,key))
                 if held: lines.append(f'Held items: {held}')
+                if engine.store.backend and held and engine.other_backend_delivers():
+                    lines.append(OTHER_BACKEND_WINDOW)
                 if engine.settings_notice(): lines.append(engine.settings_notice())
                 if cache.ttl_for_session(engine.store,session)==(300,'hermes'):
                     lines.append('your Claude cache lasts 5 min, so every wake is cold; set `prompt_caching: {cache_ttl: auto}` (1h for chat) in config.yaml')
@@ -563,6 +606,8 @@ def handle(raw_args, runtime):
         return 'Error: '+str(exc)
     except Exception:
         return 'Error: HeartBeat 2.0 is unavailable.'
+    finally:
+        if gateway_view is not None: gateway_view.close()
 
 
 def _transition(engine,session,wake,action,seconds):
@@ -628,6 +673,7 @@ def _keep_warm_line(engine, session, wake, counts):
 
 def own_time_label(engine, key):
     """Whether own time runs in this chat, for /pulse owntime and status (#175, #177)."""
+    if engine.store.backend: return BACKEND_SCHEDULE_ONLY
     hours = engine.policy.own_time_hours
     if not hours: return 'off for this profile (own_time_hours is 0 in settings)'
     session = engine.store.get_session(key)
@@ -643,6 +689,7 @@ def _owntime(engine, key, rest):
     """/pulse owntime on|off: own time in this one chat or topic (#175). Each topic of a group is its own chat.
 
     Direct chats have own time unless the owner turns it off; a group or topic only once the owner turns it on (#177)."""
+    if engine.store.backend: return BACKEND_SCHEDULE_ONLY
     import hashlib
     with engine.store.atomic():
         if rest:

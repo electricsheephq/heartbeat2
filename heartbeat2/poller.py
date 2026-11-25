@@ -16,9 +16,10 @@ import random
 import uuid
 
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
-from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
+from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, agreed_watcher, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
-from . import governor
+from .store import BACKEND_REINJECT_PREFIX
+from . import governor, serving, tui_probe
 
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
@@ -26,6 +27,8 @@ PROBES_PER_TICK = 16
 OUTAGE_GAP_S = 60     # a longer gap between ticks means the gateway or the poller was down (#230)
 OUTAGES_KEPT = 50
 KEEP_WARM_NOTICE_AFTER = 7200  # keep-warm unable to ping this long is worth one line to the owner (#234)
+BACKEND_RESEND_MIN_AGE_S = 30
+BACKEND_RESEND_SAMPLE_GAP_S = 5  # One default Runtime tick, measured on the monotonic clock.
 FINAL_SKIP_REASONS = frozenset({'unanswered','asleep','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires','nothing_to_report'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
@@ -68,6 +71,9 @@ class Poller:
         self.tool=Tool(self,session_key_fn or current_session_key)
         self.probe_runner=probe_runner or self._probe
         self.epoch=uuid.uuid4().hex
+        if store.backend: self.epoch=serving.backend_epoch(self.epoch)
+        self._app_closed_until={}
+        self._backend_missing={}
         LOCAL_EPOCHS.add(self.epoch)
         CREATED_EPOCHS.add(self.epoch)
         self.log=LOG
@@ -106,7 +112,10 @@ class Poller:
         now=self.clock.now()
         return bool(self.policy.enabled and not self.paused() and self.injection_allowed() and s is not None and s.enabled
                     and not (s.paused_until is not None and s.paused_until>now)
-                    and not (self.policy.dm_only and s.chat_type!='dm') and deliverable_platform(s.platform))
+                    and not (self.policy.dm_only and s.chat_type!='dm') and self.deliverable(s.platform))
+
+    def deliverable(self, platform):
+        return deliverable_platform(platform, backend=self.store.backend)
 
     def injection_allowed(self):
         try:
@@ -118,13 +127,13 @@ class Poller:
             return False
 
     def eligible(self):
-        from .serving import state,SERVED
-        return state(getattr(self.ctx,'_manager',None))==SERVED
+        from .serving import state,SERVED,BACKEND
+        return state(getattr(self.ctx,'_manager',None))==(BACKEND if self.store.backend else SERVED)
 
     def acquire(self):
         if self.closed or not self.eligible(): return False
         if self._lock_file is not None: return True
-        f=open(self.store.path.parent/'poller.lock','a+')
+        f=open(self.store.path.parent/('poller-backend.lock' if self.store.backend else 'poller.lock'),'a+')
         try:
             fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:
@@ -147,6 +156,22 @@ class Poller:
             self._lock_file.close()
             self._lock_file=None
 
+    def other_backend_delivers(self):
+        if not self.store.backend or self._lock_file is not None: return False
+        pid=self.store.get_meta('poller_pid') or ''
+        if not pid.isdecimal() or int(pid)==os.getpid(): return False
+        if not serving.backend_epoch_alive(self.store.get_meta('epoch'),pid=int(pid)): return False
+        # Commands use a different Poller from the runner. Its PID metadata
+        # can outlive the lock, so verify that the recorded peer still blocks it.
+        try:
+            with (self.store.path.parent/'poller-backend.lock').open('r') as lock:
+                fcntl.flock(lock,fcntl.LOCK_SH|fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            pass
+        return False
+
     def close(self):
         self.closed=True
         if self._owns_notifications: self.notifications.close()
@@ -154,9 +179,34 @@ class Poller:
         LOCAL_EPOCHS.discard(self.epoch)
         self.release()
 
+    def _foreign_backend_claim(self,o):
+        return (self.store.backend and o.pid is not None and o.pid!=os.getpid()
+                and serving.backend_epoch_alive(o.epoch,pid=o.pid))
+
+    @staticmethod
+    def _own_backend_epoch(epoch):
+        pid=os.getpid()
+        if not epoch or not epoch.startswith(f'{pid}:'): return False
+        # Hermes can evict this module during reload, losing its in-memory epoch registry.
+        return epoch in CREATED_EPOCHS or serving.backend_epoch_alive(epoch,pid=pid)
+
+    def _own_claim(self,o):
+        # A replaced delivery runner can leave a queued prompt in this process.
+        return o.pid==os.getpid() and self._own_backend_epoch(o.epoch)
+
+    def has_own_work(self):
+        return any(self._own_claim(o) for state in ('claimed','started')
+                   for o in self.store.list_occurrences(state=state))
+
+    def _foreign_backend_busy(self,session):
+        epoch=session.busy_epoch or ''
+        return (self.store.backend and not epoch.startswith(f'{os.getpid()}:')
+                and serving.backend_epoch_alive(epoch))
+
     def reconcile(self):
         s=self.store
         with s.atomic():
+            if self.process_start and s.backend: s.remove_backend_turn_order()
             noticed=set()
             for w in s.list_wakes() if self.process_start else []:
                 reason='invalid_trigger_event' if w.kind in EVENT_KINDS and 'event' in w.trigger_json else (
@@ -169,12 +219,20 @@ class Poller:
                             self.notice(w.session_key,f'A watcher ({w.id}) used an unsupported {field} and could never fire, so it was stopped. Ask me to set it up again.')
                             noticed.add(w.session_key)
             for o in s.list_occurrences() if self.process_start else []:
+                if o.state in {'claimed','started'} and s.backend:
+                    if self._own_claim(o) or self._foreign_backend_claim(o): continue
+                    if o.state=='claimed':
+                        self._resend_backend_claim(o,'restart_refund')
+                        continue
                 if o.state=='claimed':
                     self.refund_claimed(o,'restart_refund')
                     s.set_meta('recovered:'+o.id,'1')
                 elif o.state=='started': self.interrupt(o,'restart')
             for session in s.list_sessions() if self.process_start else []:
-                if session.busy_since is not None and session.busy_epoch not in LOCAL_EPOCHS:
+                if session.busy_since is None: continue
+                local=(self._own_backend_epoch(session.busy_epoch) if s.backend
+                       else session.busy_epoch in LOCAL_EPOCHS)
+                if not local and not self._foreign_backend_busy(session):
                     s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             # Persisted future deadlines remain future. time_due() coalesces
             # genuinely overdue intervals at the next tick without changing them
@@ -310,7 +368,10 @@ class Poller:
         if self.closed or not self.eligible(): return
         try:
             self.refresh()
-            if not self.acquire(): return
+            if not self.acquire():
+                if self.store.backend and self.eligible() and self.policy.enabled and not self.paused():
+                    with self.store.atomic(): self.acks(own_only=True)
+                return
             s,now=self.store,self.clock.now()
             self._tick_started_wall=now
             with s.atomic():
@@ -354,18 +415,25 @@ class Poller:
                 if now-float(s.get_meta('last_gc_at') or 0)>=3600:
                     s.gc(ledger_days=self.policy.ledger_days,timezone=self.policy.resolved_timezone())
                 s.set_meta('last_error','')
-            for o in s.list_occurrences(state='pending'):
-                if not self.eligible(): break
-                w=s.get_wake(o.wake_id)
-                cache_line=self.cache_line(w)  # Pricing may fetch metadata; never hold the write lock.
-                self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
+            self.dispatch_pending()
             self.notifications.tick(self)
         except Exception as exc:
             self.log.warning('heartbeat2 tick failed',exc_info=True)
             try: self.store.set_meta('last_error',type(exc).__name__)
             except Exception: pass
 
-    def acks(self):
+    def dispatch_pending(self):
+        occurrences=self.store.list_occurrences(state='pending')
+        if self.store.backend:
+            self._app_closed_until={o.id:self._app_closed_until[o.id] for o in occurrences if o.id in self._app_closed_until}
+        for o in occurrences:
+            if not self.eligible(): break
+            w=self.store.get_wake(o.wake_id)
+            if w is None: continue  # A legacy session may have been stamped after listing.
+            cache_line=self.cache_line(w)  # Pricing may fetch metadata; never hold the write lock.
+            self.evaluate(w,lambda o=o,cache_line=cache_line:self.dispatch(o,cache_line=cache_line))
+
+    def acks(self, *, own_only=False):
         s=self.store
         try: timeout=float(os.environ.get('HERMES_AGENT_TIMEOUT','1800'))
         except (TypeError,ValueError): timeout=1800
@@ -373,6 +441,8 @@ class Poller:
         ttl=max((provider_limit or 0)*10,7200)
         now=self.clock.now()
         for o in s.list_occurrences(state='started'):
+            if own_only and not self._own_claim(o): continue
+            if self._foreign_backend_claim(o): continue
             w=s.get_wake(o.wake_id)
             session=s.get_session(w.session_key)
             activity=max(o.started_at if o.started_at is not None else now,session.last_activity_at or 0 if session else 0)
@@ -380,9 +450,29 @@ class Poller:
             if now-activity<limit: continue
             self.interrupt(o,'no_session_end')
         for session in s.list_sessions():
-            if session.busy_since is not None and now-max(session.busy_since,session.last_activity_at or 0)>=ttl:
+            # A reload retires the hook epoch, but the PID still owns its abandoned mark.
+            if own_only and not self._own_backend_epoch(session.busy_epoch): continue
+            if (session.busy_since is not None and now-max(session.busy_since,session.last_activity_at or 0)>=ttl
+                    and not self._foreign_backend_busy(session)):
                 s.cas_session(session.session_key,{'busy_since':session.busy_since,'last_activity_at':session.last_activity_at},busy_since=None,busy_epoch=None)
+        previous_missing,self._backend_missing=self._backend_missing,{}
         for o in s.list_occurrences(state='claimed'):
+            if s.backend:
+                own=self._own_claim(o)
+                if own_only and not own: continue
+                w=s.get_wake(o.wake_id)
+                if own:
+                    self._backend_ack(w,o,now,previous_missing.get((o.id,o.attempt)))
+                elif not self._foreign_backend_claim(o):
+                    self._resend_backend_claim(o,'restart_refund')
+                    session=s.get_session(w.session_key)
+                    busy_epoch=session.busy_epoch if session else None
+                    if (busy_epoch and busy_epoch.startswith(f'{o.pid}:')
+                            and not serving.backend_epoch_alive(busy_epoch)):
+                        s.cas_session(w.session_key,{'busy_since':session.busy_since,'busy_epoch':busy_epoch},
+                                      busy_since=None,busy_epoch=None)
+                continue
+            if own_only and not self._own_claim(o): continue
             if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
                 if self.supersede_claimed(o): continue
@@ -391,6 +481,65 @@ class Poller:
                 self.terminal_one_shot(s.get_wake(o.wake_id))
                 governor.error(self,s.get_wake(o.wake_id))
             else: self.refund_claimed(o,'ack_timeout')
+
+    def _backend_ack(self,w,o,now,previous_missing):
+        s=self.store
+        resend=s.backend_reinject_state(o.id)
+        accepted_at=resend.get('accepted_at')
+        accepted_mono=resend.get('accepted_monotonic')
+        # Older accepts may carry an unsigned marker merged after owner text.
+        # Only a dispatch known to use the signed prompt may authorize a resend.
+        if accepted_at is not None and accepted_mono is not None and resend.get('prompt_attempt')==o.attempt:
+            mono=self.clock.monotonic()
+            if mono-accepted_mono>=BACKEND_RESEND_MIN_AGE_S:
+                if previous_missing is not None and 0<=mono-previous_missing<BACKEND_RESEND_SAMPLE_GAP_S:
+                    self._backend_missing[o.id,o.attempt]=previous_missing
+                elif self._backend_prompt_missing(w,o):
+                    if previous_missing is not None and mono-previous_missing>=BACKEND_RESEND_SAMPLE_GAP_S:
+                        self._resend_backend_claim(o,'app_closed')
+                        return
+                    self._backend_missing[o.id,o.attempt]=mono
+        since=o.claimed_at if accepted_at is None else accepted_at
+        if accepted_at is None or o.error!='app_closed':
+            if since is None or now-since<600: return
+        # An accepted prompt may still be queued. The clock alone cannot retire it.
+        self._hold_backend_app_closed(w,o,keep_claim=True)
+
+    @staticmethod
+    def _backend_prompt_missing(w,o):
+        # tui_probe loads up front with every module (#207); it resolves Hermes' TUI server only here.
+        return tui_probe.queued_or_inflight(w.session_key,f'⟦pulse o:{o.id} a:{o.attempt}') is False
+
+    def _resend_backend_claim(self,o,error):
+        s=self.store
+        with s.atomic():
+            if self.supersede_claimed(o) or not s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error=error): return
+            resend=s.backend_reinject_state(o.id)
+            resend.pop('accepted_at',None)
+            resend.pop('accepted_monotonic',None)
+            resend['due']=True
+            s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
+            s.set_meta('accepted:'+o.id,'0')
+
+    def _hold_backend_app_closed(self,w,o,*,keep_claim=False):
+        from .notifier import episode, episode_over, end_episode, EPISODE_PREFIX
+        s=self.store
+        key=w.session_key
+        with s.atomic():
+            new_accepted_hold=keep_claim and o.error!='app_closed'
+            if keep_claim:
+                if new_accepted_hold and not s.update_occurrence(
+                        o.wake_id,o.dedupe_key,'claimed',attempt=o.attempt,error='app_closed'): return
+            elif not self.refund_claimed(o,'app_closed'): return
+            now=self.clock.now()
+            if not keep_claim:
+                # A miss in this registry does not delay a successor with the chat open.
+                self._app_closed_until[o.id]=now+60
+            if episode_over(self,key): end_episode(self,key)
+            if new_accepted_hold or not s.get_meta('held_since:'+o.id):
+                s.set_meta('held_since:'+o.id,str(now))
+            if not is_keep_warm(w) and not s.get_meta(EPISODE_PREFIX+key):
+                s.set_meta(EPISODE_PREFIX+key,json.dumps(episode(self,key)))
 
     def family_enabled(self,w):
         family='silence' if w.kind=='owner_silent' else 'events' if w.kind in EVENT_KINDS else w.kind if w.kind in PROBE_KINDS else None
@@ -657,6 +806,7 @@ class Poller:
         """Why own time may not run in this chat (a session or wake), or '' (#177). A chat known to be one-to-one has it
         unless the owner turned it off there; an app chat, group, topic, group DM or a chat whose platform can't tell, only where the
         owner turned it on with /pulse owntime on. Each topic is a chat."""
+        if self.store.backend: return 'backend_schedule_only'
         meta=self.store.get_meta
         if meta('own_time_off:'+key)=='1': return 'chat_off'
         if is_direct_chat(chat.platform,chat.chat_type,chat.chat_id): return ''
@@ -859,7 +1009,7 @@ class Poller:
         if not s.enabled: return 'session_off',False,None
         if s.paused_until is not None and s.paused_until>now: return 'session_paused',True,None
         if self.policy.dm_only and (s.chat_type!='dm' or w.chat_type!='dm'): return 'dm_only',False,None
-        if not deliverable_platform(s.platform): return 'non_gateway',False,None
+        if not self.deliverable(s.platform): return 'non_gateway',False,None
         # The owner has been away sleep_after_days: the agent's own work runs no turn until they write (#62). This comes
         # before the message holds, which still run a turn silently. A report-back passes only for agreed results.
         if sleeps(w) and self.policy.asleep(s,now):
@@ -907,6 +1057,7 @@ class Poller:
         if sum(now-t<60 for t in flood)>=5: return 'global_flood',True,None
         if now<float(self.store.get_meta('not_before:'+o.id) or 0):
             return ('app_closed' if o.error=='app_closed' else 'not_before'),True,None
+        if o.error=='app_closed' and now<self._app_closed_until.get(o.id,0): return 'app_closed',True,None
         if s.busy_since is not None: return 'busy',True,None
         if s.last_wake_turn_at is not None and now-s.last_wake_turn_at<self.policy.wake_spacing_minutes*60: return 'wake_spacing',True,None
         if self.store.list_occurrences(session_key=s.session_key,state='claimed') or self.store.list_occurrences(session_key=s.session_key,state='started'): return 'in_flight',True,None
@@ -958,7 +1109,7 @@ class Poller:
             return
         # Check again at the claim barrier, not just at tick entry.
         if self.paused() or not self.policy.enabled: return
-        if int(s.get_meta('accepted:'+o.id) or 0)>=3:
+        if not s.backend and int(s.get_meta('accepted:'+o.id) or 0)>=3:
             s.cas_occurrence(w.id,o.dedupe_key,'pending','dead',error='ack_timeout')
             self.notice(w.session_key,'A wake was not acknowledged after three attempts.')
             self.terminal_one_shot(s.get_wake(w.id))
@@ -1030,6 +1181,13 @@ class Poller:
                 health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
             self.refund_claimed(o,held_by)
             return
+        if s.backend:
+            # A local hook can run as soon as the injector admits the prompt.
+            # Publish its boundary before dispatch so wake-first merges can be recognized.
+            resend=s.backend_reinject_state(o.id)
+            digest=hashlib.sha256(text.encode(errors='surrogatepass')).hexdigest()
+            resend.update(prompt_attempt=o.attempt,prompt_size=len(text),prompt_digest=digest)
+            s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
         inject_raised=False
         try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
         except Exception as exc:
@@ -1037,20 +1195,32 @@ class Poller:
             accepted=False
             self.log.warning('heartbeat2 injection failed: %s',type(exc).__name__)
         if accepted:
-            if session.platform in LOCAL_SURFACES:
-                from .notifier import end_episode
-                end_episode(self,session.session_key)
-            s.set_meta('held_since:'+o.id,'')
-            s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))
+            if not s.backend:
+                if session.platform in LOCAL_SURFACES:
+                    from .notifier import end_episode
+                    end_episode(self,session.session_key)
+                s.set_meta('held_since:'+o.id,'')
+                s.set_meta('accepted:'+o.id,str(int(s.get_meta('accepted:'+o.id) or 0)+1))
+            else:
+                with s.atomic():
+                    resend=s.backend_reinject_state(o.id)
+                    if resend.pop('due',False): resend['count']=resend.get('count',0)+1
+                    resend['accepted_at']=self.clock.now()
+                    resend['accepted_monotonic']=self.clock.monotonic()
+                    s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
+                    s.set_meta('accepted:'+o.id,'1')
             flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]
             s.set_meta('injections',json.dumps(flood+[self.clock.now()]))
             # A silent ping isn't a wake turn: it must not push the chat's real wakes back by wake spacing.
-            if not is_keep_warm(w):
+            if not s.backend and not is_keep_warm(w):
                 s.cas_session(session.session_key,{'last_wake_turn_at':session.last_wake_turn_at},last_wake_turn_at=self.clock.now())
         else:
             if health:
                 health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
             if session.platform in LOCAL_SURFACES and accepted is False and not inject_raised:
+                if s.backend:
+                    self._hold_backend_app_closed(w,o)
+                    return
                 # A retired window rejects synchronously: no turn ran and no delivery failed. Keep its original
                 # waiting time separately from watcher/message holds, so those holds and silence still work unchanged.
                 with s.atomic():
@@ -1058,7 +1228,8 @@ class Poller:
                         from .notifier import episode_over, end_episode
                         if episode_over(self,w.session_key): end_episode(self,w.session_key)
                         if not s.get_meta('held_since:'+o.id): s.set_meta('held_since:'+o.id,str(self.clock.now()))
-                        s.set_meta('not_before:'+o.id,str(self.clock.now()+60))
+                        retry_at=self.clock.now()+60
+                        s.set_meta('not_before:'+o.id,str(retry_at))
                         if not is_keep_warm(w):
                             from .notifier import episode, EPISODE_PREFIX
                             if not s.get_meta(EPISODE_PREFIX+w.session_key):
@@ -1085,7 +1256,7 @@ class Poller:
         chat_shown=s.get_meta('stop_hint_chat:'+session.session_key)
         if chat_shown is None:
             chat_shown='1' if session.first_notice_sent else '0'
-        tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
+        tag=marker_tag(s.marker_secret(),o.id,o.attempt) if s.backend or session.chat_type!='dm' else None
         if is_keep_warm(w): return render_keep_warm(w,o,marker_tag=tag)
         recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
         late=downtime=None
@@ -1098,12 +1269,22 @@ class Poller:
                 due_at=float(o.dedupe_key[2:])
                 downtime=self.downtime_since(o.created_at,max(0,o.created_at-due_at)) if o.created_at is not None else None
             except ValueError: pass
+        backend_reinject=s.backend and bool(s.backend_reinject_state(o.id).get('due'))
+        reminder=owner_class(w) and one_shot(w)
+        if backend_reinject:
+            # The turn could not start, even though the app acknowledged the injection.
+            held_by='app_closed'
+            reminder=reminder or agreed_watcher(w)
+            matched_at=o.matched_at if o.matched_at is not None else o.created_at
+            if late is None and matched_at is not None: late=max(0,self.clock.now()-matched_at)
+            if late is not None: downtime=late
         return render_wake(w,o,session,clock=self.clock,timezone=self.policy.resolved_timezone(),
              stop_hint=self.policy.stop_hint,stop_hint_shown=shown=='1',stop_hint_chat_shown=chat_shown=='1',
              recent_outcomes=recent,messages_today=self.daily(session.session_key)['delivered']-int(not o.force_silent and o.state in {'claimed','started'}),
              max_messages=self.policy.max_messages_per_day,governor_hint=governor.hint(self,w),late_by_s=late,
-             after_restart=bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
-             late_window_s=self.policy.late_window_s() if owner_class(w) and one_shot(w) else None,downtime_s=downtime,
+             after_restart=not backend_reinject and bool(s.get_meta('recovered:'+o.id)),held_by=held_by,message_held=message_held,
+             late_window_s=self.policy.late_window_s() if reminder else None,downtime_s=downtime,
+             backend_reinject=backend_reinject,
              cache_line=cache_line,marker_tag=tag,handoffs=handoffs,held_reports=held_reports,
              desk=render_desk(self,session,clock=self.clock,timezone=self.policy.resolved_timezone(),policy=self.policy,
                               measure=lambda text: len(escape_text(text)),turn=o)
@@ -1141,8 +1322,14 @@ class Poller:
             self.end_max_fires(s.get_wake(w.id))
             if provider and not s.get_meta('provider_health'): self.provider_failure(provider)
             session=s.get_session(w.session_key)
-            if session and not (cause=='restart' and session.busy_epoch in LOCAL_EPOCHS):
-                s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
+            if session:
+                may_clear=not (cause=='restart' and session.busy_epoch in LOCAL_EPOCHS)
+                if s.backend:
+                    # Claim and busy epochs come from different pollers. Check the busy owner itself.
+                    may_clear=(may_clear and not self._foreign_backend_busy(session)
+                               and (self._own_claim(o) or not self._own_backend_epoch(session.busy_epoch)))
+                if may_clear:
+                    s.cas_session(session.session_key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None)
             return True
 
     @staticmethod
