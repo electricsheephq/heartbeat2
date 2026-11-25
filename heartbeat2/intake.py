@@ -66,6 +66,16 @@ def marker(text, *, secret=None, require_tag=False):
     return None
 
 
+def backend_marker(text, *, secret, require_tag):
+    # Hermes appends text-only arrivals to the queued owner prompt. Signed
+    # markers can start a wake there. Older DM wakes still work at line one.
+    if isinstance(text,str):
+        for line in text.splitlines():
+            if parsed:=marker(line,secret=secret,require_tag=True):
+                return parsed
+    return marker(text,secret=secret,require_tag=require_tag)
+
+
 def fail_open(fn):
     @wraps(fn)
     def call(self,*args,**kwargs):
@@ -537,7 +547,8 @@ class Intake:
                 if 0<=e.clock.now()-pending['at']<=3600:
                     self.count(key,pending.get('mid'),identity.platform)
                 s.set_meta(stamp,'')
-        parsed=marker(user_message,secret=s.get_meta('marker_secret'),require_tag=(identity.chat_type != 'dm'))
+        parse_marker=backend_marker if s.backend else marker
+        parsed=parse_marker(user_message,secret=s.get_meta('marker_secret'),require_tag=(identity.chat_type != 'dm'))
         if not parsed:
             row=conversation_history[-1] if conversation_history else None
             if isinstance(row,dict) and row.get('role')=='user' and not row.get('display_kind'):
@@ -559,8 +570,7 @@ class Intake:
         now=e.clock.now()
         with s.atomic():
             session=s.get_session(key)
-            marked=s.cas_session(key,{'current_session_id':session.current_session_id},current_session_id=session_id,busy_since=now,busy_epoch=e.epoch,last_activity_at=now)
-            if s.backend and marked: s.record_backend_turn_start(key)
+            s.cas_session(key,{'current_session_id':session.current_session_id},current_session_id=session_id,busy_since=now,busy_epoch=e.epoch,last_activity_at=now)
             if not parsed and not owner_seen and isinstance(user_message,str) and RESUME_NOTE.fullmatch(user_message.strip()):
                 history=list(conversation_history or [])
                 internal=False
@@ -981,16 +991,11 @@ class Intake:
         if not key: return None
         with s.atomic():
             session=s.get_session(key)
-            record_backend_end=False
             # Clear only this engine's busy mark: a late end in a gateway that lost the profile
             # must not free a turn its successor is running.
             if session and session.busy_epoch in (None,'',e.epoch):
                 activity={'last_activity_at':e.clock.now()} if s.backend else {}
                 s.cas_session(key,{'busy_since':session.busy_since},busy_since=None,busy_epoch=None,**activity)
-                record_backend_end=(s.backend and session.current_session_id==session_id
-                        and session.busy_epoch==e.epoch and session.busy_since is not None
-                        and completed is True and not (failed or interrupted))
-                if record_backend_end and f is None: s.record_backend_turn_end(key)
             self.flights.pop(session_id,None)
             self._drop_children(f)
             shown=s.get_meta('owner_report:'+session_id)
@@ -1018,7 +1023,6 @@ class Intake:
             silenced=o.force_silent or not o.notify or not e.policy.enabled or not session.enabled or e.paused()
             delivered=bool(o.notify and not silenced and not f.owner_replied)
             if not s.finish(o.wake_id,o.dedupe_key,attempt=o.attempt,outcome=o.outcome or 'unreported',delivered=delivered,force_silent=silenced): return None
-            if record_backend_end: s.record_backend_turn_end(key)
             from .policy import is_watcher, holds_messages
             from .store import HELD_REPORT_OUTCOMES
             if (is_watcher(w) and holds_messages(w) and o.held_reason.startswith('message_held:')

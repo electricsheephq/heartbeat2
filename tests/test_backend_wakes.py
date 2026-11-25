@@ -9,7 +9,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
-from threading import Event, Thread
+from threading import Event, Lock, RLock, Thread
 from types import SimpleNamespace
 
 import pytest
@@ -451,84 +451,111 @@ def test_backend_delayed_first_hook_never_triggers_timed_resend(hosts, monkeypat
     assert db.get_occurrence(wid, o.dedupe_key).state == 'done'
 
 
-def test_backend_only_later_completed_turn_reopens_resend(hosts, monkeypatch):
+@pytest.fixture
+def tui_queue(monkeypatch):
+    session = {'session_key': CHAT, 'history_lock': Lock(), 'running': False, 'inflight_turn': None}
+    server = SimpleNamespace(_sessions_lock=RLock(), _sessions={'window': session})
+    monkeypatch.setitem(sys.modules, 'tui_gateway.server', server)
+    return session
+
+
+def test_backend_tui_probe_reads_without_mutation_or_lock_wait(tui_queue):
+    from heartbeat2.tui_probe import queued_or_inflight
+
+    prefix = '⟦pulse o:fixture/occurrence a:1'
+    server = sys.modules['tui_gateway.server']
+    server._sessions_lock = Lock()
+    tui_queue['queued_prompt'] = {'text': 'Owner text\n' + prefix + '⟧'}
+    original = {**tui_queue, 'queued_prompt': dict(tui_queue['queued_prompt'])}
+    assert queued_or_inflight(CHAT, prefix) is True
+    assert queued_or_inflight('other-chat', prefix) is None
+    with server._sessions_lock:
+        assert queued_or_inflight(CHAT, prefix) is None
+    with tui_queue['history_lock']:
+        assert queued_or_inflight(CHAT, prefix) is None
+    assert tui_queue == original
+    tui_queue['queued_prompts'] = [{'text': ['unsupported envelope']}]
+    assert queued_or_inflight(CHAT, prefix) is None
+    tui_queue.pop('queued_prompts')
+    tui_queue['queued_prompt'] = None
+    assert queued_or_inflight(CHAT, prefix) is False
+
+
+def test_backend_image_queue_runs_original_once(hosts, monkeypatch, tui_queue):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
-    db = backend.store
-    inject = backend.ctx.inject_message
-
-    def accept_behind_human(text, *, session_key):
-        backend.intake.pre_llm_call(session_id=CHAT, turn_id='earlier', user_message='Earlier.')
-        backend.clock.advance(1)
-        return inject(text, session_key=session_key)
-
     backend.clock.advance(61)
-    with monkeypatch.context() as patch:
-        patch.setattr(backend.ctx, 'inject_message', accept_behind_human)
-        backend.tick()
-    backend.clock.advance(1)
-    backend.intake.on_session_end(session_id=CHAT, turn_id='earlier', completed=True)
-    backend.clock.advance(600)
     backend.tick()
-    o, = db.list_occurrences(wid)
-    assert (o.state, o.error, o.attempt) == ('claimed', 'app_closed', 1)
-
-    backend.intake.pre_llm_call(session_id=CHAT, turn_id='later', user_message='Later.')
+    original = backend.ctx.calls[0][0]
+    tui_queue.update(running=True, inflight_turn={'user': 'T1'},
+                     queued_prompt={'text': 'Image', 'image_paths': ['fixture.png']},
+                     queued_prompts=[{'text': original}])
+    backend.intake.pre_llm_call(session_id=CHAT, turn_id='T1', user_message='T1')
     backend.clock.advance(601)
     backend.tick()
-    assert db.get_occurrence(wid, o.dedupe_key) == o
+    backend.intake.on_session_end(session_id=CHAT, turn_id='T1', completed=True)
+    tui_queue.pop('queued_prompt')
+    tui_queue['inflight_turn'] = {'user': 'Image'}
+    end_human_turn(backend, turn_id='image', completed=True)
+    backend.tick()
+    backend.clock.advance(5)
+    backend.tick()
     assert len(backend.ctx.calls) == 1
-    backend.intake.on_session_end(session_id=CHAT, turn_id='later', completed=True)
-    backend.tick()
-    assert len(backend.ctx.calls) == 2
-    assert db.backend_reinject_state(o.id)['count'] == 1
-    backend.clock.advance(601)
-    backend.tick()
-    assert (current := db.get_occurrence(wid, o.dedupe_key)).state == 'claimed'
-    assert (current.attempt, len(backend.ctx.calls)) == (2, 2)
-    finish_backend_wake(backend, backend.ctx.calls[-1][0])
-    assert db.get_occurrence(wid, o.dedupe_key).state == 'done'
-    assert db.get_wake(wid).fires == 1
-
-
-@pytest.mark.parametrize('outcome', [
-    {'interrupted': True, 'completed': False},
-    {'failed': True},
-    {'completed': False},
-    {'completed': True},
-], ids=['interrupted', 'failed', 'incomplete', 'fenced'])
-@pytest.mark.parametrize('valid_first', [False, True], ids=['invalid-first', 'invalid-second'])
-def test_backend_invalid_turn_cannot_trigger_resend(hosts, monkeypatch, outcome, valid_first):
-    _, backend = hosts
-    wid = arm_backend_wake(backend, monkeypatch)
-    db = backend.store
-    backend.clock.advance(61)
-    backend.tick()
-    o, = db.list_occurrences(wid)
-    backend.clock.advance(601)
-    backend.tick()
-    if valid_first:
-        end_human_turn(backend, turn_id='first-valid', completed=True)
-        backend.tick()
-        assert len(backend.ctx.calls) == 1
-    if outcome.get('completed'):
-        stale = backend.ctx.calls[0][0].replace(' a:1', ' a:0', 1)
-        backend.intake.pre_llm_call(session_id=CHAT, turn_id='stale', user_message=stale)
-        backend.intake.on_session_end(session_id=CHAT, turn_id='stale', **outcome)
-    else:
-        end_human_turn(backend, **outcome)
-    backend.tick()
+    assert backend.store.get_wake(wid).fires == 0
+    tui_queue.pop('queued_prompts')
+    tui_queue['inflight_turn'] = {'user': original}
+    finish_backend_wake(backend, original)
     backend.clock.advance(601)
     backend.tick()
     assert len(backend.ctx.calls) == 1
-    assert db.get_occurrence(wid, o.dedupe_key).error == 'app_closed'
-    if not valid_first:
-        end_human_turn(backend, turn_id='first-valid', completed=True)
-        backend.tick()
-        assert len(backend.ctx.calls) == 1
-    end_human_turn(backend, turn_id='second-valid', completed=True)
+    assert backend.store.get_wake(wid).fires == 1
+    assert backend.store.list_occurrences(wid)[0].state == 'done'
+
+
+def test_backend_merged_signed_wake_runs_original_once(hosts, monkeypatch, tui_queue):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    backend.clock.advance(61)
     backend.tick()
-    assert len(backend.ctx.calls) == 2
+    original = backend.ctx.calls[0][0]
+    merged = 'Owner text\n\n' + original
+    tui_queue.update(running=True, inflight_turn={'user': merged})
+    finish_backend_wake(backend, merged)
+    assert backend.store.get_wake(wid).fires == 1
+    assert ' n:' in original.splitlines()[0]
+    tui_queue.update(running=False, inflight_turn=None)
+    for _ in range(2):
+        backend.clock.advance(601)
+        backend.tick()
+    assert len(backend.ctx.calls) == 1
+    assert backend.store.list_occurrences(wid)[0].state == 'done'
+
+
+@pytest.mark.parametrize('tag', ['', ' n:0000000000000000'], ids=['unsigned', 'bad-signature'])
+def test_backend_ignores_pasted_marker_on_second_line(hosts, monkeypatch, tag):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    backend.clock.advance(61)
+    backend.tick()
+    o, = backend.store.list_occurrences(wid)
+    finish_backend_wake(backend, f'Owner text\n⟦pulse o:{o.id} a:{o.attempt}{tag}⟧')
+    assert backend.store.get_wake(wid).fires == 0
+    assert backend.store.get_occurrence(wid, o.dedupe_key).state == 'claimed'
+
+
+def test_gateway_ignores_signed_marker_on_second_line(hosts, monkeypatch):
+    from heartbeat2.intake import marker_tag
+
+    gateway, _ = hosts
+    bind(monkeypatch, gateway, KEY, platform='telegram')
+    wid = gateway.tool.handle(ARM)['wake']['id']
+    gateway.clock.advance(61)
+    gateway.tick()
+    o, = gateway.store.list_occurrences(wid)
+    tag = marker_tag(gateway.store.marker_secret(), o.id, o.attempt)
+    gateway.intake.pre_llm_call(session_id=KEY, turn_id='owner',
+                                user_message=f'Owner text\n⟦pulse o:{o.id} a:{o.attempt} n:{tag}⟧')
+    assert gateway.store.get_occurrence(wid, o.dedupe_key).state == 'claimed'
 
 
 def test_backend_detached_chat_holds_until_attach(hosts, monkeypatch):
@@ -560,36 +587,71 @@ def test_backend_detached_chat_holds_until_attach(hosts, monkeypatch):
     assert db.get_wake(wid).fires == 1
 
 
-def test_backend_restart_drop_waits_for_completed_turn(hosts, monkeypatch):
+def test_backend_dropped_prompt_resends_once_after_two_absent_reads(hosts, monkeypatch, tui_queue):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
-    assert backend.acquire()
-    backend.release()
     backend.clock.advance(61)
-    backend.tick()  # The restarted backend accepts before the agent is attached.
-    for _ in range(3):
-        backend.clock.advance(601)
-        backend.tick()
-        backend.clock.advance(1)
-        backend.tick()
+    backend.tick()
     o, = backend.store.list_occurrences(wid)
-    assert (o.state, o.error, len(backend.ctx.calls)) == ('claimed', 'app_closed', 1)
-    end_human_turn(backend, turn_id='first', completed=True)
+    backend.clock.wall += 120
+    backend.acks()
+    backend.clock.advance(5)
+    backend.acks()
+    assert backend.store.get_occurrence(wid, o.dedupe_key).state == 'claimed'
+    backend.clock.wall -= 120
+    backend.clock.advance(24)
     backend.tick()
     assert len(backend.ctx.calls) == 1
-    end_human_turn(backend, turn_id='second', completed=True)
+    backend.clock.advance(1)
+    backend.tick()  # first eligible False
+    backend.tick()  # a second call in the same tick interval cannot qualify
+    backend.clock.advance(4)
+    backend.tick()
+    assert len(backend.ctx.calls) == 1
+    backend.clock.advance(1)
     backend.tick()
     assert len(backend.ctx.calls) == 2
     assert '(held by a closed app window) (late by ' in backend.ctx.calls[-1][0]
     assert backend.store.backend_reinject_state(o.id)['count'] == 1
+    tui_queue['queued_prompt'] = {'text': backend.ctx.calls[-1][0]}
+    for _ in range(2):
+        backend.clock.advance(601)
+        backend.tick()
+    assert len(backend.ctx.calls) == 2
     finish_backend_wake(backend, backend.ctx.calls[-1][0])
     assert backend.store.get_occurrence(wid, o.dedupe_key).state == 'done'
     assert backend.store.get_wake(wid).fires == 1
 
 
+@pytest.mark.parametrize('interruption', ['present', 'unknown'])
+def test_backend_absent_reads_must_be_consecutive(hosts, monkeypatch, tui_queue, interruption):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    backend.clock.advance(61)
+    backend.tick()
+    backend.clock.advance(30)
+    backend.tick()  # False
+    if interruption == 'present':
+        tui_queue['queued_prompt'] = {'text': backend.ctx.calls[0][0]}
+    else:
+        tui_queue['running'] = True  # dequeue-to-admission window, no in-flight record yet
+    backend.clock.advance(5)
+    backend.tick()
+    tui_queue.pop('queued_prompt', None)
+    tui_queue['running'] = False
+    backend.clock.advance(5)
+    backend.tick()  # first fresh False
+    assert len(backend.ctx.calls) == 1
+    backend.clock.advance(5)
+    backend.tick()
+    assert len(backend.ctx.calls) == 2
+    o, = backend.store.list_occurrences(wid)
+    assert backend.store.backend_reinject_state(o.id)['count'] == 1
+
+
 @pytest.mark.parametrize('asked,minutes', [(True, 16), (True, 9), (False, 16)],
                          ids=['owner-16m', 'owner-9m', 'agent-16m'])
-def test_backend_reinjected_wake_labels(hosts, monkeypatch, asked, minutes):
+def test_backend_reinjected_wake_labels(hosts, monkeypatch, asked, minutes, tui_queue):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
     db = backend.store
@@ -600,19 +662,12 @@ def test_backend_reinjected_wake_labels(hosts, monkeypatch, asked, minutes):
     backend.clock.advance(60)
     backend.tick()
     assert len(backend.ctx.calls) == 1
-    for _ in range(10):
-        backend.clock.advance(60)
-        backend.tick()
-    o, = db.list_occurrences(wid)
-    assert (o.state, o.error) == ('claimed', 'app_closed')
-    end_human_turn(backend, turn_id='first', completed=True)
-    end_human_turn(backend, completed=True)
+    backend.clock.advance(30)
     backend.acks()
-    assert db.get_occurrence(wid, o.dedupe_key).state == 'pending'
-    if minutes == 9:
-        # Rebase the wall clock after the hold.
-        # A steady clock cannot be nine minutes late after a ten-minute timeout.
-        backend.clock.wall = due + minutes * 60
+    backend.clock.advance(5)
+    backend.acks()
+    o, = db.list_occurrences(wid)
+    assert (o.state, o.error) == ('pending', 'app_closed')
     backend.clock.advance(due + minutes * 60 - backend.clock.now())
     assert not db.get_meta('outages')
     backend.dispatch_pending()
@@ -630,7 +685,7 @@ def test_backend_reinjected_wake_labels(hosts, monkeypatch, asked, minutes):
     assert f'(held by a closed app window) (late by {minutes} min)' in why
 
 
-def test_backend_reinjected_agreed_watcher_labels(hosts, monkeypatch):
+def test_backend_reinjected_agreed_watcher_labels(hosts, monkeypatch, tui_queue):
     _, backend = hosts
     bind(monkeypatch, backend, CHAT)
     assert backend.tool.identity()
@@ -641,15 +696,11 @@ def test_backend_reinjected_agreed_watcher_labels(hosts, monkeypatch):
     assert db.add_occurrence(wake.id, 'reaction:fixture')
     backend.tick()
     assert len(backend.ctx.calls) == 1
-    for _ in range(10):
-        backend.clock.advance(60)
-        backend.tick()
-    held, = db.list_occurrences(wake.id)
-    assert (held.state, held.error) == ('claimed', 'app_closed')
-    end_human_turn(backend, turn_id='first', completed=True)
-    end_human_turn(backend, completed=True)
+    backend.clock.advance(30)
     backend.acks()
-    backend.clock.advance(360)
+    backend.clock.advance(5)
+    backend.acks()
+    backend.clock.advance(16 * 60 - 35)
     backend.dispatch_pending()
     assert len(backend.ctx.calls) == 2
     text = backend.ctx.calls[-1][0]
@@ -657,7 +708,7 @@ def test_backend_reinjected_agreed_watcher_labels(hosts, monkeypatch):
     assert '(held by a closed app window) (late by 16 min)' in text
 
 
-def test_backend_reinjection_count_in_list_and_status(hosts, monkeypatch):
+def test_backend_reinjection_count_in_list_and_status(hosts, monkeypatch, tui_queue):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
     db = backend.store
@@ -682,13 +733,12 @@ def test_backend_reinjection_count_in_list_and_status(hosts, monkeypatch):
     backend.tick()
     shown(None)
     for count in (1, 2):
-        backend.clock.advance(600)
+        backend.clock.advance(30)
+        backend.tick()
+        backend.clock.advance(5)
         backend.tick()
         o, = db.list_occurrences(wid)
-        assert (o.state, o.error) == ('claimed', 'app_closed')
-        end_human_turn(backend, turn_id='first', completed=True)
-        end_human_turn(backend, completed=True)
-        backend.tick()
+        assert (o.state, o.attempt) == ('claimed', count + 1)
         shown(f're-sent {count}× (app window not ready)')
     finish_backend_wake(backend, backend.ctx.calls[-1][0])
     assert db.get_occurrence(wid, o.dedupe_key).state == 'done'
@@ -717,113 +767,81 @@ def test_gateway_wake_hides_backend_reinjection_count(hosts, monkeypatch):
     assert row['id'] == wid and 'delivery_note' not in row
 
 
-@pytest.mark.parametrize('queued', [False, True], ids=['dropped', 'delivered'])
-def test_backend_accept_during_turn_setup_stays_held(hosts, monkeypatch, queued):
+def test_backend_accept_during_turn_setup_stays_held(hosts, monkeypatch, tui_queue):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
-    db = backend.store
     backend.clock.advance(61)
+    tui_queue['running'] = True
     backend.tick()
-    # Hermes was already setting up T1 when it accepted the wake prompt.
+    original = backend.ctx.calls[0][0]
+    tui_queue['queued_prompt'] = {'text': original}
     backend.clock.advance(1)
     backend.intake.pre_llm_call(session_id=CHAT, turn_id='T1', user_message='Hello.')
     backend.clock.advance(601)
     backend.tick()
-    o, = db.list_occurrences(wid)
-    assert (o.state, o.error) == ('claimed', 'app_closed')
-    assert db.get_meta('accepted:'+o.id) == '1'
-    assert db.get_meta('held_since:'+o.id)
-    assert len(backend.ctx.calls) == 1
+    o, = backend.store.list_occurrences(wid)
+    assert (o.state, o.error, o.attempt) == ('claimed', 'app_closed', 1)
     backend.intake.on_session_end(session_id=CHAT, turn_id='T1', completed=True)
-    backend.tick()
-    assert len(backend.ctx.calls) == 1
-    if queued:
-        finish_backend_wake(backend, backend.ctx.calls[0][0])
-        assert db.get_wake(wid).fires == 1
-        assert db.get_occurrence(wid, o.dedupe_key).state == 'done'
-    else:
-        # T2 follows T1 and the queued wake would have started ahead of it.
-        end_human_turn(backend, turn_id='T2', completed=True)
+    tui_queue.pop('queued_prompt')
+    # Drained but not yet admitted, so neither queue nor in-flight has the prompt.
+    for _ in range(2):
+        backend.clock.advance(5)
         backend.tick()
-        assert len(backend.ctx.calls) == 2
-        assert '(held by a closed app window) (late by ' in backend.ctx.calls[-1][0]
-        assert db.backend_reinject_state(o.id)['count'] == 1
-        # The evidence for the first acceptance cannot be reused for attempt 2.
-        end_human_turn(backend, turn_id='T3', completed=True)
-    backend.clock.advance(601)
-    backend.tick()
-    assert len(backend.ctx.calls) == (1 if queued else 2)
+    assert len(backend.ctx.calls) == 1
+    finish_backend_wake(backend, original)
+    assert backend.store.get_wake(wid).fires == 1
+    assert backend.store.get_occurrence(wid, o.dedupe_key).state == 'done'
 
 
-def test_backend_clock_rollback_cannot_make_earlier_turn_resend_evidence(hosts, monkeypatch):
+def test_backend_clock_rollback_cannot_make_earlier_turn_resend_evidence(hosts, monkeypatch, tui_queue):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
     backend.clock.advance(62)
     end_human_turn(backend, turn_id='before-accept', completed=True)
     backend.clock.wall -= 1
     backend.tick()
-    assert len(backend.ctx.calls) == 1
+    tui_queue['queued_prompt'] = {'text': backend.ctx.calls[0][0]}
     backend.clock.advance(601)
     backend.tick()
-    assert len(backend.ctx.calls) == 1
-    o, = backend.store.list_occurrences(wid)
-    assert (o.state, o.error, o.attempt) == ('claimed', 'app_closed', 1)
-    end_human_turn(backend, turn_id='first-after-accept', completed=True)
-    backend.tick()
-    assert len(backend.ctx.calls) == 1
-    end_human_turn(backend, turn_id='second-after-accept', completed=True)
-    for _ in range(2):
-        backend.clock.advance(601)
+    for turn in ('first-after-accept', 'second-after-accept'):
+        end_human_turn(backend, turn_id=turn, completed=True)
+        backend.clock.advance(5)
         backend.tick()
-    assert len(backend.ctx.calls) == 2
-    assert backend.store.backend_reinject_state(o.id)['count'] == 1
+    assert len(backend.ctx.calls) == 1
+    finish_backend_wake(backend, backend.ctx.calls[0][0])
+    assert backend.store.get_wake(wid).fires == 1
 
 
-def test_backend_legacy_accept_needs_new_ordered_turns(hosts, monkeypatch):
+def test_backend_legacy_turn_order_cannot_authorize_resend(hosts, monkeypatch, tui_queue):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
     db = backend.store
     backend.clock.advance(61)
     backend.tick()
     o, = db.list_occurrences(wid)
-    # The round-six accept state had a wall timestamp and no sequence.
-    db.set_meta('backend_reinject:'+o.id, f'{{"count": 1, "accepted_at": {backend.clock.now()}}}')
-    end_human_turn(backend, turn_id='old-first', completed=True)
-    end_human_turn(backend, turn_id='old-second', completed=True)
+    db.set_meta('backend_reinject:'+o.id,
+                f'{{"count": 1, "accepted_at": {backend.clock.now()}, "accepted_seq": 1}}')
+    old_keys = ('turn_seq:', 'busy_turn_order:', 'completed_turn_order:')
+    for suffix in old_keys:
+        db.set_meta('backend:'+suffix+CHAT, '[3,4,2]')
+    tui_queue['queued_prompt'] = {'text': backend.ctx.calls[0][0]}
+    backend.process_start = True
+    backend.reconcile()
     backend.clock.advance(601)
     backend.tick()
     assert len(backend.ctx.calls) == 1
-    end_human_turn(backend, turn_id='new-first', completed=True)
+    assert all(db.get_meta('backend:'+suffix+CHAT) is None for suffix in old_keys)
+    tui_queue.pop('queued_prompt')
+    backend.clock.advance(10)
     backend.tick()
-    assert len(backend.ctx.calls) == 1
-    end_human_turn(backend, turn_id='new-second', completed=True)
+    assert len(backend.ctx.calls) == 1  # A wall timestamp alone cannot age a legacy accept.
+    backend.clock.advance(20)
+    backend.tick()
+    backend.clock.advance(5)
     backend.tick()
     assert len(backend.ctx.calls) == 2
     assert db.backend_reinject_state(o.id)['count'] == 2
-
-
-def test_backend_turn_order_gc_keeps_evidence_for_current_claim(hosts, monkeypatch):
-    _, backend = hosts
-    wid = arm_backend_wake(backend, monkeypatch)
-    db = backend.store
-    backend.clock.advance(61)
-    backend.tick()
-    o, = db.list_occurrences(wid)
-    accepted = db.backend_reinject_state(o.id)['accepted_seq']
-    end_human_turn(backend, turn_id='first', completed=True)
-    end_human_turn(backend, turn_id='second', completed=True)
-    with Store(db.path, backend.clock, backend=True) as peer:
-        assert peer.backend_turns_prove_drop(CHAT, accepted)
-        peer.gc_backend_turns()
-        assert peer.backend_turns_prove_drop(CHAT, accepted)
-    backend.clock.advance(601)
-    backend.tick()
-    assert len(backend.ctx.calls) == 2
-    assert db.backend_reinject_state(o.id)['accepted_seq'] > accepted
-    finish_backend_wake(backend, backend.ctx.calls[-1][0])
-    backend.clock.advance(3601)
-    backend.tick()
-    assert not db.backend_turns_prove_drop(CHAT, accepted)
+    assert 'accepted_seq' not in db.backend_reinject_state(o.id)
 
 
 @pytest.mark.parametrize('death', ['pid-gone', 'pid-reused'])
@@ -968,6 +986,7 @@ def notice_sends():
 ])
 def test_backend_accepted_hold_notice(hosts, monkeypatch, notice_sends, intent, surface, expected):
     _, backend = hosts
+    monkeypatch.setitem(sys.modules, 'tui_gateway.server', None)
     bind(monkeypatch, backend, CHAT, source=surface)
     args = {**ARM, 'title': 'Pay rent'} if intent == 'owner' else {**ARM, 'note': 'x' * 70}
     result = backend.tool.handle(args)

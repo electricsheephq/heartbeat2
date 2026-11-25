@@ -19,7 +19,7 @@ from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, 
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, agreed_watcher, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
 from .store import BACKEND_REINJECT_PREFIX
-from . import governor, serving
+from . import governor, serving, tui_probe
 
 LOG = logging.getLogger('heartbeat2')
 RETRY_DELAYS = (30,60,300,900,3600)
@@ -27,6 +27,8 @@ PROBES_PER_TICK = 16
 OUTAGE_GAP_S = 60     # a longer gap between ticks means the gateway or the poller was down (#230)
 OUTAGES_KEPT = 50
 KEEP_WARM_NOTICE_AFTER = 7200  # keep-warm unable to ping this long is worth one line to the owner (#234)
+BACKEND_RESEND_MIN_AGE_S = 30
+BACKEND_RESEND_SAMPLE_GAP_S = 5  # One default Runtime tick, measured on the monotonic clock.
 FINAL_SKIP_REASONS = frozenset({'unanswered','asleep','daily_model_cap','daily_cost_cap','daily_message_cap','dm_only',
     'non_gateway','session_off','source_disabled','cancel_on_reply','expired','max_fires','nothing_to_report'})
 # Every claim records its poller's epoch; an epoch outside this set was minted
@@ -71,6 +73,7 @@ class Poller:
         self.epoch=uuid.uuid4().hex
         if store.backend: self.epoch=serving.backend_epoch(self.epoch)
         self._app_closed_until={}
+        self._backend_missing={}
         LOCAL_EPOCHS.add(self.epoch)
         CREATED_EPOCHS.add(self.epoch)
         self.log=LOG
@@ -203,6 +206,7 @@ class Poller:
     def reconcile(self):
         s=self.store
         with s.atomic():
+            if self.process_start and s.backend: s.remove_backend_turn_order()
             noticed=set()
             for w in s.list_wakes() if self.process_start else []:
                 reason='invalid_trigger_event' if w.kind in EVENT_KINDS and 'event' in w.trigger_json else (
@@ -410,7 +414,6 @@ class Poller:
                 self.silence()
                 if now-float(s.get_meta('last_gc_at') or 0)>=3600:
                     s.gc(ledger_days=self.policy.ledger_days,timezone=self.policy.resolved_timezone())
-                    if s.backend: s.gc_backend_turns()
                 s.set_meta('last_error','')
             self.dispatch_pending()
             self.notifications.tick(self)
@@ -452,11 +455,15 @@ class Poller:
             if (session.busy_since is not None and now-max(session.busy_since,session.last_activity_at or 0)>=ttl
                     and not self._foreign_backend_busy(session)):
                 s.cas_session(session.session_key,{'busy_since':session.busy_since,'last_activity_at':session.last_activity_at},busy_since=None,busy_epoch=None)
+        previous_missing,self._backend_missing=self._backend_missing,{}
         for o in s.list_occurrences(state='claimed'):
-            if own_only and not self._own_claim(o): continue
             if s.backend:
+                own=self._own_claim(o)
+                if own_only and not own: continue
                 w=s.get_wake(o.wake_id)
-                if not own_only and not (self._own_claim(o) or self._foreign_backend_claim(o)):
+                if own:
+                    self._backend_ack(w,o,now,previous_missing.get((o.id,o.attempt)))
+                elif not self._foreign_backend_claim(o):
                     self._resend_backend_claim(o,'restart_refund')
                     session=s.get_session(w.session_key)
                     busy_epoch=session.busy_epoch if session else None
@@ -464,9 +471,8 @@ class Poller:
                             and not serving.backend_epoch_alive(busy_epoch)):
                         s.cas_session(w.session_key,{'busy_since':session.busy_since,'busy_epoch':busy_epoch},
                                       busy_since=None,busy_epoch=None)
-                else:
-                    self._backend_ack(w,o,now)
                 continue
+            if own_only and not self._own_claim(o): continue
             if o.claimed_at is None or self.clock.now()-o.claimed_at<600: continue
             if int(s.get_meta('accepted:'+o.id) or o.attempt)>=3:
                 if self.supersede_claimed(o): continue
@@ -476,23 +482,29 @@ class Poller:
                 governor.error(self,s.get_wake(o.wake_id))
             else: self.refund_claimed(o,'ack_timeout')
 
-    def _backend_ack(self,w,o,now):
+    def _backend_ack(self,w,o,now,previous_missing):
         s=self.store
         resend=s.backend_reinject_state(o.id)
         accepted_at=resend.get('accepted_at')
+        mono=self.clock.monotonic()
+        accepted_mono=resend.get('accepted_monotonic')
+        if accepted_at is not None:
+            if accepted_mono is None:
+                # An older accept has only wall time. Start its minimum wait
+                # here so a wall-clock step cannot shorten it.
+                accepted_mono=resend['accepted_monotonic']=mono
+                s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
+            if mono-accepted_mono>=BACKEND_RESEND_MIN_AGE_S:
+                if previous_missing is not None and 0<=mono-previous_missing<BACKEND_RESEND_SAMPLE_GAP_S:
+                    self._backend_missing[o.id,o.attempt]=previous_missing
+                elif tui_probe.queued_or_inflight(w.session_key,f'⟦pulse o:{o.id} a:{o.attempt}') is False:
+                    if previous_missing is not None and mono-previous_missing>=BACKEND_RESEND_SAMPLE_GAP_S:
+                        self._resend_backend_claim(o,'app_closed')
+                        return
+                    self._backend_missing[o.id,o.attempt]=mono
         since=o.claimed_at if accepted_at is None else accepted_at
         if accepted_at is None or o.error!='app_closed':
             if since is None or now-since<600: return
-        accepted_seq=resend.get('accepted_seq')
-        if accepted_seq is None:
-            if int(s.get_meta('accepted:'+o.id) or 0):
-                # Legacy accepts have no event order. Start observing from this check.
-                resend['accepted_seq']=s.next_backend_turn_seq(w.session_key)
-                if accepted_at is None: resend['accepted_at']=now
-                s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
-        elif s.backend_turns_prove_drop(w.session_key,accepted_seq):
-            self._resend_backend_claim(o,'app_closed')
-            return
         # An accepted prompt may still be queued. The clock alone cannot retire it.
         self._hold_backend_app_closed(w,o,keep_claim=True)
 
@@ -502,7 +514,7 @@ class Poller:
             if self.supersede_claimed(o) or not s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error=error): return
             resend=s.backend_reinject_state(o.id)
             resend.pop('accepted_at',None)
-            resend.pop('accepted_seq',None)
+            resend.pop('accepted_monotonic',None)
             resend['due']=True
             s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
             s.set_meta('accepted:'+o.id,'0')
@@ -1185,7 +1197,7 @@ class Poller:
                     resend=s.backend_reinject_state(o.id)
                     if resend.pop('due',False): resend['count']=resend.get('count',0)+1
                     resend['accepted_at']=self.clock.now()
-                    resend['accepted_seq']=s.next_backend_turn_seq(w.session_key)
+                    resend['accepted_monotonic']=self.clock.monotonic()
                     s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
                     s.set_meta('accepted:'+o.id,'1')
             flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]
@@ -1235,7 +1247,7 @@ class Poller:
         chat_shown=s.get_meta('stop_hint_chat:'+session.session_key)
         if chat_shown is None:
             chat_shown='1' if session.first_notice_sent else '0'
-        tag=marker_tag(s.marker_secret(),o.id,o.attempt) if session.chat_type!='dm' else None
+        tag=marker_tag(s.marker_secret(),o.id,o.attempt) if s.backend or session.chat_type!='dm' else None
         if is_keep_warm(w): return render_keep_warm(w,o,marker_tag=tag)
         recent=[x.outcome or x.state for x in s.list_occurrences(w.id) if x.state=='done'][-3:]
         late=downtime=None

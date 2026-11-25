@@ -150,9 +150,6 @@ def _validate_wake(wake: Wake):
 # Nor is children:<occurrence id>:<attempt>: a recovered turn can stay bound to an old occurrence after gc removes its row,
 # and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
 BACKEND_REINJECT_PREFIX = 'backend_reinject:'
-BACKEND_TURN_SEQ_PREFIX = 'backend:turn_seq:'
-BACKEND_BUSY_TURN_PREFIX = 'backend:busy_turn_order:'
-BACKEND_COMPLETED_TURN_PREFIX = 'backend:completed_turn_order:'
 OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'held_since:', 'ignored:', 'inject_failures:',
                             'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
                             'stop_hint_offered:', 'supersede_on_refund:', BACKEND_REINJECT_PREFIX)
@@ -316,43 +313,15 @@ class Store:
             # An older store used zero to mark the first resend awaiting acceptance.
             count = int(value)
             return {'count': count, 'due': count == 0}
-        return json.loads(value)
+        state = json.loads(value)
+        state.pop('accepted_seq', None)  # Obsolete evidence from a pre-probe claim.
+        return state
 
-    def next_backend_turn_seq(self, key):
-        """Allocate an order number inside the caller's event transaction."""
+    def remove_backend_turn_order(self):
+        """Remove obsolete backend evidence during scheduler reconciliation."""
         with self.atomic():
-            stamp = BACKEND_TURN_SEQ_PREFIX + key
-            seq = int(self.get_meta(stamp) or 0) + 1
-            self.set_meta(stamp, str(seq))
-            return seq
-
-    def _backend_completed_turn(self, key):
-        return json.loads(self.get_meta(BACKEND_COMPLETED_TURN_PREFIX + key) or '[0,0,0]')
-
-    def record_backend_turn_start(self, key):
-        _, previous_end, _ = self._backend_completed_turn(key)
-        start = self.next_backend_turn_seq(key)
-        self.set_meta(BACKEND_BUSY_TURN_PREFIX + key, json.dumps([start, previous_end]))
-
-    def record_backend_turn_end(self, key):
-        end = self.next_backend_turn_seq(key)
-        busy = self.get_meta(BACKEND_BUSY_TURN_PREFIX + key)
-        if busy is None: return  # A turn already running during upgrade has no ordered start.
-        start, previous_end = json.loads(busy)
-        self.set_meta(BACKEND_COMPLETED_TURN_PREFIX + key, json.dumps([start, end, previous_end]))
-
-    def backend_turns_prove_drop(self, key, accepted_seq):
-        start, end, previous_end = self._backend_completed_turn(key)
-        return accepted_seq < previous_end < start < end
-
-    def gc_backend_turns(self):
-        """Prune completion evidence once no outstanding claim can use it."""
-        prefix = BACKEND_COMPLETED_TURN_PREFIX
-        with self.atomic():
-            self.connection.execute("""DELETE FROM meta WHERE substr(key,1,?)=?
-                AND NOT EXISTS (SELECT 1 FROM wakes w JOIN occurrences o ON o.wake_id=w.id
-                    WHERE w.session_key=substr(meta.key,?) AND o.state='claimed')""",
-                (len(prefix), prefix, len(prefix) + 1))
+            self.connection.execute("""DELETE FROM meta WHERE key GLOB 'backend:turn_seq:*'
+                OR key GLOB 'backend:busy_turn_order:*' OR key GLOB 'backend:completed_turn_order:*'""")
 
     def stamp_backend(self, session_key: str) -> bool:
         with self.atomic():

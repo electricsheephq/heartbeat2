@@ -1,17 +1,18 @@
 """Real OS locks and pinned Hermes injection slots, driven without listeners or model calls."""
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 import json
 import multiprocessing
 import os
 from pathlib import Path
 import socket
+from threading import Lock
 import time
 from types import SimpleNamespace
 
 import pytest
 
 from conftest import FakeClock
-from test_backend_wakes import ARM, CHAT, OTHER_WINDOW
+from test_backend_wakes import ARM, CHAT, OTHER_WINDOW, arm_backend_wake, hosts
 from test_engine import KEY, Runner
 
 
@@ -44,6 +45,7 @@ def child(pipe, home, backend, wall):
             if session['attached']:
                 assert key not in queued, 'Hermes already holds a wake prompt for this chat'
                 queued[key] = text
+                session['queued_prompt'] = {'text': text}
 
         server._enqueue_prompt = enqueue
         live = server._sessions
@@ -82,9 +84,11 @@ def child(pipe, home, backend, wall):
                 import threading
                 key, *attached = args
                 live[key] = {'session_key': key, 'history_lock': threading.RLock(), 'running': True,
-                             'attached': attached[0] if attached else True}
+                             'attached': attached[0] if attached else True,
+                             'inflight_turn': {'user': 'fixture turn'}}
             elif op == 'drop':
                 queued.pop(args[0])
+                if backend: live[args[0]].pop('queued_prompt')
             elif op == 'reload':
                 rt.close()
                 if args[0]:
@@ -103,6 +107,7 @@ def child(pipe, home, backend, wall):
                     elif op == 'command':
                         result = rt.command(rest[0])
                     elif op == 'start':
+                        if backend: live[key].pop('queued_prompt')
                         engine.intake.pre_llm_call(session_id=key, turn_id='wake-turn', user_message=queued.pop(key))
                     elif op == 'start_human':
                         engine.intake.pre_llm_call(session_id=key, turn_id='human-turn', user_message='Hello.')
@@ -276,33 +281,28 @@ def test_backend_reacquires_and_preserves_own_turn(cluster, started):
         assert cluster.rows('SELECT state,attempt FROM occurrences') == [('done', 1)]
 
 
-def test_non_holder_holds_dropped_prompt_until_completed_turn(cluster):
+def test_non_holder_probes_its_own_dropped_prompt(cluster):
     with cluster.serve(True) as owner, cluster.serve(True) as holder:
         assert owner('acquire')
         assert owner('arm', CHAT, '')['armed']
         owner('open', CHAT)
         assert owner('tick', 61) == [CHAT]
         owner('drop', CHAT)
-        owner('release')
+        owner('release')  # Takes its drop observations even without the scheduler lock.
         assert holder('acquire')
-        assert holder('tick', 660) == []
-        assert owner('tick', 599) == [CHAT]
-        assert cluster.rows('SELECT state FROM occurrences') == [('claimed',)]
-        assert holder('tick', 2) == []
-        assert cluster.rows('SELECT state FROM occurrences') == [('claimed',)]
-        assert owner('tick', 2) == [CHAT]
-        assert cluster.rows('SELECT state,error FROM occurrences') == [('claimed', 'app_closed')]
+        holder('open', CHAT)
+        for advance in (91, 5, 601):
+            assert holder('tick', advance) == []
+            assert cluster.rows('SELECT state,error,attempt FROM occurrences') == [('claimed', '', 1)]
+        assert owner('tick', 30) == [CHAT]
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('claimed', 1)]
+        assert owner('tick', 5) == [CHAT]
+        assert cluster.rows('SELECT state,error,attempt FROM occurrences') == [('pending', 'app_closed', 1)]
         holder('release')
-        assert owner('tick', 2) == [CHAT]
-        owner('start_human', CHAT, '')
-        owner('end_human', CHAT, '')
-        assert owner('tick', 2) == [CHAT]
-        owner('start_human', CHAT, '')
-        owner('end_human', CHAT, '')
-        assert owner('tick', 2) == [CHAT, CHAT]
+        assert owner('tick', 5) == [CHAT, CHAT]
         owner('start', CHAT, '')
         assert owner('finish', CHAT, '')['ok']
-        assert cluster.rows('SELECT state FROM occurrences') == [('done',)]
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('done', 2)]
 
 
 def test_non_holder_recovers_own_started_turn_at_ttl(cluster):
@@ -321,7 +321,7 @@ def test_non_holder_recovers_own_started_turn_at_ttl(cluster):
         assert cluster.rows('SELECT busy_since FROM sessions') == [(None,)]
 
 
-def test_backend_restart_retries_false_accept_after_completed_turn(cluster):
+def test_backend_restart_retries_false_accept_after_two_absent_reads(cluster):
     with cluster.serve(True) as original:
         assert original('acquire')
         assert original('arm', CHAT, '')['armed']
@@ -331,16 +331,9 @@ def test_backend_restart_retries_false_accept_after_completed_turn(cluster):
         assert restarted('tick', 0) == [CHAT]
         assert cluster.rows("SELECT value FROM meta WHERE key LIKE 'accepted:%'") == [('1',)]
         restarted('open', CHAT)
-        assert restarted('tick', 599) == [CHAT]
-        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('claimed', 1)]
+        assert restarted('tick', 29) == [CHAT]
         assert restarted('tick', 1) == [CHAT]
-        assert cluster.rows('SELECT state,error,attempt FROM occurrences') == [('claimed', 'app_closed', 1)]
-        assert restarted('tick', 601) == [CHAT]
-        restarted('start_human', CHAT, '')
-        restarted('end_human', CHAT, '')
-        assert restarted('tick', 5) == [CHAT]
-        restarted('start_human', CHAT, '')
-        restarted('end_human', CHAT, '')
+        assert cluster.rows('SELECT state,attempt FROM occurrences') == [('claimed', 1)]
         assert restarted('tick', 5) == [CHAT, CHAT]
         restarted('start', CHAT, '')
         assert restarted('finish', CHAT, '')['ok']
@@ -416,3 +409,83 @@ def test_backend_absence_and_recurring_catch_up(cluster):
             assert sorted(backend('tick', 5)) == [CHAT, 'repeating-chat']
         assert cluster.rows('SELECT state,attempt FROM occurrences WHERE state != ?', 'skipped') == [
             ('claimed', 1), ('claimed', 1)]
+
+
+@pytest.mark.parametrize('queued_first', ['text', 'image', 'refusal'])
+def test_tui_probe_observes_real_hermes_queue_and_drain(hosts, monkeypatch, caplog, queued_first):
+    if os.environ.get('HEARTBEAT2_REQUIRE_HERMES') != '1':
+        pytest.skip('requires a read-only Hermes pin')
+    pytest.importorskip('tui_gateway')
+    from tui_gateway import server
+    from heartbeat2.tui_probe import queued_or_inflight
+
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    session = {'session_key': CHAT, 'history_lock': Lock(), 'running': True,
+               'inflight_turn': {'user': 'Previous turn'}, 'agent': None}
+    sid = 'probe-window'
+    monkeypatch.setattr(server, '_sessions', {sid: session})
+    monkeypatch.setattr(server, '_ensure_session_db_row', lambda *args: True)
+    monkeypatch.setattr(server, '_ensure_active_session_slot', lambda *args: None)
+    monkeypatch.setattr(server, '_session_uses_compute_host', lambda *args: False)
+    monkeypatch.setattr(server, '_emit', lambda *args: None)
+    monkeypatch.setattr(server, '_session_profile_runtime_scope', lambda *args: nullcontext())
+    monkeypatch.setattr(server, '_routing_provenance_db', lambda *args: nullcontext())
+    monkeypatch.setattr(server, '_reopen_routed_session_row', lambda *args: None)
+    monkeypatch.setattr(backend.ctx, 'inject_message',
+                        lambda text, *, session_key: server.inject_tui_session_message(
+                            session_key=session_key, content=text))
+
+    if queued_first != 'refusal':
+        with session['history_lock']:
+            server._enqueue_prompt(session, 'Owner text', None,
+                                   **({'image_paths': ['fixture.png']} if queued_first == 'image' else {}))
+    backend.clock.advance(61)
+    backend.tick()
+    o, = backend.store.list_occurrences(wid)
+    marker = f'⟦pulse o:{o.id} a:{o.attempt}'
+    assert queued_or_inflight(CHAT, marker) is True
+    with session['history_lock']:
+        if queued_first == 'text':
+            server._enqueue_prompt(session, 'Later owner text', None)
+            text = session['queued_prompt']['text']
+            assert text.startswith('Owner text\n\n') and text.endswith('Later owner text')
+        elif queued_first == 'image':
+            assert session['queued_prompt']['image_paths'] == ['fixture.png']
+            assert marker in session['queued_prompts'][0]['text']
+        session.update(running=False, inflight_turn=None)
+    assert queued_or_inflight(CHAT, marker) is True
+
+    if queued_first == 'refusal':
+        with caplog.at_level('INFO'):
+            assert server._drain_queued_prompt('fixture', sid, session)
+        assert 'no agent attached' in caplog.text
+        assert session['inflight_turn']['status'] == 'error'
+        assert marker in session['inflight_turn']['user']
+        assert queued_or_inflight(CHAT, marker) is False
+        assert backend.store.get_occurrence(wid, o.dedupe_key).state == 'claimed'
+        return
+
+    # Hermes admits the real drained text. Exercise the plugin hook at the worker
+    # boundary without launching a model turn.
+    started = []
+
+    def start_hook(target, *, name, session):
+        text = session['inflight_turn']['user']
+        assert queued_or_inflight(CHAT, marker) is True
+        if marker in text:
+            backend.intake.pre_llm_call(session_id=CHAT, turn_id='wake', user_message=text)
+            started.append(backend.store.get_occurrence(wid, o.dedupe_key).state)
+        session.update(running=False, inflight_turn=None)
+        return object()
+
+    session['agent'] = SimpleNamespace()
+    monkeypatch.setattr(server, '_start_session_work', start_hook)
+    assert server._drain_queued_prompt('fixture', sid, session)
+    if queued_first == 'image':
+        assert started == []
+        assert server._drain_queued_prompt('fixture', sid, session)
+    assert started == ['started']
+    backend.intake.on_session_end(session_id=CHAT, turn_id='wake')
+    assert backend.store.get_occurrence(wid, o.dedupe_key).state == 'done'
+    assert backend.store.get_wake(wid).fires == 1
