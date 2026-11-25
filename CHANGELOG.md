@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Accepted Desktop and TUI wakes send a heads-up 15 minutes after they were due, or after acceptance if it came earlier. (#241)
+- Reminders you set with `/pulse add` now qualify for the accepted-wake heads-up. (#241)
+- If you write in the chat and the wake is still held, a repeat heads-up waits 15 minutes into the new wait. (#241)
 - App wakes settle only when the signed header starts a queued wake prompt, so quoting a header mid-message no longer consumes the queued wake. (#241)
 - An unsigned header can no longer settle an app wake that HeartBeat dispatched with a signature. (#241)
 - Generated image references no longer prevent a silent app wake from staying silent. Owner text starting with `@image:` still gets its reply. (#241)
