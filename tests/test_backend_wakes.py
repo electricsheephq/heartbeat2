@@ -387,9 +387,9 @@ def test_non_holder_receipts_and_status(hosts, monkeypatch, process_table):
             peer.close()
 
 
-def arm_backend_wake(backend, monkeypatch):
+def arm_backend_wake(backend, monkeypatch, **fields):
     bind(monkeypatch, backend, CHAT)
-    result = backend.tool.handle(ARM)
+    result = backend.tool.handle({**ARM, **fields})
     assert result['armed']
     return result['wake']['id']
 
@@ -421,6 +421,128 @@ def test_backend_slow_first_hook_injects_once(hosts, monkeypatch, delay):
 def end_human_turn(backend, turn_id='human', **outcome):
     backend.intake.pre_llm_call(session_id=CHAT, turn_id=turn_id, user_message='Hello.')
     backend.intake.on_session_end(session_id=CHAT, turn_id=turn_id, **outcome)
+
+
+@pytest.mark.parametrize('shape', ['R1', 'R2', 'R3', 'R4', 'R5', 'R5-part-join', 'R6',
+                                   'R8-alone', 'R8-merged', 'header-only-segment'])
+def test_backend_prompt_start_recognition(hosts, monkeypatch, tui_queue, shape):
+    _, backend = hosts
+    if shape.startswith('R8'):
+        wid = arm_backend_wake(backend, monkeypatch, title='First title line\nSecond title line')
+    else:
+        wid = arm_backend_wake(backend, monkeypatch)
+    chats = {CHAT: wid}
+    if shape == 'R4':
+        # Dispatch allows one live claim per chat. Route the merged input to
+        # each claim's own chat to check both headers through the real hook.
+        bind(monkeypatch, backend, 'other-app-chat')
+        chats['other-app-chat'] = backend.tool.handle(ARM)['wake']['id']
+    backend.clock.advance(61)
+    backend.tick()
+    prompts = {key: text for text, key in backend.ctx.calls}
+    wake = prompts[CHAT]
+    if shape.startswith('R8'):
+        _, second, third, *_ = wake.splitlines()
+        assert second.startswith('Second title line')
+        assert third.startswith('Local time: ')
+    image = {'type': 'image_url'}
+    part = {'type': 'text', 'text': wake}
+    message = {
+        'R1': wake,
+        'R2': 'Owner text\n\n' + wake,
+        'R3': wake + '\n\nOwner text',
+        'R4': '\n\n'.join(prompts[key] for key in chats),
+        'R5': [part, image],
+        'R5-part-join': [{'type': 'input_text', 'text': 'Owner text'}, image, part],
+        'R6': ('[System note: Your previous turn was interrupted mid-run — the app or its backend process stopped '
+               'before the turn could finish. Some of the work may already be complete; check the current state before '
+               'redoing anything, then finish the task. The interrupted request was:]\n\n' + wake),
+        'R8-alone': wake,
+        'R8-merged': 'Owner text\n\n' + wake,
+        'header-only-segment': 'Owner text\n\n' + wake.split('\n', 1)[0],
+    }[shape]
+    for key in chats:
+        bind(monkeypatch, backend, key)
+        backend.intake.pre_llm_call(session_id=key, turn_id='wake', user_message=message)
+        backend.intake.on_session_end(session_id=key, turn_id='wake', completed=True)
+    for delay in (30, 5):
+        backend.clock.advance(delay)
+        backend.tick()
+    assert len(backend.ctx.calls) == len(chats)
+    for wid in chats.values():
+        o, = backend.store.list_occurrences(wid)
+        assert (o.state, o.attempt, backend.store.get_wake(wid).fires) == ('done', 1, 1)
+        assert not backend.store.backend_reinject_state(o.id).get('count')
+
+
+def test_backend_prompt_start_r7_legacy_unsigned(hosts, monkeypatch):
+    _, backend = hosts
+    o = backend_occurrence(backend, monkeypatch, backend.epoch)
+    assert backend.store.backend_reinject_state(o.id).get('prompt_attempt') is None
+    finish_backend_wake(backend, f'⟦pulse o:{o.id} a:{o.attempt}⟧')
+    assert backend.store.get_occurrence(o.wake_id, o.dedupe_key).state == 'done'
+
+
+def test_backend_prompt_start_keep_warm(hosts, monkeypatch):
+    _, backend = hosts
+    o = backend_occurrence(backend, monkeypatch, backend.epoch)
+    db = backend.store
+    w = db.get_wake(o.wake_id)
+    assert db.cas_wake(w.id, w.status, expected_version=w.version,
+                       trigger_json={'builtin': True, 'keep_warm': True})
+    prompt = backend.render_occurrence(db.get_wake(w.id), o, db.get_session(CHAT))
+    finish_backend_wake(backend, prompt)
+    assert db.get_occurrence(w.id, o.dedupe_key).state == 'done'
+
+
+@pytest.mark.parametrize('shape', ['N1', 'N2', 'N3', 'N5'])
+def test_backend_prompt_start_rejects_owner_header(hosts, monkeypatch, tui_queue, shape):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    backend.clock.advance(61)
+    backend.tick()
+    o, = backend.store.list_occurrences(wid)
+    wake = backend.ctx.calls[0][0]
+    message = {
+        'N1': '[Quoted wake] ' + wake,  # The gateway-style prefix used to match on the backend too.
+        'N2': 'Owner text\n' + wake,
+        'N3': f'⟦pulse o:{o.id} a:{o.attempt}⟧\n' + wake.split('\n', 1)[1],
+        'N5': 'Owner text\n\n[Quoted wake] ' + wake.split('\n', 1)[0],
+    }[shape]
+    finish_backend_wake(backend, message)
+    assert backend.store.get_occurrence(wid, o.dedupe_key).state == 'claimed'
+    assert backend.store.get_wake(wid).fires == 0
+    if shape == 'N1':
+        backend.clock.advance(30)
+        backend.tick()
+        assert len(backend.ctx.calls) == 1
+        backend.clock.advance(5)
+        backend.tick()
+        assert len(backend.ctx.calls) == 2
+        assert backend.store.backend_reinject_state(o.id)['count'] == 1
+        finish_backend_wake(backend, backend.ctx.calls[-1][0])
+        backend.clock.advance(30)
+        backend.tick()
+        backend.clock.advance(5)
+        backend.tick()
+        assert len(backend.ctx.calls) == 2
+        assert backend.store.get_wake(wid).fires == 1
+
+
+@pytest.mark.parametrize('parts', [False, True], ids=['string', 'parts'])
+@pytest.mark.parametrize('owner', [False, True], ids=['generated-only', 'with-owner'])
+def test_backend_prompt_start_n4_image_suffix(hosts, monkeypatch, parts, owner):
+    _, backend = hosts
+    arm_backend_wake(backend, monkeypatch)
+    backend.clock.advance(61)
+    backend.tick()
+    text = backend.ctx.calls[0][0] + '\n@image:`fixture image.png`'
+    if owner:
+        text += '\n\n@image:owner text'
+    message = [{'type': 'text', 'text': text}, {'type': 'image_url'}] if parts else text
+    backend.intake.pre_llm_call(session_id=CHAT, turn_id='wake', user_message=message)
+    reply = backend.intake.transform_llm_output(session_id=CHAT, turn_id='wake', response_text='Finished.')
+    assert reply == (None if owner else '[SILENT]')
 
 
 def test_backend_delayed_first_hook_never_triggers_timed_resend(hosts, monkeypatch):

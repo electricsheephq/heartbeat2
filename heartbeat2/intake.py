@@ -66,24 +66,35 @@ def marker(text, *, secret=None, require_tag=False):
     return None
 
 
-def backend_markers(text, *, secret, require_tag):
-    # Hermes appends text-only arrivals to the queued owner prompt. Signed
-    # markers can start a wake there. Older DM wakes still work at line one.
-    candidates=[(parsed,index) for index,line in enumerate(text.split('\n'))
-                if (parsed:=marker(line,secret=secret,require_tag=True))]
-    if not require_tag and (not candidates or candidates[0][1]>0):
-        if legacy:=marker(text,secret=secret):
-            candidates.append((legacy,0))
-    return candidates
+def backend_markers(parts, *, secret, require_tag):
+    # Queue merges and the auto-continue note insert an empty line. Each text
+    # part also has its own start. Gateway prefixes do not apply to app prompts.
+    for part_index,text in enumerate(parts):
+        lines=text.split('\n')
+        for index,line in enumerate(lines):
+            if (index and lines[index-1]) or not line.startswith('⟦pulse '): continue
+            if parsed:=marker(line,secret=secret,require_tag=True):
+                yield parsed,part_index,index,True
+    if not require_tag and parts:
+        first=parts[0].split('\n',1)[0]
+        if (match:=MARKER.match(first)) and not match[3]:
+            if legacy:=marker(first,secret=secret):
+                yield legacy,0,0,False
 
 
-def backend_owner_suffix(text, state, attempt, *, has_parts):
+IMAGE_SUFFIX = re.compile(r"""(?:\n@image:(?:`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|\S+)(?=\n|\Z))+""")
+
+
+def backend_owner_suffix(text, state, attempt):
     # A hash and size identify the exact injected prefix without storing the
     # prompt. Blank lines inside the wake's own note are part of that prefix.
     size=state.get('prompt_size',0)
     if state.get('prompt_attempt')==attempt and hashlib.sha256(text[:size].encode(errors='surrogatepass')).hexdigest()==state.get('prompt_digest'):
-        return any(line.strip() and not (has_parts and line.startswith('@image:'))
-                   for line in text[size:].split('\n'))
+        # Hermes appends generated references directly to the persisted caption.
+        # A blank-line join or any other text ends that attachment block.
+        suffix=text[size:]
+        refs=IMAGE_SUFFIX.match(suffix)
+        return bool((suffix[refs.end():] if refs else suffix).strip())
     # Hermes joins queued text with a blank line. For pre-upgrade or rewritten
     # prompts, look after the generated contract, beyond the multiline note.
     contract=text.partition('\nContract: ')[2]
@@ -566,18 +577,23 @@ class Intake:
         previous=self.flights.get(session_id)
         owner_folded=False
         if s.backend:
-            text=row_text(user_message,('text','input_text'))
+            parts=[user_message] if isinstance(user_message,str) else []
+            if isinstance(user_message,list):
+                parts=[part['text'] for part in user_message if isinstance(part,dict)
+                       and part.get('type') in ('text','input_text') and isinstance(part.get('text'),str)]
             parsed=None
-            for candidate,index in backend_markers(text,secret=secret,require_tag=require_tag):
+            for candidate,part_index,index,signed in backend_markers(parts,secret=secret,require_tag=require_tag):
                 wid,dedupe,attempt=candidate
                 w,o=s.get_wake(wid),s.get_occurrence(wid,dedupe)
                 if w is None or w.session_key!=key or o is None or o.attempt!=attempt: continue
                 same_turn=(previous and previous.turn_id==turn_id and
                            (previous.wake_id,previous.dedupe_key,previous.attempt)==candidate)
                 if o.state!='claimed' and not (o.state=='started' and same_turn): continue
+                state=s.backend_reinject_state(o.id)
+                if not signed and state.get('prompt_attempt')==attempt: continue
                 parsed=candidate
-                owner_folded=index>0 or backend_owner_suffix(text,s.backend_reinject_state(o.id),attempt,
-                                                            has_parts=isinstance(user_message,list))
+                owner_folded=(index>0 or any(part.strip() for i,part in enumerate(parts) if i!=part_index)
+                              or backend_owner_suffix(parts[part_index],state,attempt))
                 break  # Dispatch permits one claimed/started occurrence per chat.
         else:
             parsed=marker(user_message,secret=secret,require_tag=require_tag)

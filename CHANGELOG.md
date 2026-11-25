@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- App wakes settle only when the signed header starts a queued wake prompt, so quoting a header mid-message no longer consumes the queued wake. (#241)
+- An unsigned header can no longer settle an app wake that HeartBeat dispatched with a signature. (#241)
+- Generated image references no longer prevent a silent app wake from staying silent. Owner text starting with `@image:` still gets its reply. (#241)
+
 ## 0.5.0 — 2026-11-25
 
 - **Wakes in app chats served by their own backend.** In chats that an app backend of their own serves (the Desktop app's standalone `hermes serve`, or the terminal TUI's backend), you can now arm one-time and recurring wakes, and they fire into that chat, whether or not a messaging gateway runs on the same profile. One app backend per profile schedules and delivers them under its own lock; the messaging gateway's schedule is unchanged and never touches them. A wake that comes due while the app is closed waits and fires once when the chat is open again, unless it expires first under its own expiry or catch-up rule; an owner reminder past its late window is reported as missed. If Hermes accepts a wake but no turn starts, HeartBeat keeps it waiting (never counted as a failure). The app process that accepted it checks Hermes' own queue: once two checks a few seconds apart find the prompt gone, it is sent once more; while the prompt is still queued it waits. If the accepting process exits, it is sent once more. `/pulse list` and `/pulse status` show "re-sent N×", every extra copy carries the late label, and an owner-asked reminder more than 15 minutes late says when it was due. `/pulse off`, `on`, `status` and `list` work in these chats even while their older wakes are still on the gateway's schedule. Watchers, keep-warm and own time still need a messaging chat. (#233)
