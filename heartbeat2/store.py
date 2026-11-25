@@ -39,7 +39,7 @@ _BOOL_FIELDS = {"babysit", "urgent", "cancel_on_reply", "notify", "force_silent"
 _TRANSITIONS = {
     "pending": { "skipped", "missed", "dead", "orphaned", "superseded"},
     "claimed": {"pending", "started", "dead", "interrupted", "orphaned", "superseded"},
-    "started": {"done", "interrupted", "orphaned", "superseded"},
+    "started": {"pending", "done", "interrupted", "orphaned", "superseded"},
 }
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -150,9 +150,10 @@ def _validate_wake(wake: Wake):
 # Nor is children:<occurrence id>:<attempt>: a recovered turn can stay bound to an old occurrence after gc removes its row,
 # and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
 BACKEND_REINJECT_PREFIX = 'backend_reinject:'
+FAILURE_NOTICE_PREFIX = 'failure_notice:'
 OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'held_since:', 'ignored:', 'inject_failures:',
                             'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
-                            'stop_hint_offered:', 'supersede_on_refund:', BACKEND_REINJECT_PREFIX)
+                            'stop_hint_offered:', 'supersede_on_refund:', BACKEND_REINJECT_PREFIX, FAILURE_NOTICE_PREFIX)
 POLLER_META = frozenset({'epoch', 'poller_pid', 'poller_started_at', 'last_tick_at', 'last_tick_monotonic',
                          'probing_since', 'probing_epoch', 'probing_until', 'last_gc_at', 'last_error',
                          'outages', 'off_since', 'provider_health', 'stop_hint_shown'})
