@@ -5,6 +5,7 @@ from hashlib import sha256
 from importlib import import_module
 from importlib.util import module_from_spec, spec_from_file_location
 from inspect import getsource
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -1139,12 +1140,16 @@ def test_backend_accepted_notice_for_pulse_add(hosts, monkeypatch, notice_sends)
     assert len(sends) == 1
 
 
-def test_backend_accepted_notice_restarts_after_owner_message(hosts, monkeypatch, notice_sends):
+@pytest.mark.parametrize('transition', [
+    'held', 'reaccept-during-owner-turn', 'refund-and-reclaim', 'restart-refund', 'refusal-refund', 'legacy-resend',
+])
+def test_backend_accepted_notice_restarts_after_owner_message(hosts, monkeypatch, notice_sends, transition):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
     db = backend.store
     wake = db.get_wake(wid)
     assert db.cas_wake(wid, 'active', expected_version=wake.version, owner_requested=True)
+    monkeypatch.setattr(backend, '_backend_prompt_missing', lambda *args: False)
     sends = notice_sends(backend)
     backend.clock.advance(60)
     backend.tick()
@@ -1156,29 +1161,139 @@ def test_backend_accepted_notice_restarts_after_owner_message(hosts, monkeypatch
     assert backend.notifications.idle.wait(2)
     first, = sends
 
+    def owner_message():
+        backend.intake.pre_llm_call(session_id=CHAT, turn_id='human', user_message='Hello.',
+                                    conversation_history=[{'role': 'user', 'content': 'Hello.',
+                                                           'platform_message_id': 'fixture-owner-message'}])
+        session = db.get_session(CHAT)
+        assert session.last_human_at == session.busy_since == backend.clock.now()
+
     backend.clock.advance(5)
+    occurrence = held[1]
+    if transition == 'restart-refund':
+        with monkeypatch.context() as restarted:
+            restarted.setattr(backend, '_own_claim', lambda o: False)
+            restarted.setattr(backend, '_foreign_backend_claim', lambda o: False)
+            backend.acks()
+        refunded = db.get_occurrence(wid, occurrence.dedupe_key)
+        assert (refunded.state, refunded.error) == ('pending', 'restart_refund')
+    elif transition != 'held':
+        with monkeypatch.context() as dropped:
+            dropped.setattr(backend, '_backend_prompt_missing', lambda *args: True)
+            backend.acks()
+            backend.clock.advance(5)
+            backend.acks()
+        assert db.get_occurrence(wid, occurrence.dedupe_key).state == 'pending'
+        backend.ctx.accept = transition != 'refusal-refund'
+        if transition == 'reaccept-during-owner-turn':
+            inject = backend.ctx.inject_message
+
+            def inject_during_owner_turn(*args, **kwargs):
+                owner_message()
+                return inject(*args, **kwargs)
+
+            with monkeypatch.context() as receiving:
+                receiving.setattr(backend.ctx, 'inject_message', inject_during_owner_turn)
+                backend.dispatch_pending()
+        else:
+            backend.dispatch_pending()
+        retried = db.get_occurrence(wid, occurrence.dedupe_key)
+        assert retried.attempt == occurrence.attempt + 1
+        expected = ('pending', 'app_closed') if transition == 'refusal-refund' else ('claimed', '')
+        assert (retried.state, retried.error) == expected
+
+    if transition == 'legacy-resend':
+        backend.clock.advance(600)
+        backend.acks()
+        assert held_wakes(backend, CHAT)[0][2] > held[2]
+        receipt = json.loads(db.get_meta(EPISODE_PREFIX+CHAT))
+        del receipt['accepted_noticed']
+        db.set_meta(EPISODE_PREFIX+CHAT, json.dumps(receipt))
+    if transition != 'reaccept-during-owner-turn':
+        owner_message()
+    backend.clock.advance(5)
+    reset = backend.clock.now()
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert sends == [first]
+    if transition in {'restart-refund', 'refusal-refund'}:
+        backend.intake.on_session_end(session_id=CHAT, turn_id='human')
+        backend.ctx.accept = True
+        backend.clock.advance(60)
+        backend.tick()
+        assert db.get_occurrence(wid, occurrence.dedupe_key).state == 'claimed'
+    if transition not in {'held', 'legacy-resend'}:
+        backend.clock.advance(reset + 300 - backend.clock.now())
+        backend.tick()
+        assert backend.notifications.idle.wait(2)
+        assert sends == [first]
+        backend.clock.advance(reset + 660 - backend.clock.now())
+        backend.tick()
+        assert backend.notifications.idle.wait(2)
+        reheld, = held_wakes(backend, CHAT)
+        assert (reheld[1].id, reheld[1].state) == (occurrence.id, 'claimed')
+        assert sends == [first]
+    backend.clock.advance(reset + 899 - backend.clock.now())
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert sends == [first]
+    backend.clock.advance(1)
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert sends == [first, first]
+    if transition == 'reaccept-during-owner-turn':
+        backend.intake.on_session_end(session_id=CHAT, turn_id='human')
+        backend.intake.pre_llm_call(session_id=CHAT, turn_id='wake', user_message=backend.ctx.calls[-1][0])
+        assert db.get_occurrence(wid, occurrence.dedupe_key).state == 'started'
+        assert not db.get_meta(EPISODE_PREFIX+CHAT)
+    if transition == 'held':
+        assert held_wakes(backend, CHAT) == [held]
+    backend.clock.advance(1)
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert sends == [first, first]
+
+
+def test_backend_closed_window_notice_does_not_delay_first_accepted_notice(hosts, monkeypatch, notice_sends):
+    _, backend = hosts
+    arm_backend_wake(backend, monkeypatch)
+    sends = notice_sends(backend)
+    backend.ctx.accept = False
+    backend.clock.advance(60)
+    backend.tick()
+    backend.clock.advance(60)
+    due = backend.clock.now()
+    db = backend.store
+    db.create_wake(Wake(CHAT, 'Pay rent.', 'at', id='reminder', platform='desktop', chat_type='dm',
+                        owner_requested=True))
+    slot = f't:{due}'
+    assert db.add_occurrence('reminder', slot)
+    assert db.claim('reminder', slot, epoch=backend.epoch, pid=os.getpid())
+    backend.clock.advance(540)
+    backend.notifications.tick(backend)
+    assert backend.notifications.idle.wait(2)
+    first, = sends
+    assert 'because the app window is closed' in first[1]
+    receipt = json.loads(db.get_meta(EPISODE_PREFIX+CHAT))
+
+    backend.clock.advance(65)
+    backend.acks()
+    assert db.get_occurrence('reminder', slot).error == 'app_closed'
     backend.intake.pre_llm_call(session_id=CHAT, turn_id='human', user_message='Hello.',
                                 conversation_history=[{'role': 'user', 'content': 'Hello.',
                                                        'platform_message_id': 'fixture-owner-message'}])
-    session = db.get_session(CHAT)
-    assert session.last_human_at == session.busy_since == backend.clock.now()
-    backend.clock.advance(5)
-    backend.tick()
+    backend.notifications.tick(backend)
     assert backend.notifications.idle.wait(2)
     assert sends == [first]
-    backend.clock.advance(899)
-    backend.tick()
+    backend.clock.advance(due + 899 - backend.clock.now())
+    backend.notifications.tick(backend)
     assert backend.notifications.idle.wait(2)
     assert sends == [first]
     backend.clock.advance(1)
-    backend.tick()
+    backend.notifications.tick(backend)
     assert backend.notifications.idle.wait(2)
-    assert sends == [first, first]
-    assert held_wakes(backend, CHAT) == [held]
-    backend.clock.advance(1)
-    backend.tick()
-    assert backend.notifications.idle.wait(2)
-    assert sends == [first, first]
+    assert len(sends) == 2 and "chat isn't ready" in sends[-1][1]
+    assert receipt['accepted_noticed'] == []
 
 
 def test_backend_recurring_catchup_notices_once(hosts, monkeypatch, notice_sends):
@@ -1281,6 +1396,8 @@ def test_backend_hold_ends_on_actual_wake_start(hosts, monkeypatch):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
     db = backend.store
+    wake = db.get_wake(wid)
+    assert db.cas_wake(wid, 'active', expected_version=wake.version, owner_requested=True)
     backend.refresh_policy = None
     backend.policy = replace(backend.policy, notify_via='fixture:owner')
     sends = []

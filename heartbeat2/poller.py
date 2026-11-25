@@ -538,8 +538,10 @@ class Poller:
             if episode_over(self,key): end_episode(self,key)
             if new_accepted_hold or not s.get_meta('held_since:'+o.id):
                 s.set_meta('held_since:'+o.id,str(now))
-            if not is_keep_warm(w) and not s.get_meta(EPISODE_PREFIX+key):
-                s.set_meta(EPISODE_PREFIX+key,json.dumps(episode(self,key)))
+            if not is_keep_warm(w):
+                current = json.loads(s.get_meta(EPISODE_PREFIX+key) or 'null') or {}
+                if 'id' not in current:
+                    s.set_meta(EPISODE_PREFIX+key,json.dumps(episode(self,key)))
 
     def family_enabled(self,w):
         family='silence' if w.kind=='owner_silent' else 'events' if w.kind in EVENT_KINDS else w.kind if w.kind in PROBE_KINDS else None

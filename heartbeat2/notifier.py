@@ -100,7 +100,7 @@ def notifier_for(engine):
 import json
 import uuid
 from datetime import datetime, timedelta
-from .policy import LOCAL_SURFACES, agreed_watcher, is_keep_warm, owner_class, owner_requested
+from .policy import LOCAL_SURFACES, agreed_watcher, is_keep_warm, owner_class
 from .schedule import local_day
 
 NOTIFY_AFTER_S = 600
@@ -125,12 +125,16 @@ def held_wakes(engine, key, *, include_paused=False):
     return rows
 
 
+def _accepted_notice_eligible(wake):
+    return owner_class(wake) or agreed_watcher(wake) or wake.urgent
+
+
 def _backend_notice_deadlines(store, rows, data):
     for row in rows:
         wake, occurrence, since = row
         if occurrence.state == 'pending':
             yield row, since + NOTIFY_AFTER_S
-        elif owner_class(wake) or agreed_watcher(wake) or wake.urgent:
+        elif _accepted_notice_eligible(wake):
             if 'accepted_restarted_at' in data and occurrence.id in data['accepted_noticed']:
                 start = data['accepted_restarted_at']
             else:
@@ -179,7 +183,9 @@ def episode_over(engine, key, now=None):
     if 'queued' not in data:
         # Its notice is being sent: the send's result decides, so a pause or cancel meanwhile can't lose the receipt.
         if engine.store.notice_reserved(key): return False
-        return not stamped(engine, key)
+        if stamped(engine, key): return False
+        # A retry can be between holds for several ticks. Keep its original reset clock until it starts or ends.
+        return not (engine.store.backend and _unfinished_noticed(engine.store, key, data.get('accepted_noticed')))
     now = engine.clock.now() if now is None else now
     chat = engine.store.get_session(key)
     return now-data['queued'] >= 86400 or bool(chat and chat.last_human_at and chat.last_human_at > data['queued'])
@@ -199,28 +205,34 @@ def end_episode(engine, key):
                 engine.store.set_meta('held_since:'+o.id, '')
 
 
+def _unfinished_noticed(store, key, noticed):
+    if not noticed: return []
+    ids = set(noticed)
+    return sorted(o.id for state in ('pending', 'claimed')
+                  for o in store.list_occurrences(state=state, session_key=key) if o.id in ids)
+
+
 def _restart_accepted_holds(engine, key, data):
-    rows = held_wakes(engine, key, include_paused=True)
-    noticed = data.get('accepted_noticed')
-    if noticed is None:
-        # Older receipts didn't store occurrence IDs. Recover matches using the old clock and pending precedence.
-        queued = data['queued']
-        if any(w.status == 'active' and o.state == 'pending' and since + NOTIFY_AFTER_S <= queued
-               for w, o, since in rows): return
-        noticed = [o.id for w, o, since in rows if o.state == 'claimed' and since + ACCEPTED_NOTIFY_AFTER_S <= queued
-                   and (owner_requested(w) or agreed_watcher(w) or w.urgent)]
-    remaining = [row for row in rows if row[1].state == 'claimed' and row[1].id in noticed]
+    if 'accepted_noticed' in data:
+        noticed = data['accepted_noticed']
+    else:
+        # Legacy receipts lack IDs, and a resend can replace the held stamp after the notice.
+        noticed = [o.id for w, o, _ in held_wakes(engine, key, include_paused=True)
+                   if o.state == 'claimed' and _accepted_notice_eligible(w)]
+    remaining = _unfinished_noticed(engine.store, key, noticed)
     if remaining:
-        fresh = episode(engine, key, remaining)
-        fresh.update(accepted_noticed=[o.id for _, o, _ in remaining], accepted_restarted_at=engine.clock.now())
+        # The next hold supplies the episode ID and actual held-since time.
+        fresh = {'accepted_noticed': remaining, 'accepted_restarted_at': engine.clock.now()}
         engine.store.set_meta(EPISODE_PREFIX+key, json.dumps(fresh))
 
 
 def episode(engine, key, rows=None):
     rows = held_wakes(engine,key) if rows is None else rows
     if not rows: return None
-    return json.loads(engine.store.get_meta(EPISODE_PREFIX+key) or '{}') or {
-        'id':uuid.uuid4().hex, 'since':min(x[2] for x in rows), 'attempts':0}
+    data = json.loads(engine.store.get_meta(EPISODE_PREFIX+key) or '{}') or {}
+    if 'id' not in data:
+        data.update(id=uuid.uuid4().hex, since=min(row[2] for row in rows), attempts=0)
+    return data
 
 
 def _time(engine, stamp):
@@ -445,8 +457,9 @@ class NotificationWorker:
                     s.add_event('notify',dedupe,{'status':'queued'},session_key=key)
                     s.connection.execute('UPDATE events SET consumed_at=? WHERE dedupe_key=?',(now,dedupe))
                     data['queued']=sent_at  # the send's start: an owner write during the send ends this wait
-                    if s.backend and rows[0][1].state=='claimed':
-                        data['accepted_noticed']=sorted(set(data.get('accepted_noticed', ())) | {o.id for _, o, _ in rows})
+                    if s.backend:
+                        covered = {o.id for _, o, _ in rows if o.state == 'claimed'}
+                        data['accepted_noticed'] = sorted(set(data.get('accepted_noticed', ())) | covered)
                     data.pop('error',None)
                 else:
                     error=str(result.get('error') or 'notifier refused').replace(text,'[notice]')
