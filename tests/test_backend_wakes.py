@@ -1670,6 +1670,7 @@ def test_backend_notice_cleanup_bounds_persistent_writer(hosts, monkeypatch, cap
 def gateway_trace(package, home, clock, monkeypatch):
     intake, model, notifier, poller, policy, store, tool = [__import__(f'{package}.{name}', fromlist=[name])
         for name in ('intake', 'model', 'notifier', 'poller', 'policy', 'store', 'tool')]
+    monkeypatch.setenv('HERMES_HOME', str(home))  # never the real home, whatever a traced path resolves
     monkeypatch.setattr(poller, 'uuid', SimpleNamespace(uuid4=lambda: SimpleNamespace(hex='fixture-epoch')))
     monkeypatch.setattr(notifier, 'uuid', SimpleNamespace(uuid4=lambda: SimpleNamespace(hex='fixture-notice')))
     monkeypatch.setattr(intake, 'uuid', SimpleNamespace(uuid4=lambda: SimpleNamespace(hex='fixture-human-episode')))

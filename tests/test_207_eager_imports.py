@@ -18,8 +18,15 @@ def test_module_list_covers_every_module():
     assert set(registration.MODULES) == on_disk
 
 
+# The unit suite's network denial doesn't reach a child interpreter, so each child installs its own.
+NO_NETWORK = ('import socket\n'
+              'def _denied(*a, **k): raise AssertionError("unit tests must not use network")\n'
+              'for _n in ("connect", "connect_ex", "sendto"): setattr(socket.socket, _n, _denied)\n'
+              'socket.create_connection = socket.getaddrinfo = _denied\n')
+
+
 def test_gateway_load_never_resolves_hermes_tui_server():
-    subprocess.run([sys.executable, '-B', '-c',
+    subprocess.run([sys.executable, '-B', '-c', NO_NETWORK +
                     'from heartbeat2.registration import load_all; import sys; load_all(); '
                     'assert "heartbeat2.tui_probe" in sys.modules; '
                     'assert "tui_gateway.server" not in sys.modules'],
@@ -49,7 +56,7 @@ print(r.version_skew())
 def test_swapped_files_stay_inert_after_load_all(tmp_path, mode, expected):
     shutil.copytree(ROOT/'heartbeat2', tmp_path/'heartbeat2', ignore=shutil.ignore_patterns('__pycache__'))
     shutil.copy(ROOT/'plugin.yaml', tmp_path/'plugin.yaml')
-    out = subprocess.run([sys.executable, '-B', '-c', SWAP, str(tmp_path), mode], capture_output=True, text=True,
+    out = subprocess.run([sys.executable, '-B', '-c', NO_NETWORK + SWAP, str(tmp_path), mode], capture_output=True, text=True,
                          timeout=60, check=True).stdout.splitlines()
     assert out[0] == expected
     assert out[1].startswith('Upgrade pending: 9.9.9 is installed but ') and out[1].endswith('restart Hermes to finish the upgrade.')

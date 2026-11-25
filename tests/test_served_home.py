@@ -391,9 +391,10 @@ def backend_runtime(tmp_path, clock, monkeypatch):
         bind_chat(monkeypatch, e, CHAT, platform='local')
         assert json.loads(rt.tool(ARM))['armed']
         rt.start()
-        assert until(lambda: holds(rt), timeout=2)
+        # Wall-clock waits on the poller thread: generous, since they return as soon as it acts (slow CI runners).
+        assert until(lambda: holds(rt), timeout=10)
         clock.advance(61)
-        assert ctx.injected.wait(2)
+        assert ctx.injected.wait(timeout=10)
         yield rt, e
     finally:
         rt.close()
@@ -428,10 +429,12 @@ def test_backend_role_loss_keeps_own_accepted_claim_held(backend_runtime):
     rt, e = backend_runtime
     o, = e.store.list_occurrences()
     assert o.state == 'claimed'
+    # The poller thread records the accept just after the injection returns; wait for it before the role goes.
+    assert until(lambda: e.store.get_meta('accepted:'+o.id) == '1', timeout=10)
     e.ctx._manager.has_tui_message_injector = False
-    assert until(lambda: not holds(rt), timeout=2)
+    assert until(lambda: not holds(rt), timeout=10)
     rt.clock.advance(601)
-    assert until(lambda: e.store.get_occurrence(o.wake_id, o.dedupe_key).error == 'app_closed', timeout=2)
+    assert until(lambda: e.store.get_occurrence(o.wake_id, o.dedupe_key).error == 'app_closed', timeout=10)
     assert e.store.get_occurrence(o.wake_id, o.dedupe_key).state == 'claimed'
     assert e.store.get_meta('accepted:'+o.id) == '1'
     assert e.store.get_meta('held_since:'+o.id)
