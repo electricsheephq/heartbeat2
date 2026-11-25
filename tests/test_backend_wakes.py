@@ -1050,7 +1050,7 @@ def notice_sends():
     ('owner', 'desktop', 'Pay rent'),
     ('urgent', 'tui', 'x' * 59 + '…'),
     ('background', 'desktop', None),
-])
+], ids=['A1-owner', 'A2-urgent', 'A2-background'])
 def test_backend_accepted_hold_notice(hosts, monkeypatch, notice_sends, intent, surface, expected):
     _, backend = hosts
     monkeypatch.setitem(sys.modules, 'tui_gateway.server', None)
@@ -1063,18 +1063,17 @@ def test_backend_accepted_hold_notice(hosts, monkeypatch, notice_sends, intent, 
     assert db.cas_wake(wake.id, 'active', expected_version=wake.version,
                        owner_requested=intent == 'owner', urgent=intent == 'urgent')
     sends = notice_sends(backend)
-    backend.clock.advance(60)
+    backend.clock.advance(65)  # The poller first sees the wake five seconds after its due time.
     backend.tick()
     backend.clock.advance(600)
     backend.tick()
     held, = db.list_occurrences(wake.id)
     assert (held.state, held.error) == ('claimed', 'app_closed')
 
-    for advance in (14 * 60, 59):
-        backend.clock.advance(advance)
-        backend.tick()
-        assert backend.notifications.idle.wait(2)
-        assert sends == []
+    backend.clock.advance(wake.next_due_at + 899 - backend.clock.now())
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert sends == []
     for advance in (1, 5 * 60):
         backend.clock.advance(advance)
         backend.tick()
@@ -1089,7 +1088,7 @@ def test_backend_accepted_hold_notice(hosts, monkeypatch, notice_sends, intent, 
         assert db.get_occurrence(wake.id, held.dedupe_key).state == 'claimed'
 
 
-def test_backend_accepted_notice_wait_starts_when_claim_is_held(hosts, monkeypatch, notice_sends):
+def test_backend_accepted_notice_wait_starts_at_due_after_injector_refusal(hosts, monkeypatch, notice_sends):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
     db = backend.store
@@ -1106,7 +1105,7 @@ def test_backend_accepted_notice_wait_starts_when_claim_is_held(hosts, monkeypat
     backend.tick()
     held, = db.list_occurrences(wid)
     assert (held.state, held.error) == ('claimed', 'app_closed')
-    backend.clock.advance(899)
+    backend.clock.advance(239)
     backend.tick()
     assert backend.notifications.idle.wait(2)
     assert sends == []
@@ -1115,6 +1114,110 @@ def test_backend_accepted_notice_wait_starts_when_claim_is_held(hosts, monkeypat
     assert backend.notifications.idle.wait(2)
     assert sends == [('owner', "Pay rent is due but its Desktop chat isn't ready; it'll run on your next message there.")]
     assert len(backend.ctx.calls) == 2
+
+
+def test_backend_accepted_notice_for_pulse_add(hosts, monkeypatch, notice_sends):
+    _, backend = hosts
+    bind(monkeypatch, backend, CHAT)
+    runtime = SimpleNamespace(get_engine=lambda: backend)
+    assert RECEIPT in commands.handle('add in 1m Pay rent', runtime)
+    wake, = backend.store.list_wakes(CHAT)
+    assert (wake.creator, wake.created_in) == ('user', 'command')
+    sends = notice_sends(backend)
+    backend.clock.advance(60)
+    backend.tick()
+    for advance in (600, 299):
+        backend.clock.advance(advance)
+        backend.tick()
+        assert backend.notifications.idle.wait(2)
+        assert not sends
+    held, = held_wakes(backend, CHAT)
+    assert held[1].state == 'claimed'
+    backend.clock.advance(1)
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert len(sends) == 1
+
+
+def test_backend_accepted_notice_restarts_after_owner_message(hosts, monkeypatch, notice_sends):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    db = backend.store
+    wake = db.get_wake(wid)
+    assert db.cas_wake(wid, 'active', expected_version=wake.version, owner_requested=True)
+    sends = notice_sends(backend)
+    backend.clock.advance(60)
+    backend.tick()
+    backend.clock.advance(600)
+    backend.tick()
+    held, = held_wakes(backend, CHAT)
+    backend.clock.advance(900)  # Ensure the first notice has queued under either clock.
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    first, = sends
+
+    backend.clock.advance(5)
+    backend.intake.pre_llm_call(session_id=CHAT, turn_id='human', user_message='Hello.',
+                                conversation_history=[{'role': 'user', 'content': 'Hello.',
+                                                       'platform_message_id': 'fixture-owner-message'}])
+    session = db.get_session(CHAT)
+    assert session.last_human_at == session.busy_since == backend.clock.now()
+    backend.clock.advance(5)
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert sends == [first]
+    backend.clock.advance(899)
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert sends == [first]
+    backend.clock.advance(1)
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert sends == [first, first]
+    assert held_wakes(backend, CHAT) == [held]
+    backend.clock.advance(1)
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert sends == [first, first]
+
+
+def test_backend_recurring_catchup_notices_once(hosts, monkeypatch, notice_sends):
+    _, backend = hosts
+    bind(monkeypatch, backend, CHAT)
+    result = backend.tool.handle({**ARM, 'trigger': {'kind': 'every', 'every': '10m'}})
+    assert result['armed']
+    db = backend.store
+    wake = db.get_wake(result['wake']['id'])
+    assert db.cas_wake(wake.id, 'active', expected_version=wake.version, urgent=True)
+    sends = notice_sends(backend)
+    backend.clock.advance(wake.next_due_at - backend.clock.now() + 905)
+    backend.tick()
+    first, = db.list_occurrences(wake.id)
+    assert first.claimed_at - wake.next_due_at == 905
+    assert not sends
+    backend.clock.advance(600)
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert len(sends) == 1
+    assert db.get_occurrence(wake.id, first.dedupe_key).error == 'app_closed'
+    for _ in range(3):
+        backend.clock.advance(db.get_wake(wake.id).next_due_at - backend.clock.now())
+        backend.tick()
+        assert backend.notifications.idle.wait(2)
+        assert len(sends) == 1
+    assert db.list_occurrences(wake.id, state='pending')
+
+    # A full daily message budget still blocks a send after the owner starts a new episode.
+    backend.policy = replace(backend.policy, max_messages_per_day=backend.daily(CHAT)['delivered'])
+    backend.clock.advance(5)
+    backend.intake.pre_llm_call(session_id=CHAT, turn_id='human', user_message='Hello.',
+                                conversation_history=[{'role': 'user', 'content': 'Hello.',
+                                                       'platform_message_id': 'fixture-owner-message'}])
+    backend.tick()
+    backend.clock.advance(900)
+    backend.tick()
+    assert backend.notifications.idle.wait(2)
+    assert len(sends) == 1
 
 
 def test_backend_injector_refused_notice_keeps_closed_window_timing_and_text(hosts, monkeypatch, notice_sends):
@@ -1145,10 +1248,11 @@ def test_backend_accepted_notice_groups_only_due_eligible_wakes(hosts, monkeypat
                                   ('younger', 'at', True, 899), ('background', 'at', False, 900)]:
         db.create_wake(Wake(CHAT, 'Watch the task.', kind, id=wid, platform='desktop',
                             chat_type='dm', owner_requested=asked))
-        assert db.add_occurrence(wid, 'slot')
-        assert db.claim(wid, 'slot', epoch=backend.epoch, pid=os.getpid())
-        assert db.update_occurrence(wid, 'slot', 'claimed', attempt=1, error='app_closed')
-        db.set_meta(f'held_since:{wid}/slot', str(backend.clock.now() - age))
+        key = f't:{backend.clock.now() - age}'
+        assert db.add_occurrence(wid, key)
+        assert db.claim(wid, key, epoch=backend.epoch, pid=os.getpid())
+        assert db.update_occurrence(wid, key, 'claimed', attempt=1, error='app_closed')
+        db.set_meta(f'held_since:{wid}/{key}', str(backend.clock.now() - age))
     backend.notifications.tick(backend)
     assert backend.notifications.idle.wait(2)
     assert sends == [('owner', "2 wakes are due but their Desktop chat isn't ready; "
@@ -1195,11 +1299,14 @@ def test_backend_hold_ends_on_actual_wake_start(hosts, monkeypatch):
     assert db.get_occurrence(wid, o.dedupe_key).state == 'claimed'
     assert db.get_meta('held_since:'+o.id) == stamp
     assert db.get_meta(EPISODE_PREFIX+CHAT) == episode
+    backend.clock.advance(600)
+    backend.tick()
+    assert db.get_occurrence(wid, o.dedupe_key).error == 'app_closed'
     backend.intake.pre_llm_call(session_id=CHAT, turn_id='wake', user_message=backend.ctx.calls[-1][0])
     assert db.get_occurrence(wid, o.dedupe_key).state == 'started'
     assert not db.get_meta('held_since:'+o.id)
     assert not db.get_meta(EPISODE_PREFIX+CHAT)
-    backend.clock.advance(NOTIFY_AFTER_S)
+    backend.clock.advance(1500)
     backend.notifications.tick(backend)
     assert backend.notifications.idle.is_set()
     assert not sends

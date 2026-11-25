@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Accepted Desktop and TUI wakes send a heads-up 15 minutes after they were due, or after acceptance if it came earlier. (#241)
+- Reminders you set with `/pulse add` now qualify for the accepted-wake heads-up. (#241)
+- If you write in the chat and the wake is still held, a repeat heads-up waits 15 minutes into the new wait. (#241)
+
 ## 0.5.0 — 2026-11-25
 
 - **Wakes in app chats served by their own backend.** In chats that an app backend of their own serves (the Desktop app's standalone `hermes serve`, or the terminal TUI's backend), you can now arm one-time and recurring wakes, and they fire into that chat, whether or not a messaging gateway runs on the same profile. One app backend per profile schedules and delivers them under its own lock; the messaging gateway's schedule is unchanged and never touches them. A wake that comes due while the app is closed waits and fires once when the chat is open again, unless it expires first under its own expiry or catch-up rule; an owner reminder past its late window is reported as missed. If Hermes accepts a wake but no turn starts, HeartBeat keeps it waiting (never counted as a failure). The app process that accepted it checks Hermes' own queue: once two checks a few seconds apart find the prompt gone, it is sent once more; while the prompt is still queued it waits. If the accepting process exits, it is sent once more. `/pulse list` and `/pulse status` show "re-sent N×", every extra copy carries the late label, and an owner-asked reminder more than 15 minutes late says when it was due. `/pulse off`, `on`, `status` and `list` work in these chats even while their older wakes are still on the gateway's schedule. Watchers, keep-warm and own time still need a messaging chat. (#233)
