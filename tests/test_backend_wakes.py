@@ -497,18 +497,20 @@ def test_backend_only_later_completed_turn_reopens_resend(hosts, monkeypatch):
     {'completed': False},
     {'completed': True},
 ], ids=['interrupted', 'failed', 'incomplete', 'fenced'])
-def test_backend_invalid_turn_cannot_trigger_resend(hosts, monkeypatch, outcome):
+@pytest.mark.parametrize('valid_first', [False, True], ids=['invalid-first', 'invalid-second'])
+def test_backend_invalid_turn_cannot_trigger_resend(hosts, monkeypatch, outcome, valid_first):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
     db = backend.store
     backend.clock.advance(61)
     backend.tick()
     o, = db.list_occurrences(wid)
-    # Model a claim with a previous resend so old code tests turn evidence
-    # directly instead of taking its first timed-resend branch.
-    db.set_meta('backend_reinject:'+o.id, f'{{"count": 1, "accepted_at": {backend.clock.now()}}}')
     backend.clock.advance(601)
     backend.tick()
+    if valid_first:
+        end_human_turn(backend, turn_id='first-valid', completed=True)
+        backend.tick()
+        assert len(backend.ctx.calls) == 1
     if outcome.get('completed'):
         stale = backend.ctx.calls[0][0].replace(' a:1', ' a:0', 1)
         backend.intake.pre_llm_call(session_id=CHAT, turn_id='stale', user_message=stale)
@@ -520,6 +522,13 @@ def test_backend_invalid_turn_cannot_trigger_resend(hosts, monkeypatch, outcome)
     backend.tick()
     assert len(backend.ctx.calls) == 1
     assert db.get_occurrence(wid, o.dedupe_key).error == 'app_closed'
+    if not valid_first:
+        end_human_turn(backend, turn_id='first-valid', completed=True)
+        backend.tick()
+        assert len(backend.ctx.calls) == 1
+    end_human_turn(backend, turn_id='second-valid', completed=True)
+    backend.tick()
+    assert len(backend.ctx.calls) == 2
 
 
 def test_backend_detached_chat_holds_until_attach(hosts, monkeypatch):
@@ -565,7 +574,10 @@ def test_backend_restart_drop_waits_for_completed_turn(hosts, monkeypatch):
         backend.tick()
     o, = backend.store.list_occurrences(wid)
     assert (o.state, o.error, len(backend.ctx.calls)) == ('claimed', 'app_closed', 1)
-    end_human_turn(backend, completed=True)
+    end_human_turn(backend, turn_id='first', completed=True)
+    backend.tick()
+    assert len(backend.ctx.calls) == 1
+    end_human_turn(backend, turn_id='second', completed=True)
     backend.tick()
     assert len(backend.ctx.calls) == 2
     assert '(held by a closed app window) (late by ' in backend.ctx.calls[-1][0]
@@ -593,6 +605,7 @@ def test_backend_reinjected_wake_labels(hosts, monkeypatch, asked, minutes):
         backend.tick()
     o, = db.list_occurrences(wid)
     assert (o.state, o.error) == ('claimed', 'app_closed')
+    end_human_turn(backend, turn_id='first', completed=True)
     end_human_turn(backend, completed=True)
     backend.acks()
     assert db.get_occurrence(wid, o.dedupe_key).state == 'pending'
@@ -633,6 +646,7 @@ def test_backend_reinjected_agreed_watcher_labels(hosts, monkeypatch):
         backend.tick()
     held, = db.list_occurrences(wake.id)
     assert (held.state, held.error) == ('claimed', 'app_closed')
+    end_human_turn(backend, turn_id='first', completed=True)
     end_human_turn(backend, completed=True)
     backend.acks()
     backend.clock.advance(360)
@@ -672,6 +686,7 @@ def test_backend_reinjection_count_in_list_and_status(hosts, monkeypatch):
         backend.tick()
         o, = db.list_occurrences(wid)
         assert (o.state, o.error) == ('claimed', 'app_closed')
+        end_human_turn(backend, turn_id='first', completed=True)
         end_human_turn(backend, completed=True)
         backend.tick()
         shown(f're-sent {count}× (app window not ready)')
@@ -702,24 +717,113 @@ def test_gateway_wake_hides_backend_reinjection_count(hosts, monkeypatch):
     assert row['id'] == wid and 'delivery_note' not in row
 
 
-def test_backend_busy_claim_stays_held_until_completed_turn(hosts, monkeypatch):
+@pytest.mark.parametrize('queued', [False, True], ids=['dropped', 'delivered'])
+def test_backend_accept_during_turn_setup_stays_held(hosts, monkeypatch, queued):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
+    db = backend.store
     backend.clock.advance(61)
     backend.tick()
+    # Hermes was already setting up T1 when it accepted the wake prompt.
     backend.clock.advance(1)
-    backend.intake.pre_llm_call(session_id=CHAT, turn_id='human', user_message='Hello.')
+    backend.intake.pre_llm_call(session_id=CHAT, turn_id='T1', user_message='Hello.')
     backend.clock.advance(601)
     backend.tick()
-    o, = backend.store.list_occurrences(wid)
+    o, = db.list_occurrences(wid)
     assert (o.state, o.error) == ('claimed', 'app_closed')
-    assert backend.store.get_meta('accepted:'+o.id) == '1'
-    assert backend.store.get_meta('held_since:'+o.id)
+    assert db.get_meta('accepted:'+o.id) == '1'
+    assert db.get_meta('held_since:'+o.id)
     assert len(backend.ctx.calls) == 1
-    backend.intake.on_session_end(session_id=CHAT, turn_id='human', completed=True)
+    backend.intake.on_session_end(session_id=CHAT, turn_id='T1', completed=True)
     backend.tick()
+    assert len(backend.ctx.calls) == 1
+    if queued:
+        finish_backend_wake(backend, backend.ctx.calls[0][0])
+        assert db.get_wake(wid).fires == 1
+        assert db.get_occurrence(wid, o.dedupe_key).state == 'done'
+    else:
+        # T2 follows T1 and the queued wake would have started ahead of it.
+        end_human_turn(backend, turn_id='T2', completed=True)
+        backend.tick()
+        assert len(backend.ctx.calls) == 2
+        assert '(held by a closed app window) (late by ' in backend.ctx.calls[-1][0]
+        assert db.backend_reinject_state(o.id)['count'] == 1
+        # The evidence for the first acceptance cannot be reused for attempt 2.
+        end_human_turn(backend, turn_id='T3', completed=True)
+    backend.clock.advance(601)
+    backend.tick()
+    assert len(backend.ctx.calls) == (1 if queued else 2)
+
+
+def test_backend_clock_rollback_cannot_make_earlier_turn_resend_evidence(hosts, monkeypatch):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    backend.clock.advance(62)
+    end_human_turn(backend, turn_id='before-accept', completed=True)
+    backend.clock.wall -= 1
+    backend.tick()
+    assert len(backend.ctx.calls) == 1
+    backend.clock.advance(601)
+    backend.tick()
+    assert len(backend.ctx.calls) == 1
+    o, = backend.store.list_occurrences(wid)
+    assert (o.state, o.error, o.attempt) == ('claimed', 'app_closed', 1)
+    end_human_turn(backend, turn_id='first-after-accept', completed=True)
+    backend.tick()
+    assert len(backend.ctx.calls) == 1
+    end_human_turn(backend, turn_id='second-after-accept', completed=True)
+    for _ in range(2):
+        backend.clock.advance(601)
+        backend.tick()
     assert len(backend.ctx.calls) == 2
     assert backend.store.backend_reinject_state(o.id)['count'] == 1
+
+
+def test_backend_legacy_accept_needs_new_ordered_turns(hosts, monkeypatch):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    db = backend.store
+    backend.clock.advance(61)
+    backend.tick()
+    o, = db.list_occurrences(wid)
+    # The round-six accept state had a wall timestamp and no sequence.
+    db.set_meta('backend_reinject:'+o.id, f'{{"count": 1, "accepted_at": {backend.clock.now()}}}')
+    end_human_turn(backend, turn_id='old-first', completed=True)
+    end_human_turn(backend, turn_id='old-second', completed=True)
+    backend.clock.advance(601)
+    backend.tick()
+    assert len(backend.ctx.calls) == 1
+    end_human_turn(backend, turn_id='new-first', completed=True)
+    backend.tick()
+    assert len(backend.ctx.calls) == 1
+    end_human_turn(backend, turn_id='new-second', completed=True)
+    backend.tick()
+    assert len(backend.ctx.calls) == 2
+    assert db.backend_reinject_state(o.id)['count'] == 2
+
+
+def test_backend_turn_order_gc_keeps_evidence_for_current_claim(hosts, monkeypatch):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    db = backend.store
+    backend.clock.advance(61)
+    backend.tick()
+    o, = db.list_occurrences(wid)
+    accepted = db.backend_reinject_state(o.id)['accepted_seq']
+    end_human_turn(backend, turn_id='first', completed=True)
+    end_human_turn(backend, turn_id='second', completed=True)
+    with Store(db.path, backend.clock, backend=True) as peer:
+        assert peer.backend_turns_prove_drop(CHAT, accepted)
+        peer.gc_backend_turns()
+        assert peer.backend_turns_prove_drop(CHAT, accepted)
+    backend.clock.advance(601)
+    backend.tick()
+    assert len(backend.ctx.calls) == 2
+    assert db.backend_reinject_state(o.id)['accepted_seq'] > accepted
+    finish_backend_wake(backend, backend.ctx.calls[-1][0])
+    backend.clock.advance(3601)
+    backend.tick()
+    assert not db.backend_turns_prove_drop(CHAT, accepted)
 
 
 @pytest.mark.parametrize('death', ['pid-gone', 'pid-reused'])

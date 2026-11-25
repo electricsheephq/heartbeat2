@@ -18,7 +18,7 @@ import uuid
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, agreed_watcher, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
-from .store import BACKEND_COMPLETED_TURN_PREFIX, BACKEND_REINJECT_PREFIX
+from .store import BACKEND_REINJECT_PREFIX
 from . import governor, serving
 
 LOG = logging.getLogger('heartbeat2')
@@ -410,6 +410,7 @@ class Poller:
                 self.silence()
                 if now-float(s.get_meta('last_gc_at') or 0)>=3600:
                     s.gc(ledger_days=self.policy.ledger_days,timezone=self.policy.resolved_timezone())
+                    if s.backend: s.gc_backend_turns()
                 s.set_meta('last_error','')
             self.dispatch_pending()
             self.notifications.tick(self)
@@ -479,18 +480,19 @@ class Poller:
         s=self.store
         resend=s.backend_reinject_state(o.id)
         accepted_at=resend.get('accepted_at')
-        if accepted_at is None:
-            if o.claimed_at is None or now-o.claimed_at<600: return
+        since=o.claimed_at if accepted_at is None else accepted_at
+        if accepted_at is None or o.error!='app_closed':
+            if since is None or now-since<600: return
+        accepted_seq=resend.get('accepted_seq')
+        if accepted_seq is None:
             if int(s.get_meta('accepted:'+o.id) or 0):
-                # Older claims may lack the accept time. Only new turn evidence is safe.
-                resend['accepted_at']=now
+                # Legacy accepts have no event order. Start observing from this check.
+                resend['accepted_seq']=s.next_backend_turn_seq(w.session_key)
+                if accepted_at is None: resend['accepted_at']=now
                 s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
-        else:
-            if now-accepted_at<600 and o.error!='app_closed': return
-            completed_start=s.get_meta(BACKEND_COMPLETED_TURN_PREFIX+w.session_key)
-            if completed_start is not None and float(completed_start)>accepted_at:
-                self._resend_backend_claim(o,'app_closed')
-                return
+        elif s.backend_turns_prove_drop(w.session_key,accepted_seq):
+            self._resend_backend_claim(o,'app_closed')
+            return
         # An accepted prompt may still be queued. The clock alone cannot retire it.
         self._hold_backend_app_closed(w,o,keep_claim=True)
 
@@ -500,6 +502,7 @@ class Poller:
             if self.supersede_claimed(o) or not s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error=error): return
             resend=s.backend_reinject_state(o.id)
             resend.pop('accepted_at',None)
+            resend.pop('accepted_seq',None)
             resend['due']=True
             s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
             s.set_meta('accepted:'+o.id,'0')
@@ -1182,6 +1185,7 @@ class Poller:
                     resend=s.backend_reinject_state(o.id)
                     if resend.pop('due',False): resend['count']=resend.get('count',0)+1
                     resend['accepted_at']=self.clock.now()
+                    resend['accepted_seq']=s.next_backend_turn_seq(w.session_key)
                     s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
                     s.set_meta('accepted:'+o.id,'1')
             flood=[t for t in json.loads(s.get_meta('injections') or '[]') if self.clock.now()-t<60]

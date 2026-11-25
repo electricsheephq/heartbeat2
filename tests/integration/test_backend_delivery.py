@@ -296,6 +296,9 @@ def test_non_holder_holds_dropped_prompt_until_completed_turn(cluster):
         assert owner('tick', 2) == [CHAT]
         owner('start_human', CHAT, '')
         owner('end_human', CHAT, '')
+        assert owner('tick', 2) == [CHAT]
+        owner('start_human', CHAT, '')
+        owner('end_human', CHAT, '')
         assert owner('tick', 2) == [CHAT, CHAT]
         owner('start', CHAT, '')
         assert owner('finish', CHAT, '')['ok']
@@ -335,6 +338,9 @@ def test_backend_restart_retries_false_accept_after_completed_turn(cluster):
         assert restarted('tick', 601) == [CHAT]
         restarted('start_human', CHAT, '')
         restarted('end_human', CHAT, '')
+        assert restarted('tick', 5) == [CHAT]
+        restarted('start_human', CHAT, '')
+        restarted('end_human', CHAT, '')
         assert restarted('tick', 5) == [CHAT, CHAT]
         restarted('start', CHAT, '')
         assert restarted('finish', CHAT, '')['ok']
@@ -351,11 +357,13 @@ def test_backend_keeps_wake_queued_behind_busy_turn(cluster):
         assert owner('arm', CHAT, '')['armed']
         assert owner('tick', 61) == [CHAT]
         # A human turn won the admission race after the dispatch check.
+        assert owner('tick', 1) == [CHAT]
         owner('start_human', CHAT, '')
         assert cluster.rows('SELECT busy_since IS NOT NULL FROM sessions') == [(1,)]
-        assert owner('tick', 599) == [CHAT]
+        assert owner('tick', 601) == [CHAT]
         assert cluster.rows('SELECT state,attempt FROM occurrences') == [('claimed', 1)]
         owner('end_human', CHAT, '')
+        assert owner('tick', 1) == [CHAT]
         owner('start', CHAT, '')
         assert owner('finish', CHAT, '')['ok']
         assert owner('tick', 601) == [CHAT]
