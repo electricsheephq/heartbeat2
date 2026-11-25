@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 — 2026-11-26
 
 - A one-time app wake cut by Hermes' watchdog before any model call is re-sent once if HeartBeat recorded no provider error. (#241)
 - If a one-time owner or urgent app wake fails to start or is interrupted unexpectedly, its notice names the Desktop or TUI chat where you can retry. (#241)
