@@ -127,6 +127,9 @@ def rearm_failed_wake(engine, key, sid):
     if data.get('rearmed'): return
     s.create_wake(Wake(key,w.note,'at',platform=w.platform,chat_type=w.chat_type,chat_id=w.chat_id,
                        armed_session_id=sid,creator=w.creator,owner_requested=w.owner_requested,
+                       agent_edited=w.agent_edited,babysit=w.babysit,role=w.role,
+                       parent_wake_id=w.parent_wake_id,depth=w.depth,
+                       trigger_json={'builtin': w.trigger_json['builtin']} if 'builtin' in w.trigger_json else {},
                        title=w.title,reason=w.reason,urgent=w.urgent,
                        cancel_on_reply=w.cancel_on_reply,next_due_at=now))
     s.set_meta(FAILURE_NOTICE_PREFIX+o.id,json.dumps({**data,'rearmed':True}))

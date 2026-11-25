@@ -2,6 +2,8 @@ from dataclasses import replace
 
 import pytest
 
+from heartbeat2.model import agent_authored
+from heartbeat2.policy import owner_class
 from test_backend_wakes import ARM, CHAT, bind, hosts, notice_sends
 from test_engine import KEY, arm, engine
 
@@ -101,15 +103,40 @@ def test_again_rearms_once(reminder, message, age, rearm):
     assert len(e.store.list_occurrences(session_key=CHAT)) == len(e.ctx.calls) == 1 + rearm
 
 
-@pytest.mark.parametrize('owner', [False, True])
-def test_again_preserves_agent_creator_and_owner_request(reminder, owner):
-    e, wid, sends = reminder(owner=owner, urgent=not owner)
+@pytest.mark.parametrize('fields', [
+    pytest.param({'creator': 'user', 'urgent': False}, id='user'),
+    pytest.param({'creator': 'user', 'agent_edited': True}, id='agent-edited'),
+    pytest.param({}, id='agent'),
+    pytest.param({'owner_requested': True, 'urgent': False}, id='owner-requested'),
+    pytest.param({'owner_requested': True, 'babysit': True}, id='babysit'),
+    pytest.param({'owner_requested': True, 'parent_wake_id': 'parent', 'depth': 2}, id='child'),
+])
+def test_again_preserves_classification(reminder, fields):
+    e, wid, sends = reminder(owner=False, urgent=True, start_turn=False)
+    wake = e.store.get_wake(wid)
+    assert e.store.cas_wake(wid, wake.status, expected_version=wake.version, **fields)
+    start(e)
     e.intake.on_session_end(session_id=CHAT, failed=True)
     e.tick()
     assert e.notifications.idle.wait(2) and len(sends) == 1
+    original = e.store.get_wake(wid)
+    if original.agent_edited:
+        e.policy = replace(e.policy, daily_cost_limit_usd=1)
+        failed, = e.store.list_occurrences(wid)
+        with e.store.atomic():
+            e.store.add_agent_spend(original, failed.id, e.policy.resolved_timezone(), 2_000_000, 0)
     e.intake.pre_llm_call(session_id=CHAT, turn_id='owner', user_message='again')
     rearmed, = [wake for wake in e.store.list_wakes(CHAT) if wake.id != wid]
-    assert (rearmed.creator, rearmed.owner_requested) == ('agent', owner)
+    if original.agent_edited:
+        e.intake.on_session_end(session_id=CHAT, turn_id='owner')
+        e.clock.advance(e.policy.wake_spacing_minutes * 60)
+        e.tick()
+        retry, = e.store.list_occurrences(rearmed.id)
+        assert (retry.state, retry.error, len(e.ctx.calls)) == ('skipped', 'daily_cost_cap', 1)
+    assert owner_class(rearmed) == owner_class(original)
+    assert agent_authored(rearmed) == agent_authored(original)
+    assert (rearmed.creator, rearmed.owner_requested) == (original.creator, original.owner_requested)
+    assert (rearmed.parent_wake_id, rearmed.depth) == (original.parent_wake_id, original.depth)
 
 
 def test_asleep_urgent_wake_skips_without_notice(reminder):
