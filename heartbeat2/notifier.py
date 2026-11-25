@@ -102,11 +102,33 @@ import uuid
 from datetime import datetime, timedelta
 from .policy import LOCAL_SURFACES, agreed_watcher, is_keep_warm, owner_class
 from .schedule import local_day
+from .store import FAILURE_NOTICE_PREFIX
+from .model import Wake
 
 NOTIFY_AFTER_S = 600
 ACCEPTED_NOTIFY_AFTER_S = 900
 EPISODE_PREFIX = 'notify_episode:'
 ACCEPTED_HOLD_TEXT = 'Still queued in the app. Runs when the chat gets to it, or retries once if it was dropped.'
+
+
+def failure_notices(store, key):
+    for w in store.list_wakes(key,status='failed'):
+        for o in store.list_occurrences(w.id)[-1:]:
+            if data := store.get_meta(FAILURE_NOTICE_PREFIX+o.id):
+                yield w,o,json.loads(data)
+
+def rearm_failed_wake(engine, key, sid):
+    s,now=engine.store,engine.clock.now()
+    if not engine.session_can_receive(s.get_session(key)) or not engine.policy.cap_gate(*s.active_wake_counts(key)).allowed: return
+    recent=((w,o,d) for w,o,d in failure_notices(s,key) if w.armed_session_id==sid and 0<=now-d.get('queued',-86400)<86400)
+    latest=max(recent,key=lambda row:row[2]['queued'],default=None)
+    if latest is None: return
+    w,o,data=latest
+    if data.get('rearmed'): return
+    s.create_wake(Wake(key,w.note,'at',platform=w.platform,chat_type=w.chat_type,chat_id=w.chat_id,
+                       armed_session_id=sid,creator='user',title=w.title,reason=w.reason,urgent=w.urgent,
+                       cancel_on_reply=w.cancel_on_reply,next_due_at=now))
+    s.set_meta(FAILURE_NOTICE_PREFIX+o.id,json.dumps({**data,'rearmed':True}))
 
 
 def held_wakes(engine, key, *, include_paused=False):
@@ -292,6 +314,9 @@ def notifier_line(engine, key=None):
 
 
 def notice_text(engine, chat, rows, since):
+    if rows[0][0].status=='failed':
+        title=' '.join(rows[0][0].title.split()) or 'Your wake'
+        return f"{title} didn't run; reply 'again' to retry"
     surface='Desktop' if chat.platform=='desktop' else 'TUI'
     if engine.store.backend and rows[0][1].state=='claimed':
         from .commands import _clip, _oneline
@@ -349,23 +374,28 @@ class NotificationWorker:
             for key in s.session_meta_keys(EPISODE_PREFIX):
                 if key not in chats or episode_over(engine,key,now):
                     end_episode(engine,key)
-            for key,chat in chats.items():
-                rows=held_wakes(engine,key)
+            candidates=[(key,chat,None) for key,chat in chats.items()]
+            if s.backend:
+                candidates.extend((key,chat,failed) for key,chat in chats.items() for failed in failure_notices(s,key)
+                                  if 'queued' not in failed[2] and not failed[2].get('failed'))
+            for key,chat,failed in candidates:
+                rows=[(*failed[:2],now)] if failed else held_wakes(engine,key)
                 if not rows: continue
-                data=episode(engine,key,rows)
+                name=FAILURE_NOTICE_PREFIX+failed[1].id if failed else EPISODE_PREFIX+key
+                data=failed[2] if failed else episode(engine,key,rows)
                 # Keep the oldest currently held stamp while this episode lasts.
                 data['since']=min(x[2] for x in rows)
                 if data.get('first') is not None and now-data['first']>=86400 and 'queued' not in data:
                     data['failed']=True
-                s.set_meta(EPISODE_PREFIX+key,json.dumps(data))
+                s.set_meta(name,json.dumps(data))
                 if 'queued' in data or data.get('failed') or now<data.get('next',0): continue
                 if s.backend:
-                    if not _ready_backend_notices(s,rows,data,now): continue
+                    if not failed and not _ready_backend_notices(s,rows,data,now): continue
                 elif now<data['since']+NOTIFY_AFTER_S: continue
                 if self.job is not None or _gate(engine,chat,data,now)[0]: continue
                 transport=notifier_for(engine)
                 if transport is None: continue
-                self.job=(engine,key,data['id'],transport)
+                self.job=(engine,key,data['id'],transport,name,failed and failed[:2])
                 s.notify_reservation=(key,local_day(now,engine.policy.resolved_timezone()))
                 self.idle.clear()
                 if self.thread is None:
@@ -382,7 +412,7 @@ class NotificationWorker:
                 if self.closed: return
                 job=self.job
             if job is None: continue
-            engine,key,_,_=job
+            engine,key,*_=job
             try: self._send(*job)
             except Exception:
                 LOG.warning('heartbeat2 notifier worker failed',exc_info=True)
@@ -410,15 +440,15 @@ class NotificationWorker:
                 return
         LOG.warning('heartbeat2 notice reservation cleanup exhausted SQLite retries')
 
-    def _send(self, engine, key, ident, transport):
+    def _send(self, engine, key, ident, transport, name, failed):
         s=self.store
         with s.atomic():
             if self.closed: return
-            data=json.loads(s.get_meta(EPISODE_PREFIX+key) or '{}')
+            data=json.loads(s.get_meta(name) or '{}')
             chat=s.get_session(key)
-            rows=held_wakes(engine,key)
+            rows=[(*failed,engine.clock.now())] if failed else held_wakes(engine,key)
             since=data.get('since')
-            if s.backend:
+            if s.backend and not failed:
                 rows=_ready_backend_notices(s,rows,data,engine.clock.now())
                 if rows: since=min(row[2] for row in rows)
             # Exclude our own reservation while rechecking the cap.
@@ -432,7 +462,7 @@ class NotificationWorker:
             data.setdefault('first',now)
             data['attempts']+=1
             data['next']=now+(300 if data['attempts']<3 else 3600)
-            s.set_meta(EPISODE_PREFIX+key,json.dumps(data))
+            s.set_meta(name,json.dumps(data))
             target=engine.policy.notify_via.split(':',1)[1]
             text=notice_text(engine,chat,rows,since)
             wake=rows[0][0]
@@ -468,5 +498,5 @@ class NotificationWorker:
                     data['state']=('notifier not ready' if any(x in lower for x in ('no token','no-token','no_token',"doesn't have the birdie_hermes_token secret")) else
                                    'may repeat' if any(x in lower for x in ("can't reach birdie",'timeout','timed out','timedout')) else '')
                     data['failed']=now-data['first']>=86400
-                current=json.loads(s.get_meta(EPISODE_PREFIX+key) or '{}')
-                if current.get('id')==ident: s.set_meta(EPISODE_PREFIX+key,json.dumps(data))
+                current=json.loads(s.get_meta(name) or '{}')
+                if current.get('id')==ident: s.set_meta(name,json.dumps(data))

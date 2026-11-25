@@ -18,7 +18,7 @@ import uuid
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, agreed_watcher, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
-from .store import BACKEND_REINJECT_PREFIX
+from .store import BACKEND_REINJECT_PREFIX, FAILURE_NOTICE_PREFIX
 from . import governor, serving, tui_probe
 
 LOG = logging.getLogger('heartbeat2')
@@ -513,13 +513,19 @@ class Poller:
     def _resend_backend_claim(self,o,error):
         s=self.store
         with s.atomic():
-            if self.supersede_claimed(o) or not s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error=error): return
             resend=s.backend_reinject_state(o.id)
+            if o.state=='started':
+                if not s.cas_occurrence(o.wake_id,o.dedupe_key,'started','pending',attempt=o.attempt,error=error,
+                        epoch=None,pid=None,claimed_at=None,started_at=None,force_silent=False,
+                        outcome=None,notify=False,summary='',summary_hash='',next_check_s=None): return
+                resend['watchdog_attempt']=o.attempt
+            elif self.supersede_claimed(o) or not s.refund(o.wake_id,o.dedupe_key,attempt=o.attempt,error=error): return
             resend.pop('accepted_at',None)
             resend.pop('accepted_monotonic',None)
             resend['due']=True
             s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
             s.set_meta('accepted:'+o.id,'0')
+            return True
 
     def _hold_backend_app_closed(self,w,o,*,keep_claim=False):
         from .notifier import episode, episode_over, end_episode, EPISODE_PREFIX
@@ -1299,18 +1305,29 @@ class Poller:
         o=occurrences[-1]
         if o.state in {'interrupted','dead','missed'} or o.state=='skipped' and o.error in FINAL_SKIP_REASONS:
             # The owner ended these on purpose (a reply, or /pulse off), so they read as cancelled, not failed.
-            if o.error in {'cancel_on_reply','session_off'}:
-                reason='owner_replied' if o.error=='cancel_on_reply' else 'session_off'
+            if o.error in {'cancel_on_reply','session_off'} or self.store.backend and o.error=='owner_interrupted':
+                reason='owner_replied' if o.error=='cancel_on_reply' else o.error
                 self.store.cas_wake(w.id,'active',expected_version=w.version,status='cancelled',status_reason=reason)
                 return
-            self.store.cas_wake(w.id,w.status,expected_version=w.version,
+            ended=self.store.cas_wake(w.id,w.status,expected_version=w.version,
                 status='failed',status_reason=o.state+(':'+o.error if o.error else ''))
+            if ended and self.store.backend and o.error!='app_invalidation' and (owner_class(w) or w.urgent):
+                self.store.set_meta(FAILURE_NOTICE_PREFIX+o.id,json.dumps({'id':'failed:'+o.id,'attempts':0}))
 
     def interrupt(self,o,cause,*,count_error=True):
         """One fenced settlement, shared by hooks, TTL and restart recovery."""
         s=self.store
         with s.atomic():
             provider=s.get_meta('provider_error:'+o.id)
+            if (s.backend and cause=='watchdog' and not o.api_calls and one_shot(w:=s.get_wake(o.wake_id)) and w.status=='active'
+                    and not s.backend_reinject_state(o.id).get('watchdog_attempt') and self._resend_backend_claim(o,cause)):
+                self.refund_model_count(o)
+                s.cas_wake(w.id,w.status,fires=max(0,w.fires-1))
+                s.connection.execute('UPDATE ledger SET fires=MAX(0,fires-1) WHERE day=? AND wake_id=?',
+                                     (local_day(o.started_at,self.policy.resolved_timezone()),w.id))
+                for prefix in ('provider_error:','model_refunded:'): s.set_meta(prefix+o.id,'')
+                return True
+            if s.backend and cause in {'owner_interrupted','app_invalidation'}: provider=''
             error='provider_error:'+provider if provider else cause
             if not s.cas_occurrence(o.wake_id,o.dedupe_key,o.state,'interrupted',attempt=o.attempt,error=error,force_silent=True): return False
             if provider and o.api_calls == 0:

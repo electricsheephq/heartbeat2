@@ -711,6 +711,10 @@ class Intake:
             # Human turn context never turns a model call into a wake.
             flight=self.flights.pop(session_id,None)
             self._drop_children(flight)
+            if (s.backend and isinstance(user_message,str) and user_message.strip().casefold()=='again'
+                    and not (isinstance(row,dict) and row.get('display_kind'))):
+                from .notifier import rearm_failed_wake
+                rearm_failed_wake(e,key,session_id)
             if not s.get_meta('human_context:'+key): return None
             s.set_meta('human_context:'+key,'')
             lines=[]
@@ -1063,7 +1067,12 @@ class Intake:
             if failed or interrupted or completed is False:
                 reason=kwargs.get('turn_exit_reason','') or ''
                 owner_interrupt=interrupted and reason in {'interrupted_by_user','interrupted_during_api_call'}
-                e.interrupt(o,'owner_interrupted' if owner_interrupt else 'failed' if failed else 'interrupted',
+                cause='owner_interrupted' if owner_interrupt else 'failed' if failed else 'interrupted'
+                if s.backend and interrupted:
+                    if reason in {'interrupted_by_system(turn_liveness_watchdog)',
+                                  'interrupted_during_api_call(turn_liveness_watchdog)'}: cause='watchdog'
+                    elif kwargs.get('app_invalidation') and not owner_interrupt: cause='app_invalidation'
+                e.interrupt(o,cause,
                             count_error=not (f.owner_replied or owner_interrupt))
                 return None
             # Recheck cancellation after the final transform: a human can reply
@@ -1133,7 +1142,7 @@ class Intake:
         for sid,f in list(self.flights.items()):
             if f.session_key==session_key:
                 reason='interrupted_by_user' if kwargs.get('invalidation_reason')=='stop_command' else ''
-                self.on_session_end(session_id=sid,interrupted=True,turn_exit_reason=reason)
+                self.on_session_end(session_id=sid,interrupted=True,turn_exit_reason=reason,app_invalidation=True)
         return None
 
     @fail_open

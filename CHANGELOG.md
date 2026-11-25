@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A one-time app wake cut by Hermes' watchdog before any model call is re-sent once. (#241)
+- Failed one-time owner and urgent app wakes send a notice through the configured notifier, including after a failed retry. (#241)
+- Reply `again` in the original app chat within 24 hours of the failure notice to arm a fresh one-time wake. (#241)
 - Accepted Desktop and TUI wakes send a heads-up 15 minutes after they were due, or after acceptance if it came earlier. (#241)
 - Reminders you set with `/pulse add` now qualify for the accepted-wake heads-up. (#241)
 - If you write in the chat and the wake is still held, a repeat heads-up waits 15 minutes into the new wait. (#241)
