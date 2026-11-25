@@ -66,14 +66,28 @@ def marker(text, *, secret=None, require_tag=False):
     return None
 
 
-def backend_marker(text, *, secret, require_tag):
+def backend_markers(text, *, secret, require_tag):
     # Hermes appends text-only arrivals to the queued owner prompt. Signed
     # markers can start a wake there. Older DM wakes still work at line one.
-    if isinstance(text,str):
-        for line in text.splitlines():
-            if parsed:=marker(line,secret=secret,require_tag=True):
-                return parsed
-    return marker(text,secret=secret,require_tag=require_tag)
+    candidates=[(parsed,index) for index,line in enumerate(text.split('\n'))
+                if (parsed:=marker(line,secret=secret,require_tag=True))]
+    if not require_tag and (not candidates or candidates[0][1]>0):
+        if legacy:=marker(text,secret=secret):
+            candidates.append((legacy,0))
+    return candidates
+
+
+def backend_owner_suffix(text, state, attempt, *, has_parts):
+    # A hash and size identify the exact injected prefix without storing the
+    # prompt. Blank lines inside the wake's own note are part of that prefix.
+    size=state.get('prompt_size',0)
+    if state.get('prompt_attempt')==attempt and hashlib.sha256(text[:size].encode(errors='surrogatepass')).hexdigest()==state.get('prompt_digest'):
+        return any(line.strip() and not (has_parts and line.startswith('@image:'))
+                   for line in text[size:].split('\n'))
+    # Hermes joins queued text with a blank line. For pre-upgrade or rewritten
+    # prompts, look after the generated contract, beyond the multiline note.
+    contract=text.partition('\nContract: ')[2]
+    return bool((contract or text).partition('\n\n')[2].strip())
 
 
 def fail_open(fn):
@@ -119,11 +133,11 @@ def origin_ids(text):
     for _,mid in origin_headers(text): yield mid
 
 
-def row_text(content):
+def row_text(content, kinds=('text',)):
     if isinstance(content,str): return content
     if isinstance(content,list):
         return '\n'.join(part['text'] for part in content if isinstance(part,dict)
-                         and part.get('type')=='text' and isinstance(part.get('text'),str))
+                         and part.get('type') in kinds and isinstance(part.get('text'),str))
     return ''
 
 
@@ -547,8 +561,26 @@ class Intake:
                 if 0<=e.clock.now()-pending['at']<=3600:
                     self.count(key,pending.get('mid'),identity.platform)
                 s.set_meta(stamp,'')
-        parse_marker=backend_marker if s.backend else marker
-        parsed=parse_marker(user_message,secret=s.get_meta('marker_secret'),require_tag=(identity.chat_type != 'dm'))
+        secret=s.get_meta('marker_secret')
+        require_tag=identity.chat_type!='dm'
+        previous=self.flights.get(session_id)
+        owner_folded=False
+        if s.backend:
+            text=row_text(user_message,('text','input_text'))
+            parsed=None
+            for candidate,index in backend_markers(text,secret=secret,require_tag=require_tag):
+                wid,dedupe,attempt=candidate
+                w,o=s.get_wake(wid),s.get_occurrence(wid,dedupe)
+                if w is None or w.session_key!=key or o is None or o.attempt!=attempt: continue
+                same_turn=(previous and previous.turn_id==turn_id and
+                           (previous.wake_id,previous.dedupe_key,previous.attempt)==candidate)
+                if o.state!='claimed' and not (o.state=='started' and same_turn): continue
+                parsed=candidate
+                owner_folded=index>0 or backend_owner_suffix(text,s.backend_reinject_state(o.id),attempt,
+                                                            has_parts=isinstance(user_message,list))
+                break  # Dispatch permits one claimed/started occurrence per chat.
+        else:
+            parsed=marker(user_message,secret=secret,require_tag=require_tag)
         if not parsed:
             row=conversation_history[-1] if conversation_history else None
             if isinstance(row,dict) and row.get('role')=='user' and not row.get('display_kind'):
@@ -561,7 +593,6 @@ class Intake:
                         owner_seen=True
                         self.count(key,row['platform_message_id'],platform)
         if owner_seen: self.owner_turns[session_id]=turn_id
-        previous=self.flights.get(session_id)
         if previous and turn_id and previous.turn_id and previous.turn_id!=turn_id:
             # Apply the new owner row before terminal cleanup of a prior flight.
             self.on_session_end(session_id=session_id,turn_id=previous.turn_id,failed=True)
@@ -634,7 +665,9 @@ class Intake:
                 flight=Flight(key,session_id,turn_id,wid,dedupe,attempt,untrusted,invalid)
                 existing=self.flights.get(session_id)
                 if existing and existing.wake_id==wid and existing.dedupe_key==dedupe and existing.attempt==attempt:
+                    if owner_folded: mark_fold(existing)
                     return None
+                if owner_folded: mark_fold(flight)
                 self.flights[session_id]=flight
                 if invalid:
                     if o.attempt==attempt and o.state in {'claimed','started'}:

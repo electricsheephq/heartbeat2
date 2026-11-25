@@ -486,18 +486,15 @@ class Poller:
         s=self.store
         resend=s.backend_reinject_state(o.id)
         accepted_at=resend.get('accepted_at')
-        mono=self.clock.monotonic()
         accepted_mono=resend.get('accepted_monotonic')
-        if accepted_at is not None:
-            if accepted_mono is None:
-                # An older accept has only wall time. Start its minimum wait
-                # here so a wall-clock step cannot shorten it.
-                accepted_mono=resend['accepted_monotonic']=mono
-                s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
+        # Older accepts may carry an unsigned marker merged after owner text.
+        # Only a dispatch known to use the signed prompt may authorize a resend.
+        if accepted_at is not None and accepted_mono is not None and resend.get('prompt_attempt')==o.attempt:
+            mono=self.clock.monotonic()
             if mono-accepted_mono>=BACKEND_RESEND_MIN_AGE_S:
                 if previous_missing is not None and 0<=mono-previous_missing<BACKEND_RESEND_SAMPLE_GAP_S:
                     self._backend_missing[o.id,o.attempt]=previous_missing
-                elif tui_probe.queued_or_inflight(w.session_key,f'⟦pulse o:{o.id} a:{o.attempt}') is False:
+                elif self._backend_prompt_missing(w,o):
                     if previous_missing is not None and mono-previous_missing>=BACKEND_RESEND_SAMPLE_GAP_S:
                         self._resend_backend_claim(o,'app_closed')
                         return
@@ -507,6 +504,11 @@ class Poller:
             if since is None or now-since<600: return
         # An accepted prompt may still be queued. The clock alone cannot retire it.
         self._hold_backend_app_closed(w,o,keep_claim=True)
+
+    @staticmethod
+    def _backend_prompt_missing(w,o):
+        # tui_probe loads up front with every module (#207); it resolves Hermes' TUI server only here.
+        return tui_probe.queued_or_inflight(w.session_key,f'⟦pulse o:{o.id} a:{o.attempt}') is False
 
     def _resend_backend_claim(self,o,error):
         s=self.store
@@ -1179,6 +1181,13 @@ class Poller:
                 health.pop('trial',None); s.set_meta('provider_health',json.dumps(health))
             self.refund_claimed(o,held_by)
             return
+        if s.backend:
+            # A local hook can run as soon as the injector admits the prompt.
+            # Publish its boundary before dispatch so wake-first merges can be recognized.
+            resend=s.backend_reinject_state(o.id)
+            digest=hashlib.sha256(text.encode(errors='surrogatepass')).hexdigest()
+            resend.update(prompt_attempt=o.attempt,prompt_size=len(text),prompt_digest=digest)
+            s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
         inject_raised=False
         try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
         except Exception as exc:

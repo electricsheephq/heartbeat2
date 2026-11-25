@@ -1,4 +1,5 @@
 """Real OS locks and pinned Hermes injection slots, driven without listeners or model calls."""
+from base64 import b64decode
 from contextlib import closing, contextmanager, nullcontext
 import json
 import multiprocessing
@@ -411,8 +412,8 @@ def test_backend_absence_and_recurring_catch_up(cluster):
             ('claimed', 1), ('claimed', 1)]
 
 
-@pytest.mark.parametrize('queued_first', ['text', 'image', 'refusal'])
-def test_tui_probe_observes_real_hermes_queue_and_drain(hosts, monkeypatch, caplog, queued_first):
+@pytest.mark.parametrize('queued_first', ['text', 'image', 'refusal', 'staged-vision'])
+def test_tui_probe_observes_real_hermes_queue_and_drain(hosts, monkeypatch, caplog, tmp_path, queued_first):
     if os.environ.get('HEARTBEAT2_REQUIRE_HERMES') != '1':
         pytest.skip('requires a read-only Hermes pin')
     pytest.importorskip('tui_gateway')
@@ -436,7 +437,23 @@ def test_tui_probe_observes_real_hermes_queue_and_drain(hosts, monkeypatch, capl
                         lambda text, *, session_key: server.inject_tui_session_message(
                             session_key=session_key, content=text))
 
-    if queued_first != 'refusal':
+    if queued_first == 'staged-vision':
+        from agent import image_routing
+        image = tmp_path / 'draft.png'
+        image.write_bytes(b64decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGNgAAIAAAUAAen63NgAAAAASUVORK5CYII='))
+        session['attached_images'] = [str(image)]
+        monkeypatch.setattr(image_routing, 'decide_image_input_mode', lambda *args, **kwargs: 'native')
+        images = []
+        admit = server._admit_prompt_turn
+
+        def record_admitted_images(*args, **kwargs):
+            admitted = admit(*args, **kwargs)
+            images.extend(admitted[0])
+            return admitted
+
+        monkeypatch.setattr(server, '_admit_prompt_turn', record_admitted_images)
+    if queued_first in {'text', 'image'}:
         with session['history_lock']:
             server._enqueue_prompt(session, 'Owner text', None,
                                    **({'image_paths': ['fixture.png']} if queued_first == 'image' else {}))
@@ -453,6 +470,9 @@ def test_tui_probe_observes_real_hermes_queue_and_drain(hosts, monkeypatch, capl
         elif queued_first == 'image':
             assert session['queued_prompt']['image_paths'] == ['fixture.png']
             assert marker in session['queued_prompts'][0]['text']
+        elif queued_first == 'staged-vision':
+            wake_prompt = session['queued_prompt']['text']
+            assert not session['queued_prompt'].get('image_paths')
         session.update(running=False, inflight_turn=None)
     assert queued_or_inflight(CHAT, marker) is True
 
@@ -474,6 +494,14 @@ def test_tui_probe_observes_real_hermes_queue_and_drain(hosts, monkeypatch, capl
         text = session['inflight_turn']['user']
         assert queued_or_inflight(CHAT, marker) is True
         if marker in text:
+            if queued_first == 'staged-vision':
+                # The real admission consumes the staged image, and Hermes builds
+                # the persisted hook argument from the native vision payload.
+                assert session['attached_images'] == [] and images == [str(image)]
+                parts = server._route_turn_images(session['agent'], wake_prompt, images)
+                text = server._build_persist_user_message(wake_prompt, images, parts)
+                assert [part['type'] for part in text] == ['text', 'image_url']
+                assert '@image:' in text[0]['text'] and marker in text[0]['text']
             backend.intake.pre_llm_call(session_id=CHAT, turn_id='wake', user_message=text)
             started.append(backend.store.get_occurrence(wid, o.dedupe_key).state)
         session.update(running=False, inflight_turn=None)
@@ -489,3 +517,8 @@ def test_tui_probe_observes_real_hermes_queue_and_drain(hosts, monkeypatch, capl
     backend.intake.on_session_end(session_id=CHAT, turn_id='wake')
     assert backend.store.get_occurrence(wid, o.dedupe_key).state == 'done'
     assert backend.store.get_wake(wid).fires == 1
+    if queued_first == 'staged-vision':
+        for delay in (601, 5):
+            backend.clock.advance(delay)
+            backend.tick()
+        assert backend.store.get_occurrence(wid, o.dedupe_key).attempt == 1

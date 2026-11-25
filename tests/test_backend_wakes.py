@@ -1,4 +1,5 @@
 """Standalone backend behavior and the unchanged gateway path."""
+from contextlib import closing
 from dataclasses import replace
 from hashlib import sha256
 from importlib import import_module
@@ -531,6 +532,59 @@ def test_backend_merged_signed_wake_runs_original_once(hosts, monkeypatch, tui_q
     assert backend.store.list_occurrences(wid)[0].state == 'done'
 
 
+def test_backend_quoted_old_marker_does_not_hide_current_wake(hosts, monkeypatch, tui_queue):
+    _, backend = hosts
+    old = arm_backend_wake(backend, monkeypatch)
+    backend.clock.advance(61)
+    backend.tick()
+    previous = backend.ctx.calls[-1][0]
+    finish_backend_wake(backend, previous)
+    current = arm_backend_wake(backend, monkeypatch)
+    backend.clock.advance(601)
+    backend.tick()
+    assert len(backend.ctx.calls) == 2
+    wake = backend.ctx.calls[-1][0]
+    merged = f'About this earlier check:\n{previous.splitlines()[0]}\n\n{wake}'
+    finish_backend_wake(backend, merged)
+    for delay in (601, 5):
+        backend.clock.advance(delay)
+        backend.tick()
+    assert [backend.store.get_wake(wid).fires for wid in (old, current)] == [1, 1]
+    assert backend.store.list_occurrences(current)[0].state == 'done'
+    assert len(backend.ctx.calls) == 2
+
+
+@pytest.mark.parametrize('wake_first', [False, True], ids=['owner-first', 'wake-first'])
+def test_backend_merged_wake_preserves_owner_reply(hosts, monkeypatch, wake_first):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    backend.clock.advance(61)
+    backend.tick()
+    wake = backend.ctx.calls[0][0]
+    chunks = [wake, 'What does this mean?']
+    if not wake_first:
+        chunks.reverse()
+    backend.intake.pre_llm_call(session_id=CHAT, turn_id='merged', user_message='\n\n'.join(chunks))
+    assert backend.store.list_occurrences(wid)[0].state == 'started'
+    assert backend.tool.handle({'action': 'respond', 'outcome': 'done', 'notify': False, 'summary': 'Checked.'})['ok']
+    result = backend.intake.transform_llm_output(session_id=CHAT, turn_id='merged', response_text='Here is the answer.')
+    backend.intake.on_session_end(session_id=CHAT, turn_id='merged', completed=True)
+    o, = backend.store.list_occurrences(wid)
+    assert (o.state, o.delivered, result) == ('done', False, None)
+
+
+def test_backend_reads_input_text_but_ignores_image_part_text(hosts, monkeypatch):
+    _, backend = hosts
+    wid = arm_backend_wake(backend, monkeypatch)
+    backend.clock.advance(61)
+    backend.tick()
+    wake = backend.ctx.calls[0][0]
+    finish_backend_wake(backend, [{'type': 'image_url', 'text': wake}])
+    assert backend.store.list_occurrences(wid)[0].state == 'claimed'
+    finish_backend_wake(backend, [{'type': 'input_text', 'text': wake}])
+    assert backend.store.list_occurrences(wid)[0].state == 'done'
+
+
 @pytest.mark.parametrize('tag', ['', ' n:0000000000000000'], ids=['unsigned', 'bad-signature'])
 def test_backend_ignores_pasted_marker_on_second_line(hosts, monkeypatch, tag):
     _, backend = hosts
@@ -812,36 +866,50 @@ def test_backend_clock_rollback_cannot_make_earlier_turn_resend_evidence(hosts, 
     assert backend.store.get_wake(wid).fires == 1
 
 
-def test_backend_legacy_turn_order_cannot_authorize_resend(hosts, monkeypatch, tui_queue):
+def test_backend_legacy_turn_order_cannot_authorize_resend(hosts, monkeypatch, tui_queue, notice_sends, process_table):
     _, backend = hosts
     wid = arm_backend_wake(backend, monkeypatch)
     db = backend.store
     backend.clock.advance(61)
     backend.tick()
     o, = db.list_occurrences(wid)
+    wake = db.get_wake(wid)
+    assert db.cas_wake(wid, 'active', expected_version=wake.version, owner_requested=True, title='Pay rent')
+    header, body = backend.ctx.calls[0][0].split('\n', 1)
+    unsigned = header.split(' n:', 1)[0] + '⟧' + header.split('⟧', 1)[1] + '\n' + body
+    merged = 'Owner text\n\n' + unsigned
     db.set_meta('backend_reinject:'+o.id,
                 f'{{"count": 1, "accepted_at": {backend.clock.now()}, "accepted_seq": 1}}')
     old_keys = ('turn_seq:', 'busy_turn_order:', 'completed_turn_order:')
     for suffix in old_keys:
         db.set_meta('backend:'+suffix+CHAT, '[3,4,2]')
-    tui_queue['queued_prompt'] = {'text': backend.ctx.calls[0][0]}
-    backend.process_start = True
-    backend.reconcile()
-    backend.clock.advance(601)
-    backend.tick()
-    assert len(backend.ctx.calls) == 1
-    assert all(db.get_meta('backend:'+suffix+CHAT) is None for suffix in old_keys)
-    tui_queue.pop('queued_prompt')
-    backend.clock.advance(10)
-    backend.tick()
-    assert len(backend.ctx.calls) == 1  # A wall timestamp alone cannot age a legacy accept.
-    backend.clock.advance(20)
-    backend.tick()
-    backend.clock.advance(5)
-    backend.tick()
-    assert len(backend.ctx.calls) == 2
-    assert db.backend_reinject_state(o.id)['count'] == 2
-    assert 'accepted_seq' not in db.backend_reinject_state(o.id)
+    tui_queue['queued_prompt'] = {'text': merged}
+    backend.close()
+    with closing(Poller(backend.ctx, db, backend.policy, backend.clock, paused=backend.paused)) as reloaded:
+        bind(monkeypatch, reloaded, CHAT)
+        sends = notice_sends(reloaded)
+        reloaded.clock.advance(601)
+        reloaded.tick()
+        assert len(reloaded.ctx.calls) == 1
+        assert all(db.get_meta('backend:'+suffix+CHAT) is None for suffix in old_keys)
+        tui_queue.pop('queued_prompt')
+        finish_backend_wake(reloaded, merged)
+        for delay in (35, 5, 900):
+            reloaded.clock.advance(delay)
+            reloaded.tick()
+        assert (held := db.get_occurrence(wid, o.dedupe_key)).state == 'claimed'
+        assert (held.attempt, held.error, len(reloaded.ctx.calls)) == (1, 'app_closed', 1)
+        assert reloaded.notifications.idle.wait(2)
+        assert sends == [('owner', "Pay rent is due but its Desktop chat isn't ready; it'll run on your next message there.")]
+        # Simulate the accepting PID exiting. X3 still refunds and retries.
+        pid = os.getpid() + 1
+        epoch = f'{pid}:{process_table.pop(pid)}:accepted'
+        db.connection.execute('UPDATE occurrences SET pid=?,epoch=? WHERE wake_id=?', (pid, epoch, wid))
+        reloaded.tick()
+        assert len(reloaded.ctx.calls) == 2
+        assert db.backend_reinject_state(o.id)['count'] == 2
+        finish_backend_wake(reloaded, reloaded.ctx.calls[-1][0])
+        assert db.get_occurrence(wid, o.dedupe_key).state == 'done'
 
 
 @pytest.mark.parametrize('death', ['pid-gone', 'pid-reused'])
@@ -956,8 +1024,7 @@ def test_backend_closed_window_hold_text_matches_acceptance(hosts, monkeypatch, 
     if accepted:
         assert text == "Check the task. is due but its Desktop chat isn't ready; it'll run on your next message there."
         for output in (*cli, row.get('delivery_note', '')):
-            assert 'next message in that chat' in output
-            assert 'app restarts' in output
+            assert 'Still queued in the app. Runs when the chat gets to it, or retries once if it was dropped.' in output
             assert 'open that chat' not in output.lower()
     else:
         assert 'Open that chat to let them run.' in text

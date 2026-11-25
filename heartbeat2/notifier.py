@@ -106,7 +106,7 @@ from .schedule import local_day
 NOTIFY_AFTER_S = 600
 ACCEPTED_NOTIFY_AFTER_S = 900
 EPISODE_PREFIX = 'notify_episode:'
-ACCEPTED_HOLD_TEXT = 'Runs after the next message in that chat, or retries if the app restarts.'
+ACCEPTED_HOLD_TEXT = 'Still queued in the app. Runs when the chat gets to it, or retries once if it was dropped.'
 
 
 def held_wakes(engine, key):
