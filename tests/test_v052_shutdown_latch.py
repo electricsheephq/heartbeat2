@@ -138,10 +138,57 @@ def test_completed_turn_during_shutdown_finishes(reminder):
     assert sends == []
 
 
+
+@pytest.mark.parametrize('filename,caller', [
+    ('/fixture/tui_gateway/session_reaper.py', '_stop_turns_before_exit'),
+    ('/fixture/tui_gateway/session_reaper.py', '_handle_exit_flush_signal'),
+    ('/fixture/tui_gateway/server.py', '_shutdown_sessions'),
+])
+def test_each_hermes_exit_frame_sets_the_latch(reminder, filename, caller):
+    engine, wid, sends = reminder()
+    stop_from(engine, filename, caller)
+    assert serving._EXITING
+    occurrence, = engine.store.list_occurrences(wid)
+    assert occurrence.state == 'started'
+    flush_notices(engine)
+    assert sends == []
+
+
+def test_tui_shutdown_finalize_leaves_the_wake_for_restart(reminder, process_table):
+    # Hermes's tui_shutdown close finalizes without a turn id or exit reason (session_lifecycle._finalize_session).
+    engine, wid, sends = reminder(source='tui')
+    stop_from(engine, '/fixture/tui_gateway/server.py', '_shutdown_sessions')
+    engine.runtime_status.__self__.hook('on_session_end', completed=False, interrupted=True, session_id=CHAT,
+                                        model='unknown', platform='tui')
+    occurrence, = engine.store.list_occurrences(wid)
+    assert occurrence.state == 'started'
+    restart(engine, wid, process_table)
+    flush_notices(engine)
+    assert engine.store.get_occurrence(wid, occurrence.dedupe_key).error == 'restart'
+    assert sends == [('owner', NOTICE.format(surface='TUI'))]
+
+
+_HANDOFFS = {'Thread', 'Timer', 'submit', 'run_in_executor', 'start_new_thread', 'call_soon_threadsafe', 'to_thread'}
+
+
+def _runs_on_this_thread(function, callee):
+    """True if `function` reaches `callee` and never hands it to a thread or executor (the latch reads this stack)."""
+    def handed_off(call):
+        name = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, 'attr', '')
+        values = [*call.args, *(k.value for k in call.keywords)]
+        return name in _HANDOFFS and any(isinstance(n, ast.Name) and n.id == callee for v in values for n in ast.walk(v))
+    nodes = list(ast.walk(function))
+    return (any(isinstance(n, ast.Name) and n.id == callee for n in nodes)
+            and not any(isinstance(n, ast.Call) and handed_off(n) for n in nodes))
+
+
 def test_hermes_shutdown_callers_remain_synchronous():
     pins = Path(os.environ.get('HEARTBEAT2_HERMES_PINS', Path.home() / 'repos' / 'hermes-pins'))
     if pins.is_dir():
-        roots = [pins / pin for pin in ('v0.21.6', 'v0.21.7', 'v0.23.0', 'v0.23.2', 'main-04eb00c')]
+        roots = [pins / pin for pin in ('v0.21.6', 'v0.21.7', 'v0.23.0', 'v0.23.2', 'main-04eb00c')
+                 if (pins / pin / 'tui_gateway').is_dir()]
+        if not roots:
+            pytest.skip('no Hermes pin with tui_gateway in the pins directory')
     else:
         spec = find_spec('tui_gateway')
         if spec is None or spec.origin is None:
@@ -158,7 +205,7 @@ def test_hermes_shutdown_callers_remain_synchronous():
             tree = ast.parse(path.read_text(), filename=str(path))
             function = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name), None)
             assert function is not None, (path, name)
-            assert any(isinstance(n, ast.Name) and n.id == callee for n in ast.walk(function)), (path, name, callee)
+            assert _runs_on_this_thread(function, callee), (path, name, callee)
 
         lifecycle = root / 'tui_gateway' / 'session_lifecycle.py'
         tree = ast.parse(lifecycle.read_text(), filename=str(lifecycle))
@@ -174,3 +221,16 @@ def test_hermes_shutdown_callers_remain_synchronous():
                 assert 'agent_loop_stopped' not in ast.literal_eval(node.value), dispatch
                 timeout_sets.remove(node.target.id)
         assert not timeout_sets, (dispatch, timeout_sets)
+
+
+@pytest.mark.parametrize('body, ok', [
+    ('_interrupt_session_turn(sid)', True),
+    ('for step in (_a, _interrupt_session_turn): step()', True),
+    ('threading.Thread(target=_interrupt_session_turn).start()', False),
+    ('pool.submit(_interrupt_session_turn, sid)', False),
+    ('loop.run_in_executor(None, functools.partial(_interrupt_session_turn, sid))', False),
+    ('pass', False),
+])
+def test_shutdown_contract_rejects_a_thread_handoff(body, ok):
+    function = ast.parse(f'def _stop_turns_before_exit():\n    {body}\n').body[0]
+    assert _runs_on_this_thread(function, '_interrupt_session_turn') is ok
