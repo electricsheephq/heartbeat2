@@ -341,6 +341,8 @@ class Runtime:
                         runner._owns_notifications=False
                         runner.notify_via_invalid=self.notify_via_invalid
                         runner.refresh_policy=self.policy
+                        # The runner shares the store; the hook engine owns the bindings and flights.
+                        runner.fold_split_chats=e.fold_split_chats
                         runner.process_start=runner.store.backend not in self._reconciled
                         self._runner=runner
                     if not runner.store.backend and not runner.acquire():

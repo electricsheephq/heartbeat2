@@ -65,6 +65,7 @@ class Poller:
         self.boot_at=clock.now() if boot_at is None else boot_at
         self.paused,self.jitter=paused,jitter or (lambda: random.uniform(-1,1))
         self.compression_tip=compression_tip or self._compression_tip
+        self._chat_keys={}
         from .intake import Intake
         from .tool import Tool,current_session_key
         self.intake=Intake(self)
@@ -205,6 +206,7 @@ class Poller:
 
     def reconcile(self):
         s=self.store
+        if self.process_start: self.fold_split_chats()
         with s.atomic():
             if self.process_start and s.backend: s.remove_backend_turn_order()
             noticed=set()
@@ -252,6 +254,81 @@ class Poller:
                 return db.get_compression_tip(sid)
         except Exception:
             return None
+
+    def _local_ancestors(self,live):
+        from hermes_state import SessionDB
+        s=self.store
+        ancestors,seen=[],{live}
+        with SessionDB(db_path=self.ctx._manager.home_path/'state.db',read_only=True) as db:
+            row=db.get_session(live)
+            if not row: return None  # Hermes may not have written this new session yet.
+            while parent:=row.get('parent_session_id'):
+                if parent in seen or len(seen)>=200: return None
+                seen.add(parent)
+                chat=s.get_session(parent)
+                if chat and chat.platform in LOCAL_SURFACES: ancestors.append(parent)
+                row=db.get_session(parent)
+                if not row: break
+        return ancestors
+
+    def chat_key(self,live,platform='',*,startup=False):
+        """The oldest local chat on the same Hermes compression chain."""
+        if not live or live=='default' or platform and platform!='local' and platform not in LOCAL_SURFACES: return live
+        s=self.store
+        with s.thread_lock:
+            chat=s.get_session(live)
+            if chat is not None and chat.platform not in LOCAL_SURFACES: return live
+            if chat is None and (platform not in LOCAL_SURFACES or s.other_host_has_session(live)): return live
+            if not startup and (cached:=self._chat_keys.get(live)):
+                if cached==live and chat is not None: return live
+                if cached!=live and chat is None:
+                    root=s.get_session(cached)
+                    if root and root.platform in LOCAL_SURFACES: return cached
+            try:
+                ancestors=self._local_ancestors(live)
+                if ancestors is None: return live
+                root=ancestors[-1] if ancestors else live
+                younger=[]
+                if root!=live:
+                    tip=self.compression_tip(live)
+                    root_tip=self.compression_tip(root)
+                    if not tip or not root_tip: return live  # No memo on read failure.
+                    if root_tip!=tip:
+                        root=live
+                    else:
+                        # A store row may be on a branch of the preferred chain. Fold only rows that agree.
+                        for key in reversed(ancestors[:-1]):
+                            child_tip=self.compression_tip(key)
+                            if not child_tip: return live
+                            if child_tip==tip: younger.append(key)
+                        if chat is not None: younger.append(live)
+            except Exception:
+                return live
+            if younger:
+                moved=s.fold_chat(root,younger)
+                self.intake.remap_chat_keys(root,moved)
+                for key,target in self._chat_keys.items():
+                    if target in moved: self._chat_keys[key]=root
+            self._chat_keys[live]=root
+            return root
+
+    def fold_split_chats(self):
+        with self.store.thread_lock:
+            chats=[s for s in self.store.list_sessions() if s.platform in LOCAL_SURFACES]
+            if len(chats)<2: return
+            tips=set()
+            for chat in chats:
+                try: tip=self.compression_tip(chat.session_key)
+                except Exception: continue
+                if tip and tip!=chat.session_key and tip not in tips:
+                    # Starting from the live tip puts all stored ancestors in one fold.
+                    self.chat_key(tip,chat.platform,startup=True)
+                    tips.add(tip)
+
+    def deliver_key(self,w,session):
+        if session and session.platform in LOCAL_SURFACES:
+            return self.compression_tip(w.session_key) or w.session_key
+        return w.session_key
 
     def _probe(self,wake):
         from .probes import check
@@ -510,10 +587,10 @@ class Poller:
         # An accepted prompt may still be queued. The clock alone cannot retire it.
         self._hold_backend_app_closed(w,o,keep_claim=True)
 
-    @staticmethod
-    def _backend_prompt_missing(w,o):
+    def _backend_prompt_missing(self,w,o):
         # tui_probe loads up front with every module (#207); it resolves Hermes' TUI server only here.
-        return tui_probe.queued_or_inflight(w.session_key,f'⟦pulse o:{o.id} a:{o.attempt}') is False
+        key=self.deliver_key(w,self.store.get_session(w.session_key))
+        return tui_probe.queued_or_inflight(key,f'⟦pulse o:{o.id} a:{o.attempt}') is False
 
     def _resend_backend_claim(self,o,error):
         s=self.store
@@ -850,6 +927,9 @@ class Poller:
             if session.last_human_at is None or not session.episode_id: continue
             wid='owntime_'+hashlib.sha256(session.session_key.encode()).hexdigest()[:16]
             w=s.get_wake(wid)
+            if w is None and session.platform in LOCAL_SURFACES:
+                # A folded chat keeps the existing built-in wake ID and history.
+                w=next((item for item in s.list_wakes(session.session_key) if item.trigger_json.get('own_time')),None)
             if w is None:
                 s.create_wake(Wake(session.session_key,
                     'This is your own time. Look at your desk: work on what you own, follow up on something you noticed, '
@@ -1202,7 +1282,7 @@ class Poller:
             resend.update(prompt_attempt=o.attempt,prompt_size=len(text),prompt_digest=digest)
             s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
         inject_raised=False
-        try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
+        try: accepted=self.ctx.inject_message(text,session_key=self.deliver_key(w,session))
         except Exception as exc:
             inject_raised=True
             accepted=False

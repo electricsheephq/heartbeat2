@@ -33,12 +33,15 @@ def quiet_until(engine, session_key, *, urgent=False, now=None):
     if urgent and engine.policy.quiet_hours_urgent: return None
     now = engine.clock.now() if now is None else now
     override = json.loads(engine.store.get_meta('quiet:'+session_key) or '{}')
-    if override.get('until', 0) > now:
-        until=override['until']
-        return max(until,engine.policy.quiet_until(urgent=urgent,now=until) or until)
+    until = override['until'] if override.get('until', 0) > now else None
+    at = until if until is not None else now
     if 'range' in override:
-        return quiet_end(now, override['range'], engine.policy.resolved_timezone())
-    return engine.policy.quiet_until(urgent=urgent, now=now)
+        tz = engine.policy.resolved_timezone()
+        ranges = (override['range'], *override.get('ranges', ()))
+        end = max((end for window in ranges if (end := quiet_end(at, window, tz)) is not None), default=None)
+    else:
+        end = engine.policy.quiet_until(urgent=urgent, now=at)
+    return end if end is not None else until
 
 
 def quiet_window(store, policy, key, now):
@@ -48,7 +51,8 @@ def quiet_window(store, policy, key, now):
     and leaves the range as it is. Returns (range, source, until): range '' means quiet hours are off."""
     override = json.loads(store.get_meta('quiet:'+key) or '{}')
     until = override['until'] if override.get('until', 0) > now else None
-    if 'range' in override: return override['range'], 'chat override', until
+    if 'range' in override:
+        return ', '.join((override['range'], *override.get('ranges', ()))), 'chat override', until
     source = policy.quiet_hours_source() if hasattr(policy, 'quiet_hours_source') else 'settings'
     return policy.quiet_hours, source, until
 
@@ -376,6 +380,7 @@ def handle(raw_args, runtime):
             from .tool import APP_BACKEND_REFUSAL
             return APP_BACKEND_REFUSAL
         engine.refresh()  # Never inside a transaction: refresh takes the policy lock before the store lock.
+        key = engine.chat_key(key,engine.tool.chat_platform())
         if engine.store.backend:
             session = engine.tool.identity(key=key)
             if session is None and arms and engine.tool.app_backend_unavailable(key=key):
@@ -395,6 +400,7 @@ def handle(raw_args, runtime):
                     return 'Error: /pulse needs a known app session.'
             elif session is None or not engine.deliverable(session.platform):
                 return 'Error: /pulse needs a known app session.'
+            key = session.session_key
         preview=engine.store.get_wake(rest) if action=='test' else None
         cache_line=engine.tool.cache_result(preview) if preview and preview.session_key==key else ''
         wake_cache=engine.cache_line(preview) if preview and preview.session_key==key else ''
@@ -700,12 +706,18 @@ def _owntime(engine, key, rest):
             # starts (its turn arrives stale and stays silent). A turn already running finishes. A paused wake stays paused,
             # so a governor pause survives off and on; its queued turns end here too.
             wid = 'owntime_'+hashlib.sha256(key.encode()).hexdigest()[:16]
-            wake = engine.store.get_wake(wid)
-            if wake is not None and wake.status in {'active','proposed'}:
-                if not engine.store.cas_wake(wid,wake.status,expected_version=wake.version,status='cancelled',status_reason='chat_off'):
-                    raise ValueError('concurrent item change')
-            if wake is not None and wake.status in {'active','proposed','paused'}:
-                engine.cancel_occurrences(wid,'chat_off',preserve_started=True)
+            chat = engine.store.get_session(key)
+            if chat and chat.platform in LOCAL_SURFACES:
+                wakes = [w for w in engine.store.list_wakes(key) if w.trigger_json.get('own_time')]
+            else:
+                wakes = [engine.store.get_wake(wid)]
+            for wake in wakes:
+                if wake is None: continue
+                if wake.status in {'active','proposed'}:
+                    if not engine.store.cas_wake(wake.id,wake.status,expected_version=wake.version,status='cancelled',status_reason='chat_off'):
+                        raise ValueError('concurrent item change')
+                if wake.status in {'active','proposed','paused'}:
+                    engine.cancel_occurrences(wake.id,'chat_off',preserve_started=True)
         label = own_time_label(engine, key)
     if rest: engine.signal()  # The next check re-arms this chat's own time after on.
     return 'Own time: ' + label

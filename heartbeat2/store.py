@@ -662,6 +662,91 @@ class Store:
                 f"SELECT * FROM sessions WHERE session_key=? AND {self._host_filter('sessions.session_key')}",
                 (session_key,)).fetchone())
 
+    def other_host_has_session(self, key):
+        with self._lock:
+            return self.connection.execute(
+                f"SELECT 1 FROM sessions WHERE session_key=? AND NOT ({self._host_filter('session_key')})",
+                (key,)).fetchone() is not None
+
+    def fold_chat(self, root, younger):
+        """Move only local rows visible to this host, keeping wake/occurrence IDs."""
+        from .policy import LOCAL_SURFACES
+        moved = set()
+        with self.atomic():
+            chat = self.get_session(root)
+            if chat is None or chat.platform not in LOCAL_SURFACES: return moved
+            for key in younger:
+                child = self.get_session(key)
+                if key == root or child is None or child.platform not in LOCAL_SURFACES: continue
+                latest = {field: max((value for value in (getattr(chat, field), getattr(child, field))
+                                      if value is not None), default=None)
+                          for field in ('paused_until', 'last_human_at', 'last_activity_at', 'last_wake_turn_at')}
+                busy = child if child.busy_since is not None and (
+                    chat.busy_since is None or child.busy_since > chat.busy_since) else chat
+                owner = child if child.last_human_at == latest['last_human_at'] and child.episode_id else chat
+                self.cas_session(root, {'enabled': chat.enabled},
+                    enabled=chat.enabled and child.enabled, current_session_id=child.current_session_id or chat.current_session_id,
+                    unanswered_count=max(chat.unanswered_count, child.unanswered_count),
+                    episode_id=owner.episode_id,
+                    first_notice_sent=chat.first_notice_sent or child.first_notice_sent,
+                    busy_since=busy.busy_since, busy_epoch=busy.busy_epoch, **latest)
+                self.connection.execute("UPDATE wakes SET session_key=?,version=version+1 WHERE session_key=?", (root,key))
+                self.connection.execute("UPDATE events SET session_key=? WHERE session_key=? AND consumed_at IS NULL", (root,key))
+                self._fold_chat_meta(root,key)
+                self.connection.execute("DELETE FROM sessions WHERE session_key=?", (key,))
+                self.connection.execute("DELETE FROM meta WHERE key=?", ('host:'+key,))
+                moved.add(key)
+                chat = self.get_session(root)
+        return moved
+
+    def _fold_chat_meta(self, root, key):
+        def pair(prefix):
+            return self.get_meta(prefix+root), self.get_meta(prefix+key)
+
+        for prefix in ('human_context:', 'stop_hint_chat:', 'pending_human:key:', 'own_time_off:', 'own_time_on:'):
+            before, child = pair(prefix)
+            if not before and child: self.set_meta(prefix+root,child)
+        if self.get_meta('own_time_off:'+root)=='1' and self.get_meta('own_time_on:'+root):
+            self.set_meta('own_time_on:'+root,'')
+        before, child = pair('quiet:')
+        if child:
+            a,b = (json.loads(value or '{}') for value in (before,child))
+            ranges = list(dict.fromkeys(value for data in (a,b)
+                           for value in (data.get('range'), *data.get('ranges', ())) if value))
+            quiet = {}
+            if ranges or 'range' in a or 'range' in b:
+                quiet['range'] = ranges[0] if ranges else ''
+            if len(ranges) > 1:
+                quiet['ranges'] = ranges[1:]
+            if until := max(a.get('until', 0), b.get('until', 0)):
+                quiet['until'] = until
+            self.set_meta('quiet:' + root, _json(quiet))
+        before, child = pair('notice:')
+        if child:
+            notices = list(dict.fromkeys(json.loads(before or '[]')+json.loads(child)))
+            self.set_meta('notice:'+root,_json(notices[-20:]))
+        before, child = pair('switched_notice:')
+        if child: self.set_meta('switched_notice:'+root,str(int(before or 0)+int(child)))
+
+        spend = 'agent_spend:'+key+':'
+        for name,value in self.connection.execute(
+                "SELECT key,value FROM meta WHERE key>=? AND key<? AND length(key)=?",
+                (spend,spend[:-1]+';',len(spend)+10)).fetchall():
+            target = 'agent_spend:'+root+':'+name[len(spend):]
+            before, child = json.loads(self.get_meta(target) or '{}'), json.loads(value)
+            self.set_meta(target,_json({field:before.get(field,0)+child.get(field,0)
+                                        for field in ('cost_microusd','unpriced_calls')}))
+            self.connection.execute("DELETE FROM meta WHERE key=?", (name,))
+        prefixes = ('human_context:', 'switched_notice:', 'notice:', 'stop_hint_chat:', 'quiet:',
+                    'own_time_off:', 'own_time_on:', 'stall_notice:', 'pending_human:key:',
+                    'notify_episode:', 'keep_warm_cold:', 'backend:notice_in_flight:')
+        self.connection.executemany("DELETE FROM meta WHERE key=?", ((prefix+key,) for prefix in prefixes))
+        nonhuman = 'nonhuman:'+key+':'
+        self.connection.execute("""DELETE FROM meta WHERE key>=? AND key<? AND NOT EXISTS (
+            SELECT 1 FROM sessions WHERE length(session_key)>? AND
+            substr(meta.key,1,length(session_key)+10)='nonhuman:'||session_key||':')""",
+            (nonhuman,nonhuman[:-1]+';',len(key)))
+
     def upsert_session(self, session: Session) -> bool:
         """Create if absent; all updates go through cas_session."""
         data = asdict(session)
