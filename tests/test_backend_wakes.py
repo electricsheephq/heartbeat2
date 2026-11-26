@@ -54,6 +54,9 @@ def hosts(tmp_path, clock, monkeypatch):
         engines = [rt.get_engine() for rt in runtimes]
         for e in engines:
             e.paused = lambda: False
+            # These runtimes are never started, so a hook that sees "no scheduler thread" would start a real one: a
+            # second poller ticking this store on the shared fake clock, racing the test's own ticks (#241).
+            e.restart = lambda: None
         yield engines
     finally:
         for rt in runtimes:
