@@ -73,7 +73,9 @@ def test_watchdog(reminder, case, reason):
     if case in {'W1','W2'}: assert w.status == 'done'
     notified=case in {'W3','W5','W8-owner','W8-urgent','watchdog-provider'}
     if notified: assert w.status == 'failed'
-    assert sends == ([('owner', NOTICE.format(surface='TUI' if tui else 'Desktop'))] if notified else [])
+    expected = ("Reminder may not have finished; say 'again' in its Desktop chat to run it again"
+                if case=='W3' else NOTICE.format(surface='TUI' if tui else 'Desktop'))
+    assert sends == ([('owner', expected)] if notified else [])
 
 def test_watchdog_W6_recurring_and_gateway(engine, reminder):
     e, _, sends = reminder(trigger={'kind': 'every', 'every': '10m'})
@@ -246,4 +248,4 @@ def test_dead_owner_wake_notifies_once(reminder, monkeypatch):
         assert e.notifications.idle.wait(2)
     o, = e.store.list_occurrences(wid)
     assert (o.state, o.error) == ('dead', 'inject_failed')
-    assert sends == [('owner', "Your wake didn't run; say 'again' in its Desktop chat to retry")]
+    assert sends == [('owner', "Check the task. didn't run; say 'again' in its Desktop chat to retry")]
