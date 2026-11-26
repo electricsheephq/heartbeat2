@@ -9,7 +9,7 @@ import re
 import uuid
 
 from .model import Session, reads_outside_text
-from . import governor
+from . import governor, serving
 from .policy import is_keep_warm
 
 MARKER = re.compile(r'^⟦pulse o:([^\s]+) a:(\d+)(?: n:([0-9a-f]{16}))?⟧(?:\s|$)')
@@ -1066,6 +1066,7 @@ class Intake:
             o=s.get_occurrence(f.wake_id,f.dedupe_key)
             if o is None or o.state!='started' or o.attempt!=f.attempt: return None
             if failed or interrupted or completed is False:
+                if s.backend and serving.exiting(): return None
                 reason=kwargs.get('turn_exit_reason','') or ''
                 owner_interrupt=interrupted and reason in {'interrupted_by_user','interrupted_during_api_call'}
                 cause='owner_interrupted' if owner_interrupt else 'failed' if failed else 'interrupted'
@@ -1140,6 +1141,8 @@ class Intake:
 
     @fail_open
     def agent_loop_stopped(self,session_key='',**kwargs):
+        serving.note_stop_caller()
+        if self.engine.store.backend and serving.exiting(): return None
         for sid,f in list(self.flights.items()):
             if f.session_key==session_key:
                 reason='interrupted_by_user' if kwargs.get('invalidation_reason')=='stop_command' else ''

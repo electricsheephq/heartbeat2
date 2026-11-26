@@ -11,6 +11,7 @@ served set changes at runtime, so callers ask on every step.
 import logging
 import math
 import os
+import sys
 
 LOG=logging.getLogger('heartbeat2')
 SERVED,BACKEND,FOREIGN,UNKNOWN,NO_GATEWAY='served','backend','foreign','unknown','no_gateway'
@@ -18,8 +19,38 @@ REASONS={FOREIGN:'this gateway does not serve this profile',
          UNKNOWN:'cannot tell whether this gateway serves this profile',
          NO_GATEWAY:'no gateway in this process'}
 _WARNED=set()
+_EXITING=False
+_SHUTDOWN_CALLERS=frozenset({'_stop_turns_before_exit','_shutdown_sessions','_handle_exit_flush_signal'})
 # On Linux psutil derives the start timestamp from the wall-clock boot time.
 CREATE_TIME_TOLERANCE_S=2
+
+
+def exiting() -> bool:
+    return _EXITING
+
+
+def note_stop_caller():
+    """Latch backend shutdown for finalizers running on another thread."""
+    global _EXITING
+    if _EXITING: return
+    # Hermes dispatches this hook synchronously with the same payload as Stop.
+    try:
+        frame=sys._getframe(1)
+        for _ in range(40):
+            if frame is None: break
+            code=frame.f_code
+            if code.co_name in _SHUTDOWN_CALLERS and 'tui_gateway' in code.co_filename.replace('\\','/').split('/'):
+                _EXITING=True
+                return
+            frame=frame.f_back
+    except Exception:
+        # If frames are unavailable, preserve ordinary stop handling.
+        return
+
+
+def _reset_exiting_for_tests():
+    global _EXITING
+    _EXITING=False
 
 
 def pid_alive(pid):
