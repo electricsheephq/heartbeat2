@@ -21,6 +21,8 @@ def test_started_wake_recovers_when_peer_dies_after_takeover(reminder, monkeypat
     old_backend_alive = True
     monkeypatch.setattr(serving, 'backend_epoch_alive',
                         lambda candidate, *, pid=None: candidate == epoch and old_backend_alive)
+    real_pid_alive = serving.pid_alive
+    monkeypatch.setattr(serving, 'pid_alive', lambda candidate: old_backend_alive if candidate == pid else real_pid_alive(candidate))
     # Model an old backend releasing the lock while its turn is still running.
     backend.release()
     store.connection.execute('UPDATE occurrences SET pid=?,epoch=? WHERE wake_id=?', (pid, epoch, wid))
@@ -42,6 +44,29 @@ def test_started_wake_recovers_when_peer_dies_after_takeover(reminder, monkeypat
     backend.acks()
     flush_notices(backend)
     assert sends == [('owner', PARTIAL if api_calls else NOTICE.format(surface='Desktop'))]
+
+
+def test_started_wake_with_live_pid_but_stale_create_time_waits(reminder, monkeypatch):
+    # Linux boot-time drift can make a live backend's create time look wrong; only a gone process is settled at once.
+    backend, wid, sends = reminder()
+    store = backend.store
+    pid = os.getpid() + 1
+    epoch = f'{pid}:10:peer'
+    epoch_matches = True
+    monkeypatch.setattr(serving, 'backend_epoch_alive', lambda candidate, *, pid=None: candidate == epoch and epoch_matches)
+    real_pid_alive = serving.pid_alive
+    monkeypatch.setattr(serving, 'pid_alive', lambda candidate: True if candidate == pid else real_pid_alive(candidate))
+    backend.release()
+    store.connection.execute('UPDATE occurrences SET pid=?,epoch=? WHERE wake_id=?', (pid, epoch, wid))
+    store.set_meta('epoch', epoch)
+    assert backend.acquire()
+    assert not backend.process_start
+    epoch_matches = False  # the create time now looks wrong, but the process is still running
+    backend.acks()
+    still, = store.list_occurrences(wid)
+    assert still.state == 'started'
+    flush_notices(backend)
+    assert sends == []
 
 
 @pytest.mark.parametrize('claim', ['alive-foreign', 'own', 'dead-foreign-own-only'])
