@@ -1,6 +1,7 @@
 """Desktop/TUI compaction with a transport that accepts only Hermes' live key."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import replace
 import json
 import sqlite3
 import sys
@@ -11,7 +12,9 @@ import pytest
 
 from heartbeat2 import commands, policy, tui_probe
 from heartbeat2.poller import Poller
+from heartbeat2.registration import Runtime
 from test_backend_wakes import ARM, CHAT, bind, hosts, notice_sends
+from test_engine import GatewayCtx
 from test_watchdog_retry import reminder
 
 K0, K1, K2 = CHAT, 'rotation-one', 'rotation-two'
@@ -43,10 +46,15 @@ def lineage(monkeypatch):
                 key = next_key[key]
             return key
 
-    def child(parent, key, *, continuation=True):
+    def child(parent, key, *, kind='compression'):
         rows[key] = {'parent_session_id': parent}
-        if continuation:
+        if kind == 'compression':
             next_key[parent] = key
+        elif kind in {'branch', 'reset', 'delegate'}:
+            marker = 'branched' if kind == 'branch' else kind
+            rows[key]['model_config'] = {f'_{marker}_from': parent}
+        else:
+            assert kind == 'stale-sibling' and parent in next_key
 
     monkeypatch.setitem(sys.modules, 'hermes_state', SimpleNamespace(SessionDB=SessionDB))
     return SimpleNamespace(child=child, db=SessionDB, rows=rows, reads=reads)
@@ -139,6 +147,67 @@ def test_rotation_after_wake_turn_needs_no_owner_hook(hosts, lineage, monkeypatc
     e.clock.advance(e.store.get_wake(wid).next_due_at - e.clock.now() + 1)
     deliver(e, wid, K1, 'second', monkeypatch)
     assert e.store.get_wake(wid).fires == 2
+
+
+@pytest.mark.parametrize('enabled', [True, False], ids=['deliver-once', 'keep-off'])
+def test_branch_then_rotate(hosts, lineage, monkeypatch, enabled):
+    _, e = hosts
+    branch, tip = 'branch', 'branch-tip'
+    bind(monkeypatch, e, K0)
+    assert e.tool.identity().session_key == K0
+    lineage.child(K0, K1)
+    lineage.child(K1, branch, kind='branch')
+    bind(monkeypatch, e, branch)
+    wid = arm(e)
+    if not enabled:
+        assert pulse(e, 'off') == 'HeartBeat 2.0 off for this chat.'
+    lineage.child(branch, tip)
+    bind(monkeypatch, e, tip)
+
+    if enabled:
+        deliver(e, wid, tip, 'branch-wake', monkeypatch, advance=61)
+        assert e.intake.bindings[tip] == branch
+        assert e.store.get_wake(wid).fires == 1
+    else:
+        strict_inject(e, tip, monkeypatch)
+        e.clock.advance(61)
+        e.tick()
+        assert not e.ctx.calls
+    assert e.tool.identity().session_key == branch
+    assert e.store.get_wake(wid).session_key == branch
+    assert e.store.get_session(branch).enabled == enabled
+    assert e.store.get_session(tip) is None
+
+
+def test_delivery_holds_on_lineage_disagreement(hosts, lineage, monkeypatch):
+    _, e = hosts
+    bind(monkeypatch, e, K0)
+    wid = arm(e)
+    # The forward read selects a live key whose visible lineage has no path back to K0.
+    lineage.rows[K1] = {'parent_session_id': None}
+    compression_tip = e.compression_tip
+    monkeypatch.setattr(e, 'compression_tip', lambda key: K1 if key == K0 else compression_tip(key))
+    monkeypatch.setattr(tui_probe, 'queued_or_inflight', lambda key, marker: False)
+    bind(monkeypatch, e, K1)
+    strict_inject(e, K1, monkeypatch)
+    accepted = []
+    for i in range(40):
+        before = len(e.ctx.calls)
+        e.clock.advance(600)
+        e.tick()
+        for message, key in e.ctx.calls[before:]:
+            if key == K1:
+                accepted.append(key)
+                turn = f'wrong-chat-{i}'
+                e.intake.pre_llm_call(session_id=K1, turn_id=turn, platform='desktop', user_message=message)
+                e.intake.on_session_end(session_id=K1, turn_id=turn, completed=True)
+
+    assert not accepted
+    assert 0 < len(e.ctx.calls) <= 40
+    assert {key for _, key in e.ctx.calls} == {K0}
+    occurrence, = e.store.list_occurrences(wid)
+    assert (occurrence.state, occurrence.error) == ('pending', 'app_closed')
+    assert e.store.get_wake(wid).fires == 0
 
 
 def test_hook_can_lag_the_state_db_tip(hosts, lineage, monkeypatch):
@@ -298,6 +367,52 @@ def test_fold_keeps_one_own_time_schedule_and_off_controls_it(hosts, lineage, mo
     assert s.get_wake(existing.id).status == 'cancelled'
 
 
+@pytest.mark.parametrize('root_status', ['active', 'cancelled'])
+def test_fold_deduplicates_own_time(hosts, lineage, monkeypatch, root_status):
+    e, _ = hosts
+    e.ctx._manager.has_tui_message_injector = True
+    monkeypatch.setattr(policy, 'local_injection_supported', lambda: True)
+    s = e.store
+    for key in (K0, K1):
+        bind(monkeypatch, e, key, platform='desktop')
+        assert e.tool.identity().session_key == key
+        assert s.cas_session(key, {'episode_id': ''}, episode_id=key, last_human_at=e.clock.now())
+        assert 'on in this chat' in pulse(e, 'owntime on')
+        e.own_time()
+    root, = s.list_wakes(K0)
+    child, = s.list_wakes(K1)
+    if root_status == 'cancelled':
+        assert s.cas_wake(root.id, 'active', status='cancelled', status_reason='chat_off')
+    assert s.add_occurrence(child.id, 'own-time-due')
+    lineage.child(K0, K1)
+
+    e.reconcile()
+    e.own_time()
+    active, = s.list_wakes(K0, status='active')
+    assert active.id == (root.id if root_status == 'active' else child.id)
+    expected = 'superseded' if root_status == 'active' else 'pending'
+    assert s.get_occurrence(child.id, 'own-time-due').state == expected
+
+
+@pytest.mark.parametrize('override_key', [K0, K1], ids=['root-override', 'child-override'])
+@pytest.mark.parametrize('override', ['', '16:00-17:00'], ids=['off', 'range'])
+def test_fold_quiet_preserves_inherited_settings(hosts, lineage, monkeypatch, override_key, override):
+    _, e = hosts
+    e.policy = replace(e.policy, quiet_hours='11:00-13:00')
+    for key in (K0, K1):
+        bind(monkeypatch, e, key)
+        assert e.tool.identity().session_key == key
+    e.store.set_meta('quiet:' + override_key, json.dumps({'range': override}))
+    lineage.child(K0, K1)
+
+    e.reconcile()
+    assert commands.quiet_until(e, K0) == e.clock.now() + 3600
+    e.policy = replace(e.policy, quiet_hours='11:00-14:00')
+    assert commands.quiet_until(e, K0) == e.clock.now() + 7200
+    if override:
+        assert commands.quiet_until(e, K0, now=e.clock.now() + 4 * 3600) == e.clock.now() + 5 * 3600
+
+
 def test_interrupted_fold_rolls_back_and_retries(hosts, lineage, monkeypatch):
     _, e = hosts
     _, younger = split_store(e, lineage, monkeypatch)
@@ -379,13 +494,42 @@ def test_startup_fold_racing_identity_does_not_recreate_split(hosts, lineage, mo
     assert e.store.get_meta('host:' + K1) is None
 
 
+def test_bootstrap_folds_on_hook_engine(tmp_path, clock, lineage, monkeypatch):
+    ctx = GatewayCtx(tmp_path, settings={'quiet_hours': ''})
+    ctx._manager.has_gateway_message_injector = False
+    ctx._manager.has_tui_message_injector = True
+    stop = Event()
+
+    def reconcile_once(runner):
+        try:
+            runner.reconcile()
+        finally:
+            stop.set()
+
+    monkeypatch.setattr(Poller, 'tick', reconcile_once)
+    with closing(Runtime(ctx, clock=clock)) as runtime:
+        e = runtime.get_engine()
+        _, younger = split_store(e, lineage, monkeypatch)
+        e.intake.bindings[K1] = K1
+        e.intake.inbounds.add(K1)
+
+        runtime._bootstrap(stop)
+
+        assert runtime._runner is not e
+        assert e.store.get_wake(younger).session_key == K0
+        assert e.intake.bindings[K1] == K0
+        assert e.intake.inbounds == {K0}
+        assert runtime._runner.chat_key == e.chat_key
+
+
 @pytest.mark.parametrize('kind', ['branch', 'reset', 'delegate', 'stale-sibling'])
 def test_noncontinuation_children_keep_their_own_chat(hosts, lineage, monkeypatch, kind):
     _, e = hosts
     bind(monkeypatch, e, K0)
     older = arm(e)
-    lineage.child(K0, K2)
-    lineage.child(K0, K1, continuation=False)
+    if kind == 'stale-sibling':
+        lineage.child(K0, K2)
+    lineage.child(K0, K1, kind=kind)
     bind(monkeypatch, e, K1)
     younger = arm(e, note='A separate conversation.')
     assert e.tool.identity().session_key == K1
@@ -438,6 +582,36 @@ def test_lineage_read_error_is_not_memoized(hosts, lineage, monkeypatch):
     assert e.store.get_session(K1) is None
 
 
+def test_unknown_desktop_key_is_memoized_until_state_changes(hosts, lineage, monkeypatch):
+    _, e = hosts
+    state = e.ctx._manager.home_path / 'state.db'
+    state.touch()
+    bind(monkeypatch, e, K0)
+    assert e.tool.identity().session_key == K0
+    bind(monkeypatch, e, K1)
+    assert e.tool.identity().session_key == K1
+    lineage.reads.clear()
+    assert e.tool.identity().session_key == K1
+    assert not lineage.reads
+
+    lineage.child(K0, K1)
+    state.with_name('state.db-wal').write_bytes(b'new lineage')
+    assert e.tool.identity().session_key == K0
+
+
+@pytest.mark.parametrize('platform', ['desktop', 'telegram'])
+def test_unbound_end_does_not_open_write_transaction(hosts, platform):
+    gateway, backend = hosts
+    e = backend if platform == 'desktop' else gateway
+    statements = []
+    e.store.connection.set_trace_callback(statements.append)
+    try:
+        e.intake.on_session_end(session_id='unbound', turn_id='turn', platform=platform)
+    finally:
+        e.store.connection.set_trace_callback(None)
+    assert not any(sql.startswith('BEGIN IMMEDIATE') for sql in statements)
+
+
 def test_ack_probe_checks_live_queue_after_rotation(hosts, lineage, monkeypatch):
     _, e = hosts
     bind(monkeypatch, e, K0)
@@ -460,18 +634,3 @@ def test_ack_probe_checks_live_queue_after_rotation(hosts, lineage, monkeypatch)
     assert [key for key, _ in probes] == [K1]
     assert e.store.list_occurrences(wid)[-1].state == 'claimed'
     assert len(e.ctx.calls) == 1
-
-
-def test_pinned_hermes_public_lineage(hosts, tmp_path, monkeypatch):
-    hermes_state = pytest.importorskip('hermes_state')
-    _, e = hosts
-    with hermes_state.SessionDB(db_path=tmp_path / 'state.db') as db:
-        db.create_session(K0, 'desktop')
-        bind(monkeypatch, e, K0)
-        wid = arm(e)
-        db.end_session(K0, 'compression')
-        db.create_session(K1, 'desktop', parent_session_id=K0)
-        assert db.get_session(K1)['parent_session_id'] == K0
-        assert db.get_compression_tip(K0) == K1
-        bind(monkeypatch, e, K1)
-        deliver(e, wid, K1, 'wake', monkeypatch, advance=61)

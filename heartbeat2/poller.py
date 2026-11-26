@@ -18,7 +18,7 @@ import uuid
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, agreed_watcher, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
-from .store import BACKEND_REINJECT_PREFIX, FAILURE_NOTICE_PREFIX, HEADS_UP_PREFIX
+from .store import BACKEND_REINJECT_PREFIX, FAILURE_NOTICE_PREFIX, HEADS_UP_PREFIX, OWN_TIME_SCHEDULE_STATUSES
 from . import governor, serving, tui_probe
 
 LOG = logging.getLogger('heartbeat2')
@@ -66,6 +66,7 @@ class Poller:
         self.paused,self.jitter=paused,jitter or (lambda: random.uniform(-1,1))
         self.compression_tip=compression_tip or self._compression_tip
         self._chat_keys={}
+        self._missing_chat_keys={}
         from .intake import Intake
         from .tool import Tool,current_session_key
         self.intake=Intake(self)
@@ -263,7 +264,7 @@ class Poller:
             row=db.get_session(live)
             if not row: return None  # Hermes may not have written this new session yet.
             while parent:=row.get('parent_session_id'):
-                if parent in seen or len(seen)>=200: return None
+                if parent in seen or len(seen)>=200: raise ValueError('invalid session lineage')
                 seen.add(parent)
                 chat=s.get_session(parent)
                 if chat and chat.platform in LOCAL_SURFACES: ancestors.append(parent)
@@ -271,7 +272,23 @@ class Poller:
                 if not row: break
         return ancestors
 
-    def chat_key(self,live,platform='',*,startup=False):
+    def _state_db_stamp(self):
+        # A missing session can appear later, including in the WAL before a checkpoint.
+        path=self.ctx._manager.home_path/'state.db'
+
+        def stamp(file):
+            info=file.stat()
+            return info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns
+
+        try:
+            main=stamp(path)
+            try: wal=stamp(path.with_name('state.db-wal'))
+            except FileNotFoundError: wal=None
+            return main,wal
+        except OSError:
+            return None
+
+    def chat_key(self,live,platform='',*,startup=False,fold=True):
         """The oldest local chat on the same Hermes compression chain."""
         if not live or live=='default' or platform and platform!='local' and platform not in LOCAL_SURFACES: return live
         s=self.store
@@ -285,26 +302,31 @@ class Poller:
                     root=s.get_session(cached)
                     if root and root.platform in LOCAL_SURFACES: return cached
             try:
+                stamp=self._state_db_stamp()
+                if not startup and stamp is not None and self._missing_chat_keys.get(live)==stamp: return live
                 ancestors=self._local_ancestors(live)
-                if ancestors is None: return live
-                root=ancestors[-1] if ancestors else live
-                younger=[]
-                if root!=live:
+                if ancestors is None:
+                    if stamp is not None: self._missing_chat_keys[live]=stamp
+                    return live
+                self._missing_chat_keys.pop(live,None)
+                chain=[]
+                if ancestors:
                     tip=self.compression_tip(live)
-                    root_tip=self.compression_tip(root)
-                    if not tip or not root_tip: return live  # No memo on read failure.
-                    if root_tip!=tip:
-                        root=live
-                    else:
-                        # A store row may be on a branch of the preferred chain. Fold only rows that agree.
-                        for key in reversed(ancestors[:-1]):
-                            child_tip=self.compression_tip(key)
-                            if not child_tip: return live
-                            if child_tip==tip: younger.append(key)
-                        if chat is not None: younger.append(live)
+                    if not tip: return live
+                    for key in reversed(ancestors):
+                        ancestor_tip=self.compression_tip(key)
+                        if not ancestor_tip: return live  # No memo on read failure.
+                        if ancestor_tip==tip: chain.append(key)
             except Exception:
                 return live
+            root=live
+            if chain:
+                root,*younger=chain
+                if chat is not None: younger.append(live)
+            else:
+                younger=[]
             if younger:
+                if not fold: return root  # Delivery checks must not move wakes or remap hooks.
                 moved=s.fold_chat(root,younger)
                 self.intake.remap_chat_keys(root,moved)
                 for key,target in self._chat_keys.items():
@@ -327,7 +349,9 @@ class Poller:
 
     def deliver_key(self,w,session):
         if session and session.platform in LOCAL_SURFACES:
-            return self.compression_tip(w.session_key) or w.session_key
+            tip=self.compression_tip(w.session_key)
+            if tip and tip!=w.session_key and self.chat_key(tip,session.platform,fold=False)==w.session_key:
+                return tip
         return w.session_key
 
     def _probe(self,wake):
@@ -927,9 +951,12 @@ class Poller:
             if session.last_human_at is None or not session.episode_id: continue
             wid='owntime_'+hashlib.sha256(session.session_key.encode()).hexdigest()[:16]
             w=s.get_wake(wid)
-            if w is None and session.platform in LOCAL_SURFACES:
-                # A folded chat keeps the existing built-in wake ID and history.
-                w=next((item for item in s.list_wakes(session.session_key) if item.trigger_json.get('own_time')),None)
+            if session.platform in LOCAL_SURFACES and (w is None or w.status not in OWN_TIME_SCHEDULE_STATUSES):
+                # A folded chat can already have a live schedule under its younger wake ID.
+                schedules=[item for item in s.list_wakes(session.session_key)
+                           if item.trigger_json.get('own_time') and item.status_reason!='folded_own_time']
+                w=next((item for item in schedules if item.status in OWN_TIME_SCHEDULE_STATUSES),
+                       w or next(iter(schedules),None))
             if w is None:
                 s.create_wake(Wake(session.session_key,
                     'This is your own time. Look at your desk: work on what you own, follow up on something you noticed, '

@@ -35,12 +35,18 @@ def quiet_until(engine, session_key, *, urgent=False, now=None):
     override = json.loads(engine.store.get_meta('quiet:'+session_key) or '{}')
     until = override['until'] if override.get('until', 0) > now else None
     at = until if until is not None else now
+    ranges = override.get('ranges', ())
     if 'range' in override:
-        tz = engine.policy.resolved_timezone()
-        ranges = (override['range'], *override.get('ranges', ()))
-        end = max((end for window in ranges if (end := quiet_end(at, window, tz)) is not None), default=None)
+        ranges = (override['range'], *ranges)
+        end = None
     else:
         end = engine.policy.quiet_until(urgent=urgent, now=at)
+    if ranges:
+        tz = engine.policy.resolved_timezone()
+        for window in ranges:
+            release = quiet_end(at, window, tz)
+            if release is not None and (end is None or release > end):
+                end = release
     return end if end is not None else until
 
 
@@ -54,6 +60,8 @@ def quiet_window(store, policy, key, now):
     if 'range' in override:
         return ', '.join((override['range'], *override.get('ranges', ()))), 'chat override', until
     source = policy.quiet_hours_source() if hasattr(policy, 'quiet_hours_source') else 'settings'
+    if override.get('ranges'):
+        return ', '.join(filter(None, (policy.quiet_hours, *override['ranges']))), source + ' + chat override', until
     return policy.quiet_hours, source, until
 
 

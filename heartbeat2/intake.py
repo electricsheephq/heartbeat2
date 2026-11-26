@@ -1059,6 +1059,7 @@ class Intake:
         if anchor and turn_id and anchor[0]==turn_id: del self.anchors[session_id]
         f=self.flights.get(session_id)
         if turn_id and self.turns.get(session_id) and turn_id!=self.turns[session_id]: return None
+        if f is None and not self.bindings.get(session_id): return None
         with s.atomic():
             key=f.session_key if f else self.bindings.get(session_id)
             if not key: return None

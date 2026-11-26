@@ -28,6 +28,7 @@ SCHEMA_VERSION = 1
 # Notifier v1 supplies a send callback with no end-to-end timeout.
 BACKEND_NOTICE_RESERVATION_S = 3600
 HELD_REPORT_OUTCOMES = frozenset({'progress', 'done', 'needs_attention', 'blocked'})
+OWN_TIME_SCHEDULE_STATUSES = frozenset({'active', 'proposed', 'paused'})
 # The characters str.strip() removes, so SQL trim() agrees with Python on what a blank summary is.
 _WHITESPACE = ''.join(chr(c) for c in range(0x3001) if chr(c).isspace())
 CACHE_FIELDS = {'cache_read_tokens','cache_write_tokens','warm_wakes','cold_wakes','cost_microusd','unpriced_calls'}
@@ -690,6 +691,7 @@ class Store:
                     episode_id=owner.episode_id,
                     first_notice_sent=chat.first_notice_sent or child.first_notice_sent,
                     busy_since=busy.busy_since, busy_epoch=busy.busy_epoch, **latest)
+                self._fold_own_time(root, key)
                 self.connection.execute("UPDATE wakes SET session_key=?,version=version+1 WHERE session_key=?", (root,key))
                 self.connection.execute("UPDATE events SET session_key=? WHERE session_key=? AND consumed_at IS NULL", (root,key))
                 self._fold_chat_meta(root,key)
@@ -698,6 +700,20 @@ class Store:
                 moved.add(key)
                 chat = self.get_session(root)
         return moved
+
+    def _fold_own_time(self, root, key):
+        def scheduled(wake):
+            return wake.trigger_json.get('own_time') and wake.status in OWN_TIME_SCHEDULE_STATUSES
+
+        if not any(scheduled(wake) for wake in self.list_wakes(root)): return
+        reason = 'folded_own_time'
+        for wake in self.list_wakes(key):
+            if scheduled(wake) and self.cas_wake(wake.id, wake.status, expected_version=wake.version,
+                                               status='cancelled', status_reason=reason):
+                for occurrence in self.list_occurrences(wake.id):
+                    if occurrence.state in {'pending', 'claimed'}:
+                        self.cas_occurrence(wake.id, occurrence.dedupe_key, occurrence.state, 'superseded',
+                                            attempt=occurrence.attempt, force_silent=True, error=reason)
 
     def _fold_chat_meta(self, root, key):
         def pair(prefix):
@@ -709,15 +725,16 @@ class Store:
         if self.get_meta('own_time_off:'+root)=='1' and self.get_meta('own_time_on:'+root):
             self.set_meta('own_time_on:'+root,'')
         before, child = pair('quiet:')
-        if child:
+        if before or child:
             a,b = (json.loads(value or '{}') for value in (before,child))
             ranges = list(dict.fromkeys(value for data in (a,b)
                            for value in (data.get('range'), *data.get('ranges', ())) if value))
             quiet = {}
-            if ranges or 'range' in a or 'range' in b:
-                quiet['range'] = ranges[0] if ranges else ''
-            if len(ranges) > 1:
-                quiet['ranges'] = ranges[1:]
+            # Absence of a primary range keeps the settings range live, even with extra overrides.
+            if 'range' in a and 'range' in b:
+                quiet['range'] = ranges.pop(0) if ranges else ''
+            if ranges:
+                quiet['ranges'] = ranges
             if until := max(a.get('until', 0), b.get('until', 0)):
                 quiet['until'] = until
             self.set_meta('quiet:' + root, _json(quiet))
