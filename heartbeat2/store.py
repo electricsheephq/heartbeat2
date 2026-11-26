@@ -151,7 +151,8 @@ def _validate_wake(wake: Wake):
 # and its child limit must still hold. It grows by one per wake a wake turn arms, not per occurrence.
 BACKEND_REINJECT_PREFIX = 'backend_reinject:'
 FAILURE_NOTICE_PREFIX = 'failure_notice:'
-OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'held_since:', 'ignored:', 'inject_failures:',
+HEADS_UP_PREFIX = 'headsup:'
+OCCURRENCE_META_PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', HEADS_UP_PREFIX, 'held_since:', 'ignored:', 'inject_failures:',
                             'model_refunded:', 'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:',
                             'stop_hint_offered:', 'supersede_on_refund:', BACKEND_REINJECT_PREFIX, FAILURE_NOTICE_PREFIX)
 POLLER_META = frozenset({'epoch', 'poller_pid', 'poller_started_at', 'last_tick_at', 'last_tick_monotonic',

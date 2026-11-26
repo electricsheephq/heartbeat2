@@ -18,7 +18,7 @@ import uuid
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, agreed_watcher, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
-from .store import BACKEND_REINJECT_PREFIX, FAILURE_NOTICE_PREFIX
+from .store import BACKEND_REINJECT_PREFIX, FAILURE_NOTICE_PREFIX, HEADS_UP_PREFIX
 from . import governor, serving, tui_probe
 
 LOG = logging.getLogger('heartbeat2')
@@ -1313,7 +1313,10 @@ class Poller:
                 status='failed',status_reason=o.state+(':'+o.error if o.error else ''))
             if (ended and self.store.backend and (owner_class(w) or w.urgent)
                     and (o.state=='dead' or o.state=='interrupted' and o.error!='app_invalidation')):
-                self.store.set_meta(FAILURE_NOTICE_PREFIX+o.id,json.dumps({'id':'failed:'+o.id,'attempts':0}))
+                data={'id':'failed:'+o.id,'attempts':0}
+                if o.api_calls: data['partial']=True
+                if self.store.get_meta(HEADS_UP_PREFIX+o.id): data['after_heads_up']=True
+                self.store.set_meta(FAILURE_NOTICE_PREFIX+o.id,json.dumps(data))
 
     def interrupt(self,o,cause,*,count_error=True):
         """One fenced settlement, shared by hooks, TTL and restart recovery."""

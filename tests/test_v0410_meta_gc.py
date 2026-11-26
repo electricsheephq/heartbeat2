@@ -6,7 +6,7 @@ from test_store import seed, store  # noqa: F401  (fixture)
 # Every meta key the plugin writes as '<prefix><occurrence id>'. A new per-occurrence key belongs here and in the store's list.
 PREFIXES = ('accepted:', 'engaged:', 'governed:', 'handoff_shown:', 'held_since:', 'ignored:', 'inject_failures:', 'model_refunded:',
             'not_before:', 'provider_error:', 'recovered:', 'report_shown:', 'spend:', 'stop_hint_offered:', 'supersede_on_refund:',
-            'backend_reinject:', 'failure_notice:')
+            'backend_reinject:', 'failure_notice:', 'headsup:')
 
 
 def missed(store, wake, n):

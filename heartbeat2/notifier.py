@@ -102,13 +102,18 @@ import uuid
 from datetime import datetime, timedelta
 from .policy import LOCAL_SURFACES, agreed_watcher, is_keep_warm, owner_class
 from .schedule import local_day
-from .store import FAILURE_NOTICE_PREFIX
+from .store import FAILURE_NOTICE_PREFIX, HEADS_UP_PREFIX
 from .model import Wake
 
 NOTIFY_AFTER_S = 600
 ACCEPTED_NOTIFY_AFTER_S = 900
 EPISODE_PREFIX = 'notify_episode:'
 ACCEPTED_HOLD_TEXT = 'Still queued in the app. Runs when the chat gets to it, or retries once if it was dropped.'
+
+
+def _notice_title(wake):
+    from .commands import _clip, _oneline
+    return _oneline(wake.title) or _clip(_oneline(wake.note), 60) or 'Your wake'
 
 
 def failure_notices(store, key):
@@ -137,7 +142,7 @@ def rearm_failed_wake(engine, key, sid):
                        title=w.title,reason=w.reason,urgent=w.urgent,
                        cancel_on_reply=w.cancel_on_reply,next_due_at=now))
     s.set_meta(FAILURE_NOTICE_PREFIX+o.id,json.dumps({**data,'rearmed':True}))
-    return ' '.join(w.title.split()) or 'Your wake'
+    return _notice_title(w)
 
 
 def held_wakes(engine, key, *, include_paused=False):
@@ -325,16 +330,22 @@ def notifier_line(engine, key=None):
 def notice_text(engine, chat, rows, since):
     surface='Desktop' if chat.platform=='desktop' else 'TUI'
     if rows[0][0].status=='failed':
-        title=' '.join(rows[0][0].title.split()) or 'Your wake'
-        return f"{title} didn't run; say 'again' in its {surface} chat to retry"
+        wake, occurrence, _ = rows[0]
+        data = json.loads(engine.store.get_meta(FAILURE_NOTICE_PREFIX+occurrence.id) or '{}')
+        title = _notice_title(wake)
+        outcome, retry = (('may not have finished', 'run it again') if data.get('partial') else ("didn't run", 'retry'))
+        # Also read the receipt at send time: a heads-up still being sent when the failure was queued lands after it.
+        if data.get('after_heads_up') or engine.store.get_meta(HEADS_UP_PREFIX+occurrence.id):
+            title = 'Update: ' + title
+            outcome += ' after all'
+        return f"{title} {outcome}; say 'again' in its {surface} chat to {retry}"
     if engine.store.backend and rows[0][1].state=='claimed':
-        from .commands import _clip, _oneline
         wakes={w.id: w for w,_,_ in rows}
         if len(wakes)>1:
             return (f"{len(wakes)} wakes are due but their {surface} chat isn't ready; "
                     "they'll run on your next message there.")
         wake=next(iter(wakes.values()))
-        title=_oneline(wake.title) or _clip(_oneline(wake.note),60)
+        title=_notice_title(wake)
         return f"{title} is due but its {surface} chat isn't ready; it'll run on your next message there."
     try:
         from hermes_constants import profile_name_for_home
@@ -388,7 +399,7 @@ class NotificationWorker:
                 candidates.extend((key,chat,failed) for key,chat in chats.items() for failed in failure_notices(s,key)
                                   if 'queued' not in failed[2] and not failed[2].get('failed'))
             for key,chat,failed in candidates:
-                rows=[(*failed[:2],now)] if failed else held_wakes(engine,key)
+                rows=[(*failed[:2],failed[2].get('since',now))] if failed else held_wakes(engine,key)
                 if not rows: continue
                 name=FAILURE_NOTICE_PREFIX+failed[1].id if failed else EPISODE_PREFIX+key
                 data=failed[2] if failed else episode(engine,key,rows)
@@ -396,7 +407,8 @@ class NotificationWorker:
                 data['since']=min(x[2] for x in rows)
                 if data.get('first') is not None and now-data['first']>=86400 and 'queued' not in data:
                     data['failed']=True
-                s.set_meta(name,json.dumps(data))
+                serialized=json.dumps(data)
+                if not failed or serialized!=s.get_meta(name): s.set_meta(name,serialized)
                 if 'queued' in data or data.get('failed') or now<data.get('next',0): continue
                 if s.backend:
                     if not failed and not _ready_backend_notices(s,rows,data,now): continue
@@ -499,6 +511,8 @@ class NotificationWorker:
                     if s.backend:
                         covered = {o.id for _, o, _ in rows if o.state == 'claimed'}
                         data['accepted_noticed'] = sorted(set(data.get('accepted_noticed', ())) | covered)
+                        # The turn's start ends the episode before a later interruption can queue a correction.
+                        for oid in covered: s.set_meta(HEADS_UP_PREFIX+oid,'1')
                     data.pop('error',None)
                 else:
                     error=str(result.get('error') or 'notifier refused').replace(text,'[notice]')
