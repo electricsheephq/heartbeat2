@@ -443,6 +443,11 @@ class Poller:
         for o in s.list_occurrences(state='started'):
             if own_only and not self._own_claim(o): continue
             if self._foreign_backend_claim(o): continue
+            # Only when the process itself is gone: a create-time mismatch on a live pid (Linux boot-time drift) waits for
+            # the timeout instead, so a live turn is never cut here.
+            if s.backend and o.pid is not None and o.pid!=os.getpid() and not serving.pid_alive(o.pid):
+                self.interrupt(o,'restart')
+                continue
             w=s.get_wake(o.wake_id)
             session=s.get_session(w.session_key)
             activity=max(o.started_at if o.started_at is not None else now,session.last_activity_at or 0 if session else 0)
