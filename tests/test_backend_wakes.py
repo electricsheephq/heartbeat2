@@ -1594,7 +1594,8 @@ def test_backend_acks_respects_busy_owner(hosts, monkeypatch, process_table, own
     assert db.cas_session(CHAT, {'busy_since': None}, busy_since=backend.clock.now(), busy_epoch=busy)
     backend.acks()
     settled = db.get_occurrence(o.wake_id, o.dedupe_key)
-    assert (settled.state, settled.error) == ('interrupted', 'no_session_end')
+    # A dead peer's claim is settled as a restart at once (v0.5.2 C1); only our own stalled turn waits for the timeout.
+    assert (settled.state, settled.error) == ('interrupted', 'no_session_end' if owner == 'self' else 'restart')
     session = db.get_session(CHAT)
     assert (session.busy_epoch, session.busy_since) == (
         (busy, backend.clock.now()) if keep else (None, None))
