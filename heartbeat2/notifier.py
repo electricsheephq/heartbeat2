@@ -125,15 +125,27 @@ def failure_notices(store, key):
 def rearm_failed_wake(engine, key, sid):
     s,now=engine.store,engine.clock.now()
     if not engine.session_can_receive(s.get_session(key)) or not engine.policy.cap_gate(*s.active_wake_counts(key)).allowed: return
-    # The window first: compression_tip reads Hermes' state DB, and old failure records stay until gc.
-    recent=((w,o,d) for w,o,d in failure_notices(s,key)
-            if 0<=now-d.get('queued',-86400)<86400
-            and (w.armed_session_id==sid
-                 or w.armed_session_id and engine.compression_tip(w.armed_session_id)==sid))
-    latest=max(recent,key=lambda row:row[2]['queued'],default=None)
-    if latest is None: return
+    keys=(key,)
+    for include_aliases in (False, True):
+        if include_aliases:
+            if not sid: return
+            # Rotating compaction repoints the original chat without moving its wakes to the new key.
+            keys=(chat.session_key for chat in s.list_sessions()
+                  if chat.session_key!=key and chat.current_session_id==sid)
+        # The window comes first because compression_tip reads Hermes' state DB.
+        recent=((w,o,d) for candidate_key in keys for w,o,d in failure_notices(s,candidate_key)
+                if 'queued' in d and 0<=now-d['queued']<86400
+                and (w.armed_session_id==sid
+                     or w.armed_session_id and engine.compression_tip(w.armed_session_id)==sid))
+        latest=max(recent,key=lambda row:row[2]['queued'],default=None)
+        if latest is not None: break
+    else:
+        return
     w,o,data=latest
     if data.get('rearmed'): return
+    if w.session_key!=key:
+        key=w.session_key
+        if not engine.session_can_receive(s.get_session(key)) or not engine.policy.cap_gate(*s.active_wake_counts(key)).allowed: return
     s.create_wake(Wake(key,w.note,'at',platform=w.platform,chat_type=w.chat_type,chat_id=w.chat_id,
                        armed_session_id=sid,creator=w.creator,owner_requested=w.owner_requested,
                        agent_edited=w.agent_edited,babysit=w.babysit,role=w.role,
