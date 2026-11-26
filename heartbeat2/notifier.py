@@ -334,7 +334,8 @@ def notice_text(engine, chat, rows, since):
         data = json.loads(engine.store.get_meta(FAILURE_NOTICE_PREFIX+occurrence.id) or '{}')
         title = _notice_title(wake)
         outcome, retry = (('may not have finished', 'run it again') if data.get('partial') else ("didn't run", 'retry'))
-        if data.get('after_heads_up'):
+        # Also read the receipt at send time: a heads-up still being sent when the failure was queued lands after it.
+        if data.get('after_heads_up') or engine.store.get_meta(HEADS_UP_PREFIX+occurrence.id):
             title = 'Update: ' + title
             outcome += ' after all'
         return f"{title} {outcome}; say 'again' in its {surface} chat to {retry}"

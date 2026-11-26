@@ -4,7 +4,7 @@ import json
 import pytest
 
 from heartbeat2.notifier import EPISODE_PREFIX, NOTIFY_AFTER_S, notice_text
-from heartbeat2.store import FAILURE_NOTICE_PREFIX
+from heartbeat2.store import FAILURE_NOTICE_PREFIX, HEADS_UP_PREFIX
 from test_backend_wakes import CHAT, hosts, notice_sends, tui_queue
 from test_watchdog_retry import NOTICE, WATCHDOG, reminder, start
 
@@ -134,6 +134,19 @@ def test_legacy_failure_record_renders_v051_text(reminder):
     now = engine.clock.now()
     rows = [(engine.store.get_wake(wid), occurrence, now)]
     assert notice_text(engine, engine.store.get_session(CHAT), rows, now) == NOTICE.format(surface='Desktop')
+
+
+def test_heads_up_receipt_after_failure_queued_still_corrects(reminder):
+    # The heads-up send can finish after terminal_one_shot queued the failure record without the flag.
+    engine, wid, _ = reminder()
+    engine.intake.on_session_end(session_id=CHAT, failed=True)
+    occurrence, = engine.store.list_occurrences(wid)
+    engine.store.set_meta(FAILURE_NOTICE_PREFIX + occurrence.id, json.dumps({'id': 'failed:' + occurrence.id, 'attempts': 0}))
+    engine.store.set_meta(HEADS_UP_PREFIX + occurrence.id, '1')
+    now = engine.clock.now()
+    rows = [(engine.store.get_wake(wid), occurrence, now)]
+    assert notice_text(engine, engine.store.get_session(CHAT), rows, now) == (
+        "Update: Reminder didn't run after all; say 'again' in its Desktop chat to retry")
 
 
 @pytest.mark.parametrize('gate', ['no-notify-via', 'quiet-hours'])
