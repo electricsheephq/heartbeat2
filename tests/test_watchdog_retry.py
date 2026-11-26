@@ -103,6 +103,72 @@ def test_again_rearms_once(reminder, message, age, rearm):
     assert len(e.store.list_occurrences(session_key=CHAT)) == len(e.ctx.calls) == 1 + rearm
 
 
+def test_again_rearms_once_at_compression_tip(reminder):
+    e, wid, sends = reminder()
+    e.intake.on_session_end(session_id=CHAT, failed=True)
+    e.tick()
+    assert e.notifications.idle.wait(2) and len(sends) == 1
+    # A fresh intake has no binding for the old session, but the failed wake persists.
+    e.intake.bindings.pop(CHAT)
+    e.compression_tip = lambda sid: 'tip' if sid == CHAT else sid
+
+    result = e.intake.pre_llm_call(session_id='tip', turn_id='owner', user_message='again')
+    assert result == {'context': "HeartBeat re-queued 'Reminder'; it runs as its own turn next, so only acknowledge."}
+    rearmed, = e.store.list_wakes(CHAT, status='active')
+    assert rearmed.armed_session_id == 'tip'
+    assert e.store.get_wake(wid).armed_session_id == CHAT
+
+    e.intake.on_session_end(session_id='tip', turn_id='owner')
+    assert e.intake.pre_llm_call(session_id='tip', turn_id='duplicate', user_message='again') is None
+    assert {wake.id for wake in e.store.list_wakes(CHAT)} == {wid, rearmed.id}
+
+
+def test_again_rearms_at_final_compression_tip(reminder):
+    e, wid, sends = reminder()
+    e.intake.on_session_end(session_id=CHAT, failed=True)
+    e.tick()
+    assert e.notifications.idle.wait(2) and len(sends) == 1
+    e.intake.bindings.pop(CHAT)
+    e.compression_tip = lambda sid: 'tip2' if sid in {CHAT, 'tip1'} else sid
+
+    assert e.intake.pre_llm_call(session_id='tip1', turn_id='intermediate', user_message='again') is None
+    assert [wake.id for wake in e.store.list_wakes(CHAT)] == [wid]
+    e.intake.on_session_end(session_id='tip1', turn_id='intermediate')
+
+    result = e.intake.pre_llm_call(session_id='tip2', turn_id='owner', user_message='again')
+    assert result == {'context': "HeartBeat re-queued 'Reminder'; it runs as its own turn next, so only acknowledge."}
+    rearmed, = e.store.list_wakes(CHAT, status='active')
+    assert rearmed.armed_session_id == 'tip2'
+
+
+def test_again_ignores_unrelated_session(reminder):
+    e, wid, sends = reminder()
+    e.intake.on_session_end(session_id=CHAT, failed=True)
+    e.tick()
+    assert e.notifications.idle.wait(2) and len(sends) == 1
+    e.compression_tip = lambda sid: 'tip' if sid == CHAT else sid
+
+    assert e.intake.pre_llm_call(session_id='other', turn_id='unrelated', user_message='again') is None
+    assert [wake.id for wake in e.store.list_wakes(CHAT)] == [wid]
+
+
+def test_again_keeps_exact_match_with_unknown_compression_tip(reminder):
+    e, wid, sends = reminder()
+    e.intake.on_session_end(session_id=CHAT, failed=True)
+    e.tick()
+    assert e.notifications.idle.wait(2) and len(sends) == 1
+    e.compression_tip = lambda sid: None
+
+    assert e.intake.pre_llm_call(session_id='tip', turn_id='unknown', user_message='again') is None
+    assert [wake.id for wake in e.store.list_wakes(CHAT)] == [wid]
+    e.intake.on_session_end(session_id='tip', turn_id='unknown')
+
+    result = e.intake.pre_llm_call(session_id=CHAT, turn_id='owner', user_message='again')
+    assert result == {'context': "HeartBeat re-queued 'Reminder'; it runs as its own turn next, so only acknowledge."}
+    rearmed, = e.store.list_wakes(CHAT, status='active')
+    assert rearmed.armed_session_id == CHAT
+
+
 @pytest.mark.parametrize('fields', [
     pytest.param({'creator': 'user', 'urgent': False}, id='user'),
     pytest.param({'creator': 'user', 'agent_edited': True}, id='agent-edited'),

@@ -120,7 +120,10 @@ def failure_notices(store, key):
 def rearm_failed_wake(engine, key, sid):
     s,now=engine.store,engine.clock.now()
     if not engine.session_can_receive(s.get_session(key)) or not engine.policy.cap_gate(*s.active_wake_counts(key)).allowed: return
-    recent=((w,o,d) for w,o,d in failure_notices(s,key) if w.armed_session_id==sid and 0<=now-d.get('queued',-86400)<86400)
+    recent=((w,o,d) for w,o,d in failure_notices(s,key)
+            if (w.armed_session_id==sid
+                or w.armed_session_id and engine.compression_tip(w.armed_session_id)==sid)
+            and 0<=now-d.get('queued',-86400)<86400)
     latest=max(recent,key=lambda row:row[2]['queued'],default=None)
     if latest is None: return
     w,o,data=latest
