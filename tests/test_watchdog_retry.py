@@ -141,6 +141,21 @@ def test_again_rearms_at_final_compression_tip(reminder):
     assert rearmed.armed_session_id == 'tip2'
 
 
+def test_again_skips_compression_lookup_for_old_notices(reminder):
+    e, wid, sends = reminder()
+    e.intake.on_session_end(session_id=CHAT, failed=True)
+    e.tick()
+    assert e.notifications.idle.wait(2) and len(sends) == 1
+    e.intake.bindings.pop(CHAT)
+    looked_up = []
+    e.compression_tip = lambda sid: looked_up.append(sid) or 'tip'
+    e.clock.advance(86400)
+
+    assert e.intake.pre_llm_call(session_id='tip', turn_id='late', user_message='again') is None
+    assert looked_up.count(CHAT) == 0
+    assert [wake.id for wake in e.store.list_wakes(CHAT)] == [wid]
+
+
 def test_again_ignores_unrelated_session(reminder):
     e, wid, sends = reminder()
     e.intake.on_session_end(session_id=CHAT, failed=True)
