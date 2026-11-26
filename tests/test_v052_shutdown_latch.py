@@ -138,6 +138,36 @@ def test_completed_turn_during_shutdown_finishes(reminder):
     assert sends == []
 
 
+
+@pytest.mark.parametrize('filename,caller', [
+    ('/fixture/tui_gateway/session_reaper.py', '_stop_turns_before_exit'),
+    ('/fixture/tui_gateway/session_reaper.py', '_handle_exit_flush_signal'),
+    ('/fixture/tui_gateway/server.py', '_shutdown_sessions'),
+])
+def test_each_hermes_exit_frame_sets_the_latch(reminder, filename, caller):
+    engine, wid, sends = reminder()
+    stop_from(engine, filename, caller)
+    assert serving._EXITING
+    occurrence, = engine.store.list_occurrences(wid)
+    assert occurrence.state == 'started'
+    flush_notices(engine)
+    assert sends == []
+
+
+def test_tui_shutdown_finalize_leaves_the_wake_for_restart(reminder, process_table):
+    # Hermes's tui_shutdown close finalizes without a turn id or exit reason (session_lifecycle._finalize_session).
+    engine, wid, sends = reminder(source='tui')
+    stop_from(engine, '/fixture/tui_gateway/server.py', '_shutdown_sessions')
+    engine.runtime_status.__self__.hook('on_session_end', completed=False, interrupted=True, session_id=CHAT,
+                                        model='unknown', platform='tui')
+    occurrence, = engine.store.list_occurrences(wid)
+    assert occurrence.state == 'started'
+    restart(engine, wid, process_table)
+    flush_notices(engine)
+    assert engine.store.get_occurrence(wid, occurrence.dedupe_key).error == 'restart'
+    assert sends == [('owner', NOTICE.format(surface='TUI'))]
+
+
 _HANDOFFS = {'Thread', 'Timer', 'submit', 'run_in_executor', 'start_new_thread', 'call_soon_threadsafe', 'to_thread'}
 
 
@@ -155,7 +185,10 @@ def _runs_on_this_thread(function, callee):
 def test_hermes_shutdown_callers_remain_synchronous():
     pins = Path(os.environ.get('HEARTBEAT2_HERMES_PINS', Path.home() / 'repos' / 'hermes-pins'))
     if pins.is_dir():
-        roots = [pins / pin for pin in ('v0.21.6', 'v0.21.7', 'v0.23.0', 'v0.23.2', 'main-04eb00c')]
+        roots = [pins / pin for pin in ('v0.21.6', 'v0.21.7', 'v0.23.0', 'v0.23.2', 'main-04eb00c')
+                 if (pins / pin / 'tui_gateway').is_dir()]
+        if not roots:
+            pytest.skip('no Hermes pin with tui_gateway in the pins directory')
     else:
         spec = find_spec('tui_gateway')
         if spec is None or spec.origin is None:
