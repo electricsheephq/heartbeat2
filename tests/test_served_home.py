@@ -7,6 +7,7 @@ import fcntl
 import json
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -386,13 +387,20 @@ def backend_runtime(tmp_path, clock, monkeypatch):
     ctx._manager.has_tui_message_injector = True
     ctx.session_surface = lambda: 'desktop'
     rt = Runtime(ctx, clock=clock, bootstrap_interval=.01, tick_interval=1)
+    # An app backend takes its lock inside the poller's first tick, so holds() can turn true mid-tick. A tick that
+    # reads the clock before the advance below and schedules its next tick after it never runs again on this frozen
+    # clock, and the wake never comes due. The thread waits on _wake only between ticks, after it has scheduled the
+    # next one: advance once it has waited there.
+    idle, wait = threading.Event(), rt._wake.wait
+    rt._wake.wait = lambda timeout=None: idle.set() or wait(timeout)
     try:
         e = rt.get_engine()
         bind_chat(monkeypatch, e, CHAT, platform='local')
         assert json.loads(rt.tool(ARM))['armed']
         rt.start()
         # Wall-clock waits on the poller thread: generous, since they return as soon as it acts (slow CI runners).
-        assert until(lambda: holds(rt), timeout=10)
+        assert idle.wait(timeout=10)
+        assert holds(rt)
         clock.advance(61)
         assert ctx.injected.wait(timeout=10)
         yield rt, e
