@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.2 — 2026-11-27
+
+- If a one-time app wake reached the model before it was cut off, its failure notice now says it "may not have finished; say 'again' in its Desktop chat to run it again", not that it didn't run. (#241)
+- If a heads-up already said a wake would run on your next message and the wake then fails, the failure notice reads as a correction ("Update: … didn't run after all"). Both notices now name the wake the same way: its title, or the start of its note when it has no title. (#241)
+- `again` re-runs only a wake whose failure notice was actually sent; a bare `again` with no notice re-runs nothing. It works after Hermes compacts the chat in place (the default). (#241)
+- If the app's backend shuts down or restarts while a wake's turn runs, the next backend now reports the wake as interrupted and sends the failure notice. Before, Hermes reported it like Stop and nothing was said. A real Stop still stays silent. (#241)
+- Safety net: if an app backend ever gives up its lock while it is still exiting, the backend that takes over settles a wake the old one left running as soon as the old process is gone, rather than after the no-activity timeout (at least 2 hours), and the failure notice follows. (#241)
+- **Known limit.** If Hermes is set to compact a chat into a new session (`compression.in_place: false`; the default since Hermes 0.23.0 compacts in place), wakes armed in that Desktop or TUI chat aren't delivered after the compaction and `again` there finds nothing. Keep the default; a fix is planned (#255).
+- **Known limit.** A client crash, another window taking over the session, or an orphaned-session cleanup still reads as Stop and stays silent until Hermes reports why a turn stopped (NousResearch/hermes-agent#160325).
+
 ## 0.5.1 — 2026-11-26
 
 - A one-time app wake cut by Hermes' watchdog before any model call is re-sent once if HeartBeat recorded no provider error. (#241)
