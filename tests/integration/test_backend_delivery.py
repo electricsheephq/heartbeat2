@@ -167,7 +167,8 @@ def cluster(tmp_path, clock, monkeypatch):
             return parent.recv()
 
         try:
-            assert parent.poll(20), f'initialization timed out in process {proc.pid}'
+            # A spawned child imports Hermes and the plugin from cold; on a loaded CI runner that can pass 20 s.
+            assert parent.poll(90), f'initialization timed out in process {proc.pid}'
             assert parent.recv() == 'ready'
             yield ask
         finally:
