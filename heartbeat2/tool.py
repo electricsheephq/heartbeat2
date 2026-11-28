@@ -132,6 +132,10 @@ class Tool:
     def __init__(self, engine, session_key_fn=current_session_key):
         self.engine, self.session_key_fn = engine, session_key_fn
 
+    def chat_platform(self, surface=''):
+        return session_platform(session_env('HERMES_SESSION_PLATFORM'), self.engine.ctx,
+                                surface=surface, source=session_env('HERMES_SESSION_SOURCE'))
+
     def app_backend_unavailable(self, *, surface='', key=None):
         platform = session_env('HERMES_SESSION_PLATFORM')
         source = session_env('HERMES_SESSION_SOURCE')
@@ -153,25 +157,27 @@ class Tool:
         if store.backend or bound_platform:
             source = session_env('HERMES_SESSION_SOURCE') if store.backend else ''
             platform = session_platform(bound_platform, self.engine.ctx, surface=surface, source=source)
-        with store.atomic():
-            if store.backend and platform in LOCAL_SURFACES and self.engine.eligible():
-                if not store.stamp_backend(key): return None
-                chat_type = chat_type or 'dm'
-            s = store.get_session(key)
-            if s is None:
-                if store.backend and store.get_meta('host:' + key) != 'backend': return None
-                store.upsert_session(Session(key, platform=platform, chat_type=chat_type,
-                    chat_id=session_env('HERMES_SESSION_CHAT_ID'), current_session_id=session_env('HERMES_SESSION_ID')))
-            else:
-                updates = {}
-                if bound_platform == 'local' and s.platform != platform and not (platform == 'local' and s.platform in LOCAL_SURFACES):
-                    updates['platform'] = platform
-                if store.backend and platform in LOCAL_SURFACES:
-                    if s.platform in ('', 'local'): updates['platform'] = platform
-                    if not s.chat_type: updates['chat_type'] = chat_type
-                if updates:
-                    store.cas_session(key, {'platform':s.platform, 'chat_type':s.chat_type}, **updates)
-            return store.get_session(key)
+        with store.thread_lock:
+            key = self.engine.chat_key(key,self.chat_platform(surface))
+            with store.atomic():
+                if store.backend and platform in LOCAL_SURFACES and self.engine.eligible():
+                    if not store.stamp_backend(key): return None
+                    chat_type = chat_type or 'dm'
+                s = store.get_session(key)
+                if s is None:
+                    if store.backend and store.get_meta('host:' + key) != 'backend': return None
+                    store.upsert_session(Session(key, platform=platform, chat_type=chat_type,
+                        chat_id=session_env('HERMES_SESSION_CHAT_ID'), current_session_id=session_env('HERMES_SESSION_ID')))
+                else:
+                    updates = {}
+                    if bound_platform == 'local' and s.platform != platform and not (platform == 'local' and s.platform in LOCAL_SURFACES):
+                        updates['platform'] = platform
+                    if store.backend and platform in LOCAL_SURFACES:
+                        if s.platform in ('', 'local'): updates['platform'] = platform
+                        if not s.chat_type: updates['chat_type'] = chat_type
+                    if updates:
+                        store.cas_session(key, {'platform':s.platform, 'chat_type':s.chat_type}, **updates)
+                return store.get_session(key)
 
     def handle(self, args, *, session_id='', **kwargs):
         result=self._handle(args,session_id=session_id,**kwargs)

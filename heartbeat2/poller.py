@@ -18,7 +18,7 @@ import uuid
 from .model import Wake, RECURRING_KINDS, TIME_KINDS, PROBE_KINDS, EVENT_KINDS, agent_authored
 from .policy import LOCAL_SURFACES, MESSAGING_PLATFORMS, deliverable_platform, owner_class, agreed_watcher, is_owner, is_watcher, one_shot, holds_messages, is_keep_warm, is_direct_chat, sleeps
 from .schedule import time_due, local_day, local_neighbours, parse_duration, next_every, zone
-from .store import BACKEND_REINJECT_PREFIX, FAILURE_NOTICE_PREFIX, HEADS_UP_PREFIX
+from .store import BACKEND_REINJECT_PREFIX, FAILURE_NOTICE_PREFIX, HEADS_UP_PREFIX, OWN_TIME_SCHEDULE_STATUSES
 from . import governor, serving, tui_probe
 
 LOG = logging.getLogger('heartbeat2')
@@ -65,6 +65,8 @@ class Poller:
         self.boot_at=clock.now() if boot_at is None else boot_at
         self.paused,self.jitter=paused,jitter or (lambda: random.uniform(-1,1))
         self.compression_tip=compression_tip or self._compression_tip
+        self._chat_keys={}
+        self._missing_chat_keys={}
         from .intake import Intake
         from .tool import Tool,current_session_key
         self.intake=Intake(self)
@@ -205,6 +207,7 @@ class Poller:
 
     def reconcile(self):
         s=self.store
+        if self.process_start: self.fold_split_chats()
         with s.atomic():
             if self.process_start and s.backend: s.remove_backend_turn_order()
             noticed=set()
@@ -252,6 +255,104 @@ class Poller:
                 return db.get_compression_tip(sid)
         except Exception:
             return None
+
+    def _local_ancestors(self,live):
+        from hermes_state import SessionDB
+        s=self.store
+        ancestors,seen=[],{live}
+        with SessionDB(db_path=self.ctx._manager.home_path/'state.db',read_only=True) as db:
+            row=db.get_session(live)
+            if not row: return None  # Hermes may not have written this new session yet.
+            while parent:=row.get('parent_session_id'):
+                if parent in seen or len(seen)>=200: raise ValueError('invalid session lineage')
+                seen.add(parent)
+                chat=s.get_session(parent)
+                if chat and chat.platform in LOCAL_SURFACES: ancestors.append(parent)
+                row=db.get_session(parent)
+                if not row: break
+        return ancestors
+
+    def _state_db_stamp(self):
+        # A missing session can appear later, including in the WAL before a checkpoint.
+        path=self.ctx._manager.home_path/'state.db'
+
+        def stamp(file):
+            info=file.stat()
+            return info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns
+
+        try:
+            main=stamp(path)
+            try: wal=stamp(path.with_name('state.db-wal'))
+            except FileNotFoundError: wal=None
+            return main,wal
+        except OSError:
+            return None
+
+    def chat_key(self,live,platform='',*,startup=False,fold=True):
+        """The oldest local chat on the same Hermes compression chain."""
+        if not live or live=='default' or platform and platform!='local' and platform not in LOCAL_SURFACES: return live
+        s=self.store
+        with s.thread_lock:
+            chat=s.get_session(live)
+            if chat is not None and chat.platform not in LOCAL_SURFACES: return live
+            if chat is None and (platform not in LOCAL_SURFACES or s.other_host_has_session(live)): return live
+            if not startup and (cached:=self._chat_keys.get(live)):
+                if cached==live and chat is not None: return live
+                if cached!=live and chat is None:
+                    root=s.get_session(cached)
+                    if root and root.platform in LOCAL_SURFACES: return cached
+            try:
+                stamp=self._state_db_stamp()
+                if not startup and stamp is not None and self._missing_chat_keys.get(live)==stamp: return live
+                ancestors=self._local_ancestors(live)
+                if ancestors is None:
+                    if stamp is not None: self._missing_chat_keys[live]=stamp
+                    return live
+                self._missing_chat_keys.pop(live,None)
+                chain=[]
+                if ancestors:
+                    tip=self.compression_tip(live)
+                    if not tip: return live
+                    for key in reversed(ancestors):
+                        ancestor_tip=self.compression_tip(key)
+                        if not ancestor_tip: return live  # No memo on read failure.
+                        if ancestor_tip==tip: chain.append(key)
+            except Exception:
+                return live
+            root=live
+            if chain:
+                root,*younger=chain
+                if chat is not None: younger.append(live)
+            else:
+                younger=[]
+            if younger:
+                if not fold: return root  # Delivery checks must not move wakes or remap hooks.
+                moved=s.fold_chat(root,younger)
+                self.intake.remap_chat_keys(root,moved)
+                for key,target in self._chat_keys.items():
+                    if target in moved: self._chat_keys[key]=root
+            self._chat_keys[live]=root
+            return root
+
+    def fold_split_chats(self):
+        with self.store.thread_lock:
+            chats=[s for s in self.store.list_sessions() if s.platform in LOCAL_SURFACES]
+            if len(chats)<2: return
+            tips=set()
+            for chat in chats:
+                try: tip=self.compression_tip(chat.session_key)
+                except Exception: continue
+                if tip and tip!=chat.session_key and tip not in tips:
+                    # Starting from the live tip puts all stored ancestors in one fold.
+                    self.chat_key(tip,chat.platform,startup=True)
+                    tips.add(tip)
+
+    def deliver_key(self,w,session):
+        if session and session.platform in LOCAL_SURFACES:
+            tip=self.compression_tip(w.session_key)
+            if tip and tip!=w.session_key and self.chat_key(tip,session.platform,fold=False)==w.session_key:
+                return tip
+        return w.session_key
 
     def _probe(self,wake):
         from .probes import check
@@ -510,10 +611,10 @@ class Poller:
         # An accepted prompt may still be queued. The clock alone cannot retire it.
         self._hold_backend_app_closed(w,o,keep_claim=True)
 
-    @staticmethod
-    def _backend_prompt_missing(w,o):
+    def _backend_prompt_missing(self,w,o):
         # tui_probe loads up front with every module (#207); it resolves Hermes' TUI server only here.
-        return tui_probe.queued_or_inflight(w.session_key,f'⟦pulse o:{o.id} a:{o.attempt}') is False
+        key=self.deliver_key(w,self.store.get_session(w.session_key))
+        return tui_probe.queued_or_inflight(key,f'⟦pulse o:{o.id} a:{o.attempt}') is False
 
     def _resend_backend_claim(self,o,error):
         s=self.store
@@ -850,6 +951,12 @@ class Poller:
             if session.last_human_at is None or not session.episode_id: continue
             wid='owntime_'+hashlib.sha256(session.session_key.encode()).hexdigest()[:16]
             w=s.get_wake(wid)
+            if session.platform in LOCAL_SURFACES and (w is None or w.status not in OWN_TIME_SCHEDULE_STATUSES):
+                # A folded chat can already have a live schedule under its younger wake ID.
+                schedules=[item for item in s.list_wakes(session.session_key)
+                           if item.trigger_json.get('own_time') and item.status_reason!='folded_own_time']
+                w=next((item for item in schedules if item.status in OWN_TIME_SCHEDULE_STATUSES),
+                       w or next(iter(schedules),None))
             if w is None:
                 s.create_wake(Wake(session.session_key,
                     'This is your own time. Look at your desk: work on what you own, follow up on something you noticed, '
@@ -1202,7 +1309,7 @@ class Poller:
             resend.update(prompt_attempt=o.attempt,prompt_size=len(text),prompt_digest=digest)
             s.set_meta(BACKEND_REINJECT_PREFIX+o.id,json.dumps(resend))
         inject_raised=False
-        try: accepted=self.ctx.inject_message(text,session_key=w.session_key)
+        try: accepted=self.ctx.inject_message(text,session_key=self.deliver_key(w,session))
         except Exception as exc:
             inject_raised=True
             accepted=False
